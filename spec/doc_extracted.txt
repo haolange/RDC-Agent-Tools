@@ -1,0 +1,927 @@
+﻿0001: RenderDoc MCP 工具集
+0002: 遵照“为 Agent 提供与人类专家通过 GUI 操作等价的 API”这一核心思想，本报告对 RenderDoc 的全部 UI 功能进行了地毯式分析与映射，旨在构建一套真正全面、强大且具备第一性原理的 MCP (Model Context Protocol) 工具集，确保 AI Agent 能够复现人类专家在 RenderDoc UI 上的任何调试操作。
+0003: 一，设计哲学
+0004: 1.1，目标
+0005: 本工具集的设计旨在实现两大核心目标，以赋能 Agent 在 RenderDoc 生态系统中的调试能力：
+0006: 能力对齐 RenderDoc GUI：确保 Agent 无需模拟图形用户界面 (GUI) 的鼠标操作，即可获取与 GUI 面板等效的 state、resource、history 和 debug 数据及其导出物。
+0007: 补齐人类专家的“组合技”：鉴于 GUI 仅提供可视化信息，而人类专家常依赖固定的排查流程（例如：pixel history → state diff → resource lifetime → shader hotfix），本工具集在原子工具之上增设了 Diagnostics 和 Macro Workflows 两层工具。此举旨在为 Agent 提供可复用、可解释且可验证的排查机制。
+0008: 1.2，原则
+0009: 本工具集遵循以下五项关键设计原则，以确保其高效性、可维护性和可扩展性：
+0010: 显式句柄管理 (Explicit Handles)：所有核心对象（如 capture file、replay session、remote connection、shader debug session）均通过其对应的 *_id 进行显式引用，从而避免了隐式全局状态可能导致的混淆和错误。
+0011: 大数据一律走 Artifact (Files as Artifacts)：对于texture、buffer、mesh、shader binary 等大型数据对象，默认将其导出为文件并返回相应的 *_path。得益于Native Multi Modality，此策略有效避免了 JSON 响应过大，提升了数据传输效率。
+0012: 原子化 + 正交性 (Primitives + Orthogonality)：基础工具被设计为尽可能原子化，以提供高度的灵活性。同时，宏工具在输出结果的同时提供 trace（内部关键步骤），确保操作的可审计性和可复现性。
+0013: 跨 API 的“共同语义”优先：在不同图形 API（如 D3D12/Vulkan）之间，同名工具力求返回统一的语义。特定于 API 的字段则被封装在 api_specific 子字段中，以保持接口的简洁性和一致性。
+0014: “能解释”是第一等公民：Diagnostics 和 Macro 工具的输出不仅提供数据，更重要的是提供 why（结构化证据和建议的下一步行动），显著降低了 Agent 做出错误判断的概率。
+0016: 二，通用数据结构约定
+0017: 2.1，句柄与标识
+0018: 名称
+0019: 类型
+0020: 说明
+0021: capture_file_id
+0022: str
+0023: 由 rd.capture.open_file 返回的捕获文件句柄
+0024: session_id
+0025: str
+0026: 由 rd.capture.open_replay 返回的 Replay Session 句柄
+0027: remote_id
+0028: str
+0029: 由 rd.remote.connect 返回的远程连接句柄
+0030: shader_debug_id
+0031: str
+0032: 由 rd.shader.debug_start 返回的 shader debug 句柄
+0033: resource_id / texture_id / buffer_id / shader_id
+0034: str
+0035: 资源标识 (RenderDoc ResourceId 的可序列化形式)
+0036: event_id
+0037: int
+0038: RenderDoc eventId (Replay 时间轴核心坐标)
+0039: frame_index
+0040: int
+0041: 帧索引 (从 0 或 1 开始由实现约定；建议 0-based)
+0042: stage
+0043: str
+0044: Shader stage：VS/HS/DS/GS/PS/CS/AS/MS/RT (按平台能力可裁剪)
+0045: subresource
+0046: dict
+0047: 纹理子资源：{mip:int, slice:int, sample:int}
+0048: rect
+0049: dict
+0050: 矩形区域：{x:int, y:int, w:int, h:int}
+0052: 2.2，返回值通用约定
+0053: 除特别说明外，所有工具的返回值均包含以下字段：
+0054: success (bool)：指示操作是否成功完成。
+0055: error_message (str, optional)：若操作失败，提供详细的失败原因。
+0056: 当返回的数据量可能非常大时，工具将优先返回 *_path（即 artifact 文件的路径），而非直接在响应中内联数据，以优化性能和传输效率。
+0058: 三，工具总览
+0059: RenderDoc 工具集共包含 196 个工具，其设计遵循清晰的分层架构，以满足不同粒度的调试与分析需求：
+0060: Core/Replay/Inspect（原子工具）：这些工具旨在提供与 RenderDoc GUI 面板一致的数据访问能力，是进行底层操作的基础。
+0061: Diagnostics（启发式诊断）：此层工具将常见的性能瓶颈和错误模式固化为可复用的检查项，帮助用户快速定位问题。
+0062: Macro Workflows（专家工作流）：该层工具将专家级的排查流程和最佳实践封装成闭环的工作流，以自动化复杂问题的诊断过程。
+0063: 3.1，核心与环境管理 (Core & Environment)
+0064: 工具名称
+0065: 功能描述
+0066: 主要参数
+0067: 返回结果
+0068: rd.core.init
+0069: 初始化 RenderDoc Replay/Remote 运行时；建立对象池与临时目录；必须在首次使用前调用一次。
+0070: global_env (dict, 可选): 全局配置，例如 {temp_dir, artifact_dir, log_level, replay_cache_size_mb}<br>enable_remote (bool, 可选, 默认 true): 是否启用 rd.remote.*<br>enable_app_api (bool, 可选, 默认 false): 是否启用 rd.app.*（需要目标进程内集成 App API）
+0071: success (bool)<br>api_version (str): RenderDoc API 版本（如 '1.xx'）<br>capabilities (dict): 支持的图形 API / 平台能力摘要<br>error_message (str, 可选)
+0072: rd.core.shutdown
+0073: 关闭运行时并释放所有资源（Replay Session、Remote 连接、临时文件句柄）。
+0074: 无
+0075: success (bool)<br>released (dict): {sessions, capture_files, remote_connections, temp_files}<br>error_message (str, 可选)
+0076: rd.core.get_version
+0077: 获取 RenderDoc 运行时版本与构建信息。
+0078: 无
+0079: success (bool)<br>version (str)<br>commit_hash (str, 可选)<br>build_date (str, 可选)<br>error_message (str, 可选)
+0080: rd.core.get_capabilities
+0081: 获取当前环境能力详情（Replay、远程抓帧、shader debug、counter 支持等）。
+0082: detail_level (str, 可选, 默认 'summary'): 'summary' | 'full'
+0083: success (bool)<br>capabilities (dict): 例如 {replay: {...}, remote: {...}, shader_debug: {...}, counters: {...}}<br>error_message (str, 可选)
+0084: rd.core.set_config
+0085: 设置运行时配置（对后续调用生效）。
+0086: config (dict): {artifact_dir?, temp_dir?, max_artifact_bytes?, default_image_format?, default_mesh_format?, log_level?}
+0087: success (bool)<br>applied (dict): 实际生效的配置（包含默认值补全）<br>error_message (str, 可选)
+0088: rd.core.get_config
+0089: 读取当前运行时配置。
+0090: 无
+0091: success (bool)<br>config (dict)<br>error_message (str, 可选)
+0092: rd.core.set_log_level
+0093: 设置内部日志等级，便于定位 MCP Server 与 RenderDoc 侧错误。
+0094: level (str): 'trace'|'debug'|'info'|'warn'|'error'
+0095: success (bool)<br>error_message (str, 可选)
+0096: rd.core.get_logs
+0097: 读取内部日志（可按时间/级别过滤）。
+0098: since_ms (int, 可选): 仅返回该时间戳之后的日志<br>level_min (str, 可选): 最低级别过滤<br>max_lines (int, 可选, 默认 500)
+0099: success (bool)<br>logs (list[dict]): 每条包含 {ts_ms, level, message, context?}<br>error_message (str, 可选)
+0100: rd.core.healthcheck
+0101: 执行自检：验证 RenderDoc 库加载、临时目录写入、（可选）创建最小 Replay/Remote 连接等。
+0102: check_remote (bool, 可选, 默认 false)<br>check_replay (bool, 可选, 默认 true)
+0103: success (bool)<br>checks (list[dict]): {name, ok, detail?}<br>error_message (str, 可选)
+0106: 3.2，捕获文件与 Replay Session (Capture & Replay)
+0107: 工具名称
+0108: 功能描述
+0109: 主要参数
+0110: 返回结果
+0111: rd.capture.open_file
+0112: 打开一个 .rdc 捕获文件并返回文件句柄（不自动创建 Replay）。
+0113: file_path (str): 捕获文件的绝对/可访问路径<br>read_only (bool, 可选, 默认 true): 是否以只读方式打开
+0114: success (bool)<br>capture_file_id (str): 捕获文件句柄 ID<br>driver (str): 捕获时使用的图形 API（如 'D3D12'/'Vulkan'）<br>error_message (str, 可选)
+0115: rd.capture.close_file
+0116: 关闭捕获文件句柄。
+0117: capture_file_id (str)
+0118: success (bool)<br>error_message (str, 可选)
+0119: rd.capture.get_info
+0120: 获取捕获文件元数据（时间、可执行文件、驱动、机器信息、RDC 版本等）。
+0121: capture_file_id (str)
+0122: success (bool)<br>metadata (dict): {capture_time, executable, cmdline, api, driver_version, machine_name, notes?}<br>error_message (str, 可选)
+0123: rd.capture.get_thumbnail
+0124: 获取捕获文件缩略图（如果存在）。
+0125: capture_file_id (str)<br>max_size_px (int, 可选, 默认 256): 缩略图最大边长
+0126: success (bool)<br>image_path (str, 可选): 缩略图保存路径（PNG/JPEG）<br>width (int, 可选)<br>height (int, 可选)<br>error_message (str, 可选)
+0127: rd.capture.list_frames
+0128: 列出捕获文件中所有帧的基本信息（帧索引、时间戳、缩略图可用性等）。
+0129: capture_file_id (str)
+0130: success (bool)<br>frames (list[dict]): 每个元素 {frame_index, timestamp?, has_thumbnail?, drawcall_count?}<br>error_message (str, 可选)
+0131: rd.capture.open_replay
+0132: 基于 capture_file_id 创建一个可回放的 Replay Session（会启动 replay driver）。
+0133: capture_file_id (str)<br>options (dict, 可选): 回放选项，例如 {force_api?, gpu_id?, software_replay?, enable_debug?, replay_cache_mb?}
+0134: success (bool)<br>session_id (str): Replay Session 句柄<br>frame_count (int)<br>api_properties (dict): API 特性与限制<br>error_message (str, 可选)
+0135: rd.capture.close_replay
+0136: 关闭一个 Replay Session，释放回放 driver 与缓存资源。
+0137: session_id (str)
+0138: success (bool)<br>error_message (str, 可选)
+0139: rd.replay.set_frame
+0140: 切换当前回放帧（会重置 active event 到该帧起始）。
+0141: session_id (str)<br>frame_index (int)
+0142: success (bool)<br>active_event_id (int): 切换后默认激活的 eventId（通常为该帧起始）<br>error_message (str, 可选)
+0143: rd.replay.get_frame_info
+0144: 获取当前/指定帧的统计信息（drawcall 数、marker 数、时长等）。
+0145: session_id (str)<br>frame_index (int, 可选): 缺省为当前帧
+0146: success (bool)<br>frame_info (dict): {frame_index, event_range:{start,end}, drawcall_count, marker_count, duration_ms?}<br>error_message (str, 可选)
+0147: rd.event.set_active
+0148: 设置当前 active event（后续 pipeline/resource/debug 查询均以该 event 为上下文）。
+0149: session_id (str)<br>event_id (int)
+0150: success (bool)<br>active_event_id (int)<br>error_message (str, 可选)
+0151: rd.event.get_active
+0152: 读取当前 active event。
+0153: session_id (str)
+0154: success (bool)<br>active_event_id (int)<br>error_message (str, 可选)
+0155: rd.replay.get_api_properties
+0156: 获取 Replay Session 的 API 属性（如 shader debug 支持、counter 支持等）。
+0157: session_id (str)
+0158: success (bool)<br>api_properties (dict)<br>error_message (str, 可选)
+0159: rd.replay.get_driver_info
+0160: 获取回放 driver 信息（版本、vendor、device、driver 字符串等）。
+0161: session_id (str)
+0162: success (bool)<br>driver_info (dict): {vendor, device, driver_version, driver_name, replay_api}<br>error_message (str, 可选)
+0165: 3.3，事件导航与 API 检查 (Event Navigation & API Inspection)
+0166: 工具名称
+0167: 功能描述
+0168: 主要参数
+0169: 返回结果
+0170: rd.event.get_actions
+0171: 用于获取当前帧的根 Action 列表，进而构建 Drawcall/Marker 树（兼容 V3 版本）。
+0172: session_id (str)<br>include_markers (bool, 可选, 默认 true)<br>include_drawcalls (bool, 可选, 默认 true)
+0173: success (bool)<br>actions (list[dict]): 树结构节点，包含常用字段如 {event_id, name, flags, num_indices, num_instances, children?}<br>error_message (str, 可选)
+0174: rd.event.get_action_tree
+0175: 获取当前帧完整的 Action 树，支持按深度或过滤条件进行裁剪。
+0176: session_id (str)<br>max_depth (int, 可选): 限制树的深度<br>filter (dict, 可选): 过滤条件，例如 {name_regex?, flags_include?, flags_exclude?, event_id_range?}
+0177: success (bool)<br>root (dict): 根节点（包含 children 列表）<br>error_message (str, 可选)
+0178: rd.event.get_action_details
+0179: 获取单个 Action 的详细信息，包括 Drawcall 参数、Marker 范围以及输出目标等摘要。
+0180: session_id (str)<2>event_id (int)
+0181: success (bool)<br>action (dict): 包含字段如 {event_id, name, flags, outputs?, num_vertices?, num_indices?, num_instances?, topology?, dispatch_dims?, ...}<br>error_message (str, 可选)
+0182: rd.event.get_drawcall_children
+0183: 获取指定 Event 对应 Action 的子节点 event_id 列表，便于快速遍历。
+0184: session_id (str)<br>event_id (int)
+0185: success (bool)<br>children_event_ids (list[int])<br>error_message (str, 可选)
+0186: rd.event.get_parent_chain
+0187: 获取指定 Event 的父链（从根节点到当前 Event），用于还原 Marker Stack 或 Pass 层级。
+0188: session_id (str)<br>event_id (int)
+0189: success (bool)<br>parent_chain (list[dict]): 每层包含 {event_id, name, flags}<br>error_message (str, 可选)
+0190: rd.event.search_actions
+0191: 在当前帧的 Action 树中搜索节点，支持按名称、Flag 或事件范围等条件。
+0192: session_id (str)<br>query (dict): 查询条件，例如 {name_regex?, name_contains?, flags_include?, flags_exclude?, event_id_min?, event_id_max?}<br>max_results (int, 可选, 默认 200)
+0193: success (bool)<br>matches (list[dict]): 匹配结果，包含 {event_id, name, flags, path?}（path 为父链名称数组）<br>error_message (str, 可选)
+0194: rd.event.list_passes
+0195: 根据 Marker 或 Region 归纳当前帧的 Pass 列表，类似于 RenderDoc Event Browser 的 Region 视图。
+0196: session_id (str)<br>marker_policy (str, 可选, 默认 'region'): 可选值 'region', 'markers_only', 'both'
+0197: success (bool)<br>passes (list[dict]): 包含字段如 {name, begin_event_id, end_event_id, drawcall_count, children?}<br>error_message (str, 可选)
+0198: rd.event.get_marker_stack
+0199: 获取指定 Event 时刻的 Marker Stack（从外层到内层）。
+0200: session_id (str)<br>event_id (int)
+0201: success (bool)<br>stack (list[str])<br>error_message (str, 可选)
+0202: rd.event.get_api_calls
+0203: 获取指定 Event 对应的底层 API 调用列表，例如 D3D 或 Vulkan 命令。
+0204: session_id (str)<br>event_id (int)<br>include_arguments (bool, 可选, 默认 true)<br>max_calls (int, 可选, 默认 2000)
+0205: success (bool)<br>api_calls (list[dict]): 包含字段如 {index, name, args?, ret?}<br>error_message (str, 可选)
+0206: rd.event.get_callstack
+0207: 获取指定 Event 的 CPU Callstack（如果捕获时包含该信息且平台支持）。
+0208: session_id (str)<br>event_id (int)<br>resolve_symbols (bool, 可选, 默认 false)
+0209: success (bool)<br>callstack (list[dict]): 包含字段如 {module, function, file?, line?, address}<br>error_message (str, 可选)
+0210: rd.event.diff_pipeline_state
+0211: 对比两个 Event 的 Pipeline State 差异，可用于定位“状态被谁修改”的问题。
+0212: session_id (str)<br>event_a (int): 基准 eventId<br>event_b (int): 对比 eventId<br>scope (str, 可选, 默认 'all'): 对比范围，可选值 'all', 'shaders', 'bindings', 'raster', 'om', 'ia'<br>include_unchanged (bool, 可选, 默认 false)
+0213: success (bool)<br>diff (list[dict]): 每项包含 {path, before, after, severity?}<br>error_message (str, 可选)
+0214: rd.event.get_resource_usage
+0215: 获取指定 Event 上资源的摘要使用情况，例如哪些资源被绑定为 RT/DS/SRV/UAV/CBV/IB/VB 等。
+0216: session_id (str)<br>event_id (int)
+0217: success (bool)<br>usage (dict): 包含字段如 {render_targets, depth_target, vertex_buffers, index_buffer, per_stage_bindings...}<br>error_message (str, 可选)
+0220: 3.4，管线状态查询 (Pipeline State Inspection)
+0221: 工具名称
+0222: 功能描述
+0223: 主要参数
+0224: 返回结果
+0225: rd.pipeline.get_state
+0226: 获取当前 active event 的完整 Pipeline State（兼容 V3；返回结构按 API 类型组织）。
+0227: session_id (str)<br>detail_level (str, 可选, 默认 'full'): 'summary'|'full'
+0228: success (bool)<br>pipeline_state (dict): 包含 IA/Shader Stages/RS/OM 等<br>error_message (str, 可选)
+0229: rd.pipeline.get_state_summary
+0230: 获取 Pipeline State 的紧凑摘要（适合大模型快速阅读）。
+0231: session_id (str)<br>include_bindings (bool, 可选, 默认 true)<br>include_shaders (bool, 可选, 默认 true)
+0232: success (bool)<br>summary (dict): {ia, shaders, raster, om, descriptors?, warnings?}<br>error_message (str, 可选)
+0233: rd.pipeline.get_stage_state
+0234: 获取指定 Shader Stage 的 Pipeline 子状态。
+0235: session_id (str)<br>stage (str): 'VS'|'HS'|'DS'|'GS'|'PS'|'CS'|'AS'|'MS'|'RT'
+0236: success (bool)<br>stage_state (dict): {shader, entry, resources, samplers, constant_blocks, UAVs, ...}<br>error_message (str, 可选)
+0237: rd.pipeline.get_vertex_input
+0238: 获取 Input Assembler 状态：VB/IB、stride/offset、顶点布局/attribute 映射。
+0239: session_id (str)
+0240: success (bool)<br>ia (dict): {topology, vertex_buffers, index_buffer, input_layout/attributes, primitive_restart?}<br>error_message (str, 可选)
+0241: rd.pipeline.get_vertex_buffers
+0242: 获取当前绑定的 Vertex Buffers 列表（含 slot/stride/offset/resource_id）。
+0243: session_id (str)
+0244: success (bool)<br>vertex_buffers (list[dict]): {slot, resource_id, offset, stride, byte_size?, name?}<br>error_message (str, 可选)
+0245: rd.pipeline.get_index_buffer
+0246: 获取当前绑定的 Index Buffer（resource_id/format/offset）。
+0247: session_id (str)
+0248: success (bool)<br>index_buffer (dict): {resource_id, format, offset, name?}<br>error_message (str, 可选)
+0249: rd.pipeline.get_primitive_topology
+0250: 获取拓扑信息（Primitive Topology、Patch Control Points 等）。
+0251: session_id (str)
+0252: success (bool)<br>topology (dict): {topology, patch_control_points?, restart_enabled?}<br>error_message (str, 可选)
+0253: rd.pipeline.get_viewports_scissors
+0254: 获取 Viewports 与 Scissors（多 viewport 支持）。
+0255: session_id (str)
+0256: success (bool)<br>viewports (list[dict]): {x,y,w,h,min_depth,max_depth}<br>scissors (list[dict]): {x,y,w,h}<br>error_message (str, 可选)
+0257: rd.pipeline.get_rasterizer_state
+0258: 获取 Rasterizer State（cull mode、front face、depth clamp、depth bias、line width 等）。
+0259: session_id (str)
+0260: success (bool)<br>rasterizer (dict)<br>error_message (str, 可选)
+0261: rd.pipeline.get_multisample_state
+0262: 获取 MSAA/coverage/alpha-to-coverage 等多采样相关状态。
+0263: session_id (str)
+0264: success (bool)<br>multisample (dict)<br>error_message (str, 可选)
+0265: rd.pipeline.get_blend_state
+0266: 获取 Blend State（per RT 的 blend enable、因子、op、write mask）。
+0267: session_id (str)
+0268: success (bool)<br>blend (dict)<br>error_message (str, 可选)
+0269: rd.pipeline.get_depth_stencil_state
+0270: 获取 Depth/Stencil State（depth func/write、stencil ops、stencil ref、bounds 等）。
+0271: session_id (str)
+0272: success (bool)<br>depth_stencil (dict)<br>error_message (str, 可选)
+0273: rd.pipeline.get_output_targets
+0274: 获取 Output Merger / Framebuffer：RT/DS 绑定、formats、mip/slice、load/store（若可得）。
+0275: session_id (str)
+0276: success (bool)<br>framebuffer (dict): {render_targets:[], depth_target?, samples?, formats?}<br>error_message (str, 可选)
+0277: rd.pipeline.get_render_targets
+0278: 仅获取 Render Targets 列表（包含 resource_id、format、mip/slice、name）。
+0279: session_id (str)
+0280: success (bool)<br>render_targets (list[dict])<br>error_message (str, 可选)
+0281: rd.pipeline.get_depth_target
+0282: 仅获取 Depth/Stencil Target 信息。
+0283: session_id (str)
+0284: success (bool)<br>depth_target (dict, 可选): {resource_id, format, mip, slice, name}<br>error_message (str, 可选)
+0285: rd.pipeline.get_resource_bindings
+0286: 获取指定 stage 的资源绑定（SRV/CBV/RO-Images 等）。
+0287: session_id (str)<br>stage (str): 'VS'|'HS'|'DS'|'GS'|'PS'|'CS'|'AS'|'MS'|'RT'
+0288: success (bool)<br>bindings (list[dict]): {bindpoint, space?, type, resource_id, view?, name?, format?}<br>error_message (str, 可选)
+0289: rd.pipeline.get_uav_bindings
+0290: 获取指定 stage 的 UAV/Storage 绑定。
+0291: session_id (str)<br>stage (str)
+0292: success (bool)<br>uavs (list[dict]): {bindpoint, space?, resource_id, view?, name?}<br>error_message (str, 可选)
+0293: rd.pipeline.get_sampler_bindings
+0294: 获取指定 stage 的 Sampler 绑定。
+0295: session_id (str)<br>stage (str)
+0296: success (bool)<br>samplers (list[dict]): {bindpoint, space?, filter, address_u/v/w, lod_bias?, max_aniso?, comparison?}<br>error_message (str, 可选)
+0297: rd.pipeline.get_constant_buffers
+0298: 获取指定 stage 的 Constant Buffer 绑定（slot/buffer/offset/size）。
+0299: session_id (str)<br>stage (str)<br>include_contents (bool, 可选, 默认 false): 若 true 则额外解码变量值（可能较慢）<br>max_bytes (int, 可选, 默认 1048576): 解码上限，避免超大 CB 导致内存压力
+0300: success (bool)<br>constant_buffers (list[dict]): {slot, resource_id, offset, size, vars?}<br>error_message (str, 可选)
+0301: rd.pipeline.get_push_constants
+0302: 获取 Vulkan Push Constants（按 range/offset 组织；若当前 API 非 Vulkan 则返回空）。
+0303: session_id (str)<br>decode_as (str, 可选): 'raw'|'u32'|'f32'|'struct'（struct 需要 layout）<br>layout (dict, 可选): struct layout 定义
+0304: success (bool)<br>push_constants (list[dict]): {stage_flags, offset, size, data}<br>error_message (str, 可选)
+0305: rd.pipeline.get_dynamic_state
+0306: 获取 Vulkan Dynamic State（viewport/scissor/lineWidth/depthBias/stencilRef 等）。
+0307: session_id (str)
+0308: success (bool)<br>dynamic_state (dict)<br>error_message (str, 可选)
+0309: rd.pipeline.get_root_signature
+0310: 获取 D3D12 Root Signature 摘要（参数表、descriptor ranges、static samplers）。
+0311: session_id (str)
+0312: success (bool)<br>root_signature (dict, 可选)<br>error_message (str, 可选)
+0313: rd.pipeline.get_descriptor_heaps
+0314: 获取 D3D12 Descriptor Heaps 绑定信息（CBV/SRV/UAV, Sampler）。
+0315: session_id (str)
+0316: success (bool)<br>descriptor_heaps (dict, 可选)<br>error_message (str, 可选)
+0317: rd.pipeline.get_resource_states
+0318: 获取 D3D12 Resource State（barrier 后的状态快照；若可得）。
+0319: session_id (str)<br>resource_id (str, 可选): 指定资源；缺省则返回当前关键绑定资源的状态
+0320: success (bool)<br>resource_states (list[dict]): {resource_id, subresource?, state, last_transition_event?}<br>error_message (str, 可选)
+0321: rd.pipeline.get_shader
+0322: 获取指定 stage 的 shader 句柄与摘要信息（resource_id、entry、debug info 可用性等）。
+0323: session_id (str)<br>stage (str)
+0324: success (bool)<br>shader (dict, 可选): {resource_id, entry, name, shader_model?, has_debug_info?}<br>error_message (str, 可选)
+0327: 3.5，资源探查 (Resource Inspection & History)
+0328: 工具名称
+0329: 功能描述
+0330: 主要参数
+0331: 返回结果
+0332: rd.resource.list_all
+0333: 列出捕获中所有资源（Textures/Buffers/Shaders/Pipelines 等），兼容 V3。
+0334: session_id (str)<br>types (list[str], 可选): 过滤类型，如 ['Texture','Buffer','Shader']；缺省为全部<br>include_unused (bool, 可选, 默认 true)
+0335: success (bool)<br>resources (list[dict]): {resource_id, type, name, byte_size?, format?, dims?}<br>error_message (str, 可选)
+0336: rd.resource.list_textures
+0337: 列出所有纹理资源，包含维度、格式、array、mips、samples。
+0338: session_id (str)<br>include_render_targets (bool, 可选, 默认 true)<br>include_depth_stencil (bool, 可选, 默认 true)
+0339: success (bool)<br>textures (list[dict]): {resource_id, name, width,height,depth, mips, array_size, format, samples, usage_flags?}<br>error_message (str, 可选)
+0340: rd.resource.list_buffers
+0341: 列出所有 buffer 资源，包含大小、用途、结构化信息（若可得）。
+0342: session_id (str)
+0343: success (bool)<br>buffers (list[dict]): {resource_id, name, byte_size, usage_flags?, stride?, structured?}<br>error_message (str, 可选)
+0344: rd.resource.get_details
+0345: 获取资源详细信息，兼容 V3；根据资源类型返回不同字段。
+0346: session_id (str)<br>resource_id (str)
+0347: success (bool)<br>details (dict): 通用字段 {type, name, creation?, current_state?} + 纹理/缓冲特有字段<br>error_message (str, 可选)
+0348: rd.resource.get_usage
+0349: 获取资源的使用情况，即哪些 event 读/写/绑定该资源，兼容 V3。
+0350: session_id (str)<br>resource_id (str)<br>max_events (int, 可选, 默认 20000)
+0351: success (bool)<br>usage (list[dict]): `{event_id, usage_type:'Read'
+0352: rd.resource.get_history
+0353: 获取资源的读写历史，按时间排序，包含写入来源、清除、copy 等。
+0354: session_id (str)<br>resource_id (str)<br>include_reads (bool, 可选, 默认 false): 若为 true 则包含 reads（可能很长）<br>include_writes (bool, 可选, 默认 true)
+0355: success (bool)<br>history (list[dict]): {event_id, op, stage?, src_resource_id?, dst_resource_id?, detail?}<br>error_message (str, 可选)
+0356: rd.resource.get_initial_contents
+0357: 获取资源初始内容（如果捕获保存了初始内容），通常用于追踪“初始数据是否正确”，兼容 V3。
+0358: session_id (str)<br>resource_id (str)<br>output_path (str, 可选): 将数据保存到指定文件；缺省由系统分配
+0359: success (bool)<br>artifact_path (str, 可选): 初始内容的二进制/纹理文件路径<br>format_hint (str, 可选): `'raw'
+0360: rd.resource.get_current_contents
+0361: 读取资源在当前 active event 时刻的内容（buffer 返回 bytes；texture 返回 subresource blob 或保存为文件）。
+0362: session_id (str)<br>resource_id (str)<br>subresource (dict, 可选): 纹理子资源 {mip, slice, sample}；buffer 可省略<br>range (dict, 可选): buffer 范围 {offset, size}<br>output_path (str, 可选)
+0363: success (bool)<br>artifact_path (str, 可选)<br>byte_size (int, 可选)<br>error_message (str, 可选)
+0364: rd.resource.set_alias
+0365: 为资源设置一个本地别名，仅影响后续输出/报告，不修改捕获内容。
+0366: session_id (str)<br>resource_id (str)<br>alias (str): 例如 'GBufferA'/'MainColor' 等
+0367: success (bool)<br>error_message (str, 可选)
+0368: rd.resource.rename
+0369: 兼容工具：等价于 rd.resource.set_alias，保留 V3 名称。
+0370: session_id (str)<br>resource_id (str)<br>new_name (str)
+0371: success (bool)<br>error_message (str, 可选)
+0372: rd.resource.get_descriptor_info
+0373: 获取资源在当前绑定上下文中的 descriptor/view 信息（SRV/UAV/RTV/DSV 等）。
+0374: session_id (str)<br>resource_id (str)<br>event_id (int, 可选): 若提供则临时切换到该 event 查询（不改变全局 active event）
+0375: success (bool)<br>descriptors (list[dict]): {usage, stage?, bindpoint?, view_format?, swizzle?, mip_range?, slice_range?}<br>error_message (str, 可选)
+0376: rd.resource.estimate_memory
+0377: 估算资源占用内存，按格式/维度推算，用于快速筛选大资源。
+0378: session_id (str)<br>resource_id (str)
+0379: success (bool)<br>estimated_bytes (int)<br>breakdown (dict, 可选): {mip0, mips_total, metadata?}<br>error_message (str, 可选)
+0380: rd.resource.get_creation_context
+0381: 获取资源创建上下文：创建 event、创建参数摘要（若可得）。
+0382: session_id (str)<br>resource_id (str)
+0383: success (bool)<br>creation (dict, 可选): {create_event_id, create_call?, params?, initial_state?}<br>error_message (str, 可选)
+0386: 3.6，纹理数据访问与分析 (Texture Data Access & Analysis)
+0387: 工具名称
+0388: 功能描述
+0389: 主要参数
+0390: 返回结果
+0391: rd.texture.get_data
+0392: 用于读取纹理子资源的原始数据。此功能兼容 V3 版本，并默认返回文件保存路径以避免 JSON 响应过大。
+0393: session_id (str)<br>texture_id (str): 纹理资源 ID<br>subresource (dict, 可选): 包含 mip (int, 默认 0), slice (int, 默认 0), sample (int, 默认 0)<br>format (str, 可选): 输出格式，可选值为 'raw', 'dds', 'exr', 'png' (如果支持)<br>output_path (str, 可选)
+0394: success (bool)<br>artifact_path (str): 输出文件路径<br>byte_size (int, 可选)<br>error_message (str, 可选)
+0395: rd.texture.get_subresource_data
+0396: 用于读取并返回纹理子数据的元数据 (metadata)，例如尺寸、行距 (row pitch) 和格式 (format) 等，并支持选择性导出。
+0397: session_id (str)<br>texture_id (str)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>export (bool, 可选, 默认 false)<br>output_path (str, 可选)
+0398: success (bool)<br>subresource_info (dict): 包含 {width, height, depth, format, row_pitch, slice_pitch, samples}<br>artifact_path (str, 可选)<br>error_message (str, 可选)
+0399: rd.texture.get_pixel_value
+0400: 用于读取纹理在指定像素坐标处的值。该值将自动按照纹理格式解码为 float4 或 int4。此功能兼容 V3 版本。
+0401: session_id (str)<br>texture_id (str)<br>x (int)<br>y (int)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>as_type (str, 可选, 默认 'float'): 返回值类型，可选 'float', 'uint', 'int'
+0402: success (bool)<br>value (`list[float
+0403: rd.texture.get_region_values
+0404: 用于读取纹理中一个矩形区域内的像素值，常用于局部统计分析、查找 NaN 或 Inf 值。
+0405: session_id (str)<br>texture_id (str)<br>rect (dict): 包含 {x, y, w, h}<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>stride (int, 可选, 默认 1): 采样步长，大于 1 可降低处理成本<br>as_type (str, 可选, 默认 'float')
+0406: success (bool)<br>values (`list[list[float
+0407: rd.texture.get_pixel_history
+0408: 用于获取当前活动事件 (active event) 下某个像素的历史信息，即哪些绘制调用 (drawcall) 或调度 (dispatch) 影响了该像素。此功能兼容 V3 版本。
+0409: session_id (str)<br>texture_id (str): 通常为当前渲染目标 (RT)<br>x (int)<br>y (int)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>include_shaders (bool, 可选, 默认 true)
+0410: success (bool)<br>history (list[dict]): 包含 {event_id, action_name, passed_tests?, pre_mod, post_mod, shader?}<br>error_message (str, 可选)
+0411: rd.texture.get_min_max
+0412: 用于计算纹理子资源的最小值 (min) 和最大值 (max)。此功能兼容 V3 版本。
+0413: session_id (str)<br>texture_id (str)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>channels (str, 可选, 默认 'rgba'): 指定通道，可选 'r', 'rg', 'rgb', 'rgba'
+0414: success (bool)<br>min (list[float])<br>max (list[float])<br>error_message (str, 可选)
+0415: rd.texture.get_histogram
+0416: 用于计算纹理子资源的直方图。此功能兼容 V3 版本。
+0417: session_id (str)<br>texture_id (str)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>channels (str, 可选, 默认 'r')<br>bins (int, 可选, 默认 256)<br>range (dict, 可选): 包含 {min, max} (如果缺省则自动计算)
+0418: success (bool)<br>histogram (list[int])<br>bin_edges (list[float])<br>error_message (str, 可选)
+0419: rd.texture.compute_stats
+0420: 用于计算纹理的统计量，包括均值 (mean)、标准差 (stddev)、NaN/Inf 计数以及 0/1 占比等，以便进行快速的健全性检查 (sanity check)。
+0421: session_id (str)<br>texture_id (str)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>stride (int, 可选, 默认 1)
+0422: success (bool)<br>stats (dict): 包含 {mean:[...], std:[...], nan_count, inf_count, zero_ratio?, one_ratio?}<br>error_message (str, 可选)
+0423: rd.texture.render_overlay
+0424: 用于将叠加层 (overlay) 渲染到纹理上并导出，例如绘制调用高亮、线框、视口/裁剪 (viewport/scissor) 或过度绘制 (quad overdraw) 等。此功能兼容 V3 版本。
+0425: session_id (str)<br>texture_id (str)<br>overlay (str): 叠加层类型，可选 'None', 'Drawcall', 'Wireframe', 'ViewportScissor', 'Overdraw'<br>event_id (int, 可选): 叠加层关联的事件 ID<br>output_path (str, 可选)<br>image_format (str, 可选, 默认 'png')
+0426: success (bool)<br>image_path (str)<br>error_message (str, 可选)
+0427: rd.texture.save_to_file
+0428: 用于根据显示映射和通道选择，将纹理导出到文件 (支持 PNG/EXR/DDS 等格式)。此功能兼容 V3 版本。
+0429: session_id (str)<br>texture_id (str)<br>subresource (dict, 可选): 包含 {mip, slice, sample}<br>output_path (str)<br>file_format (str, 可选): 文件格式，可选 'png', 'exr', 'dds', 'jpg'<br>channels (str, 可选, 默认 'rgba')<br>remap (dict, 可选): 包含 {black_point, white_point, gamma, hdr_clamp?}<br>flip_y (bool, 可选, 默认 false)
+0430: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0431: rd.texture.save_mip_chain
+0432: 用于批量导出 mip chain，可选择将每个 mip 保存为单独文件或合并到指定目录。
+0433: session_id (str)<br>texture_id (str)<br>output_dir (str)<br>file_format (str, 可选, 默认 'png')<br>slice (int, 可选, 默认 0)
+0434: success (bool)<br>saved_files (list[str])<br>error_message (str, 可选)
+0435: rd.texture.diff
+0436: 用于对比两张纹理 (要求尺寸相同且格式可转换)，并输出差异图以及各项指标，如峰值信噪比 (PSNR)、最大绝对误差 (max error) 和均方误差 (mean squared error)。
+0437: session_id (str)<br>tex_a (dict): 包含 {texture_id, subresource?}<br>tex_b (dict): 包含 {texture_id, subresource?}<br>metric (list[str], 可选): 指标列表，可选 ['max_abs', 'mse', 'psnr']<br>output_path (str, 可选): 差异图输出路径 (PNG/EXR)
+0438: success (bool)<br>metrics (dict)<br>diff_image_path (str, 可选)<br>error_message (str, 可选)
+0441: 3.7，缓冲区与网格数据访问 (Buffer & Mesh Data Access)
+0442: 工具名称
+0443: 功能描述
+0444: 主要参数
+0445: 返回结果
+0446: rd.buffer.get_data
+0447: 读取 buffer 的原始字节数据（兼容 V3；默认保存到文件以避免 JSON 过大）。
+0448: session_id (str)<br>buffer_id (str)<br>offset (int, 可选, 默认 0)<br>size (int, 可选): 读取字节数；缺省为 buffer 末尾<br>output_path (str, 可选): 若提供则写入该文件，否则写入临时 artifact 文件<br>as_base64 (bool, 可选, 默认 false): 小数据可直接 base64 返回
+0449: success (bool)<br>artifact_path (str, 可选)<br>base64 (str, 可选)<br>byte_size (int)<br>error_message (str, 可选)
+0450: rd.buffer.get_structured_data
+0451: 按结构化布局解码 buffer 内容（兼容 V3；适用于 StructuredBuffer/SSBO/顶点数据等）。
+0452: session_id (str)<br>buffer_id (str)<br>layout (dict): 结构体布局定义，例如 {stride, fields:[{name,type,offset,count?}]}<br>offset (int, 可选, 默认 0)<br>count (int, 可选): 解码元素个数<br>max_elements (int, 可选, 默认 4096)
+0453: success (bool)<br>elements (list[dict]): 每元素为 {field:value,...}<br>error_message (str, 可选)
+0454: rd.buffer.save_to_file
+0455: 将 buffer 内容导出到文件（raw/bin）。
+0456: session_id (str)<br>buffer_id (str)<br>output_path (str)<br>offset (int, 可选, 默认 0)<br>size (int, 可选)
+0457: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0458: rd.buffer.search_pattern
+0459: 在 buffer 内搜索字节模式（适用于查找 magic number、NaN pattern、特定 id）。
+0460: session_id (str)<br>buffer_id (str)<br>pattern (str): 支持 hex 字符串（如 'FF 00 ?? 7F'）或 base64<br>offset (int, 可选, 默认 0)<br>size (int, 可选)<br>max_results (int, 可选, 默认 256)
+0461: success (bool)<br>matches (list[int]): 命中位置 offset 列表<br>error_message (str, 可选)
+0462: rd.mesh.get_post_vs_data
+0463: 获取指定 drawcall 的 Post-VS 数据（位置/属性等）。
+0464: session_id (str)<br>event_id (int, 可选): 缺省使用当前 active event<br>view (str, 可选, 默认 'vs_out'): 'vs_out'|'gs_out'|'ts_out'|'ms_out'<br>instance (int, 可选, 默认 0)<br>view_index (int, 可选, 默认 0): multiview/VR<br>max_vertices (int, 可选): 限制导出顶点数
+0465: success (bool)<br>mesh_data (dict): {vertex_count, index_count?, attributes:[...], data_path? 或 inline?}<br>error_message (str, 可选)
+0466: rd.mesh.get_post_gs_data
+0467: 获取指定 drawcall 的 Post-GS 数据（若管线包含 GS）。
+0468: session_id (str)<br>event_id (int, 可选)<br>instance (int, 可选, 默认 0)<br>max_primitives (int, 可选)
+0469: success (bool)<br>mesh_data (dict)<br>error_message (str, 可选)
+0470: rd.mesh.decode_vertex_data
+0471: 对指定 VB 按输入布局解码顶点属性。
+0472: session_id (str)<br>vertex_buffer_id (str)<br>layout (dict): 输入布局定义 {stride, attributes:[{semantic/name, format, offset}]}<br>vertex_offset (int, 可选, 默认 0)<br>vertex_count (int, 可选, 默认 256)<br>base_vertex (int, 可选, 默认 0)
+0473: success (bool)<br>vertices (list[dict]): 每顶点 {attr:value,...}<br>error_message (str, 可选)
+0474: rd.mesh.decode_index_data
+0475: 解码 Index Buffer（16/32-bit）为 index 列表。
+0476: session_id (str)<br>index_buffer_id (str)<br>format (str): 'R16_UINT'|'R32_UINT'<br>index_offset (int, 可选, 默认 0)<br>index_count (int, 可选, 默认 256)<br>base_vertex (int, 可选, 默认 0)
+0477: success (bool)<br>indices (list[int])<br>error_message (str, 可选)
+0478: rd.mesh.get_drawcall_mesh_config
+0479: 获取当前 drawcall 的 mesh 配置：使用哪些 VB/IB、topology、baseVertex、indexOffset、instanceCount 等。
+0480: session_id (str)<br>event_id (int, 可选)
+0481: success (bool)<br>config (dict): {topology, num_vertices, num_indices, num_instances, base_vertex, index_offset, vb_bindings, ib_binding}<br>error_message (str, 可选)
+0482: rd.mesh.export
+0483: 将指定 drawcall 的 mesh 导出为标准格式（OBJ/PLY/GLTF，视实现支持）。
+0484: session_id (str)<br>event_id (int, 可选)<br>format (str, 可选, 默认 'obj'): 'obj'|'ply'|'gltf'<br>output_path (str)<br>include_attributes (bool, 可选, 默认 true)<br>space (str, 可选, 默认 'postvs'): 'prevs'|'postvs'
+0485: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0486: rd.mesh.get_mesh_preview
+0487: 渲染 mesh 预览图（类似 RenderDoc Mesh Viewer 的输出截图）。
+0488: session_id (str)<br>event_id (int, 可选)<br>mode (str, 可选, 默认 'solid'): 'solid'|'wireframe'|'normals'|'uv'<br>output_path (str, 可选)<br>width (int, 可选, 默认 512)<br>height (int, 可选, 默认 512)
+0489: success (bool)<br>image_path (str)<br>error_message (str, 可选)
+0492: 3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)
+0493: 以下表格详细列出了用于 Shader 探查、反射与替换的各项工具及其功能、参数与返回结果：
+0494: 工具名称
+0495: 功能描述
+0496: 主要参数
+0497: 返回结果
+0498: rd.shader.get_reflection
+0499: 获取指定 shader 的反射信息（输入输出签名、资源绑定、常量块布局等）。
+0500: session_id (str)<br>shader_id (str): shader 资源 ID<br>include_bindings (bool, 可选, 默认 true)<br>include_constant_blocks (bool, 可选, 默认 true)
+0501: success (bool)<br>reflection (dict): {entry_points, inputs, outputs, resources, constant_blocks, samplers, ...}<br>error_message (str, 可选)
+0502: rd.shader.get_disassembly
+0503: 获取指定 shader 的反汇编/IR（如 DXBC/DXIL/spirv disasm）。
+0504: session_id (str)<br>shader_id (str)<br>target (str, 可选): `'auto'
+0505: 'dxbc'
+0506: rd.shader.get_source
+0507: 获取 shader 的源码/调试信息（若捕获包含 debug info，例如 PDB/DWARF/source embedding）。
+0508: session_id (str)<br>shader_id (str)<br>prefer_original (bool, 可选, 默认 true): 优先返回原始源码（若可得）
+0509: success (bool)<br>source (str, 可选)<br>files (list[dict], 可选): {path, contents?}（实现可选择仅返回索引）<br>error_message (str, 可选)
+0510: rd.shader.extract_binary
+0511: 提取 shader 的二进制 blob（DXIL/DXBC/SPIR-V 等），并保存为文件。
+0512: session_id (str)<br>shader_id (str)<br>output_path (str, 可选)<br>container (str, 可选): `'auto'
+0513: 'dxil'
+0514: rd.shader.save_binary
+0515: 兼容工具：等价于 rd.shader.extract_binary（保留更直观的名称）。
+0516: session_id (str)<br>shader_id (str)<br>output_path (str)<br>container (str, 可选)
+0517: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0518: rd.shader.list_entry_points
+0519: 列出 shader 容器中的 entry points（适用于 DXIL library/多 entry SPIR-V）。
+0520: session_id (str)<br>shader_id (str)
+0521: success (bool)<br>entry_points (list[dict]): {name, stage, profile?, exports?}<br>error_message (str, 可选)
+0522: rd.shader.get_bindpoint_mapping
+0523: 获取 shader 资源绑定点映射（register/space/binding -> semantic meaning）。
+0524: session_id (str)<br>shader_id (str)
+0525: success (bool)<br>mapping (list[dict]): {resource_name, bindpoint, space?, type, stage?}<br>error_message (str, 可选)
+0526: rd.shader.get_constant_block_layout
+0527: 读取常量块布局（variables、offset、type、array、matrix layout）。
+0528: session_id (str)<br>shader_id (str)<br>block_name_or_index (str|int)
+0529: success (bool)<br>layout (dict): {name, byte_size, vars:[{name,type,offset,rows,cols,array_size?}]}<br>error_message (str, 可选)
+0530: rd.shader.get_constant_buffer_contents
+0531: 读取指定 stage/slot 的 Constant Buffer 并按反射结构解码变量值（推荐用于专家级核对）。
+0532: session_id (str)<br>stage (str)<br>slot (int)<br>array_index (int, 可选, 默认 0): CB array/space 情况<br>max_bytes (int, 可选, 默认 1048576)<br>flatten (bool, 可选, 默认 true): 是否将嵌套结构摊平成 path->value
+0533: success (bool)<br>cbuffer (dict): {resource_id, offset, size, vars}（vars 为 {path:value} 或树）<br>error_message (str, 可选)
+0534: rd.shader.edit_and_replace
+0535: 在当前 Replay Session 中替换 shader（实时验证修复假设）。
+0536: session_id (str)<br>stage (str): `'VS'
+0537: 'PS'
+0538: rd.shader.revert_replacement
+0539: 撤销 shader 替换，恢复捕获中的原始 shader。
+0540: session_id (str)<br>replacement_id (str)
+0541: success (bool)<br>error_message (str, 可选)
+0542: rd.shader.list_replacements
+0543: 列出当前 session 中已生效的 shader 替换。
+0544: session_id (str)
+0545: success (bool)<br>replacements (list[dict]): {replacement_id, stage, original_shader_id, created_event?, status, messages?}<br>error_message (str, 可选)
+0546: rd.shader.get_messages
+0547: 获取 RenderDoc 在 shader 编译/替换/调试过程产生的 messages。
+0548: session_id (str)<br>severity_min (str, 可选, 默认 'info'): `'debug'
+0549: 'info'
+0550: rd.shader.compile
+0551: （可选扩展）在 server 侧调用外部编译器（dxc/glslangValidator/metal）编译 shader，返回 binary 路径；用于构建替换输入。
+0552: source (str): HLSL/GLSL/MSL 源码<br>stage (str)<br>entry (str)<br>target (str): 例如 'vs_6_6'/'ps_6_6' 或 'spirv1.6'<br>defines (dict, 可选)<br>include_dirs (list[str], 可选)<br>additional_args (list[str], 可选)<br>output_path (str, 可选)
+0553: success (bool)<br>binary_path (str, 可选)<br>stderr (str, 可选)<br>error_message (str, 可选)
+0556: 3.9，Shader Debugger 与像素/顶点级调试 (Shader Debugging)
+0557: 工具名称
+0558: 功能描述
+0559: 主要参数
+0560: 返回结果
+0561: rd.shader.debug_start
+0562: 启动 shader debugger（默认 pixel），返回 debug session 句柄。
+0563: session_id (str)<br>mode (str, 可选, 默认 'pixel'): 'pixel' | 'vertex' | 'compute'<br>event_id (int, 可选): 缺省为当前 active event<br>params (dict):<br>- pixel: {x, y, sample?, target?}<br>- vertex: {vertex_index, instance, view?}<br>- compute: {group_x, group_y, group_z, thread_x, thread_y, thread_z}<br>timeout_ms (int, 可选, 默认 10000)
+0564: success (bool)<br>shader_debug_id (str)<br>initial_state (dict): {pc, location?, variables_summary?}<br>error_message (str, 可选)
+0565: rd.shader.get_debug_state
+0566: 获取当前 debugger 状态（当前 PC、活跃函数、变量、寄存器等）。
+0567: session_id (str)<br>shader_debug_id (str)<br>detail_level (str, 可选, 默认 'full'): 'summary' | 'full'
+0568: success (bool)<br>state (dict)<br>error_message (str, 可选)
+0569: rd.debug.step
+0570: 单步执行 debugger（步进一条指令或源代码行）。
+0571: session_id (str)<br>shader_debug_id (str)<br>step_mode (str, 可选, 默认 'instruction'): 'instruction' | 'line' | 'over' | 'out'
+0572: success (bool)<br>state (dict): 更新后的状态摘要（pc/line/changed_vars）<br>error_message (str, 可选)
+0573: rd.debug.continue
+0574: 继续执行 debugger（直到断点/结束/超时）。
+0575: session_id (str)<br>shader_debug_id (str)<br>timeout_ms (int, 可选, 默认 10000)
+0576: success (bool)<br>state (dict)<br>stopped_reason (str, 可选): 'breakpoint' | 'finished' | 'timeout' | 'error'<br>error_message (str, 可选)
+0577: rd.debug.run_to
+0578: 运行到指定位置（PC 或 source location）。
+0579: session_id (str)<br>shader_debug_id (str)<br>target (dict): {pc?, file?, line?}<br>timeout_ms (int, 可选, 默认 10000)
+0580: success (bool)<br>state (dict)<br>error_message (str, 可选)
+0581: rd.debug.set_breakpoints
+0582: 设置断点列表（按 PC 或 source location）。
+0583: session_id (str)<br>shader_debug_id (str)<br>breakpoints (list[dict]): {pc?, file?, line?}
+0584: success (bool)<br>active_breakpoints (list[dict])<br>error_message (str, 可选)
+0585: rd.debug.clear_breakpoints
+0586: 清除所有断点。
+0587: session_id (str)<br>shader_debug_id (str)
+0588: success (bool)<br>error_message (str, 可选)
+0589: rd.debug.get_variables
+0590: 获取当前 scope 的变量（支持按名称过滤/按路径展开结构体）。
+0591: session_id (str)<br>shader_debug_id (str)<br>name_filter (str, 可选): regex/contains<br>expand_depth (int, 可选, 默认 2)<br>max_variables (int, 可选, 默认 2048)
+0592: success (bool)<br>variables (list[dict]): {name, type, value, children?}<br>error_message (str, 可选)
+0593: rd.debug.evaluate_expression
+0594: 在 debugger 上下文中求值表达式（如 'cb0.myVar' 或寄存器表达式；实现可选）。
+0595: session_id (str)<br>shader_debug_id (str)<br>expression (str)
+0596: success (bool)<br>value (any, 可选)<br>error_message (str, 可选)
+0597: rd.debug.get_callstack
+0598: 获取 shader 调用栈（函数名/文件/行）。
+0599: session_id (str)<br>shader_debug_id (str)
+0600: success (bool)<br>callstack (list[dict]): {function, file?, line?, pc?}<br>error_message (str, 可选)
+0601: rd.debug.finish
+0602: 结束并释放 shader debug session。
+0603: session_id (str)<br>shader_debug_id (str)
+0604: success (bool)<br>error_message (str, 可选)
+0605: rd.debug.pixel_history
+0606: 获取像素历史（推荐替代 rd.texture.get_pixel_history；支持更丰富的测试/输出解释字段）。
+0607: session_id (str)<br>x (int)<br>y (int)<br>target (dict, 可选): {texture_id?}（缺省为当前 RT0）<br>sample (int, 可选, 默认 0)<br>include_tests (bool, 可选, 默认 true)<br>include_shader_outputs (bool, 可选, 默认 true)
+0608: success (bool)<br>history (list[dict])<br>error_message (str, 可选)
+0609: rd.debug.explain_test_failure
+0610: 对单条 pixel history 记录给出"为什么没写入/被丢弃"的解释（depth/stencil/scissor/blend 等）。
+0611: session_id (str)<br>history_item (dict): 来自 rd.debug.pixel_history 的某个元素<br>verbosity (str, 可选, 默认 'normal'): 'short' | 'normal' | 'verbose'
+0612: success (bool)<br>explanation (str)<br>key_facts (dict, 可选): 结构化要点（depth test result 等）<br>error_message (str, 可选)
+0615: 3.10，性能与高级分析 (Performance & Advanced Analysis)
+0616: 工具名称
+0617: 功能描述
+0618: 主要参数
+0619: 返回结果
+0620: rd.perf.enumerate_counters
+0621: 枚举可用的 GPU counters。
+0622: session_id (str)
+0623: success (bool)<br>counters (list[dict]): {counter_id, name, description?, unit?, category?}<br>error_message (str, 可选)
+0624: rd.perf.describe_counter
+0625: 获取单个 counter 的详细描述。
+0626: session_id (str)<br>counter_id (int)
+0627: success (bool)<br>counter (dict): {counter_id, name, description, unit, result_type, uuid?}<br>error_message (str, 可选)
+0628: rd.perf.sample_counters
+0629: 对当前帧/指定 event 范围采样 counters（兼容 V3；可能较慢）。
+0630: session_id (str)<br>counter_ids (list[int])<br>event_range (dict, 可选): {start_event_id, end_event_id}；缺省为整帧<br>stride (int, 可选, 默认 1): 每隔多少个 event 采样一次（降低成本）
+0631: success (bool)<br>samples (list[dict]): {event_id, values:{counter_id:value}}<br>error_message (str, 可选)
+0632: rd.perf.get_event_durations
+0633: 获取每个 event 的 GPU duration（若支持 timing queries；可用于定位慢 draw）。
+0634: session_id (str)<br>event_range (dict, 可选)<br>max_events (int, 可选, 默认 20000)
+0635: success (bool)<br>durations (list[dict]): {event_id, duration_ms, action_name?}<br>error_message (str, 可选)
+0636: rd.perf.get_frame_timing
+0637: 获取整帧 timing 摘要（GPU/CPU 若可得），含关键区间统计。
+0638: session_id (str)<br>frame_index (int, 可选)
+0639: success (bool)<br>timing (dict): {frame_index, gpu_ms?, cpu_ms?, present_ms?, markers?}<br>error_message (str, 可选)
+0640: rd.perf.get_pipeline_statistics
+0641: 获取 pipeline statistics（VS/PS invocations、primitives、clipped 等；若 API/驱动支持）。
+0642: session_id (str)<br>event_id (int, 可选)
+0643: success (bool)<br>stats (dict): {ia_vertices, ia_primitives, vs_invocations, ps_invocations, cs_invocations?, ...}<br>error_message (str, 可选)
+0644: rd.analysis.get_frame_stats
+0645: 获取帧级统计与警告摘要。
+0646: session_id (str)<br>frame_index (int, 可选)
+0647: success (bool)<br>stats (dict): {drawcalls, dispatches, markers, resources, warnings?}<br>error_message (str, 可选)
+0648: rd.analysis.get_event_stats
+0649: 获取指定 event 的统计摘要（draw 参数、绑定资源数、RT/DS 格式、shader 信息等）。
+0650: session_id (str)<br>event_id (int, 可选)
+0651: success (bool)<br>event_stats (dict)<br>error_message (str, 可选)
+0652: rd.analysis.get_warnings
+0653: 获取 RenderDoc 在回放/验证期间产生的 warnings/errors（如 undefined behavior、API misuse）。
+0654: session_id (str)<br>severity_min (str, 可选, 默认 'warn')
+0655: success (bool)<br>warnings (list[dict]): {severity, message, event_id?}<br>error_message (str, 可选)
+0656: rd.analysis.estimate_overdraw
+0657: 估算 overdraw（实现可选：基于像素历史采样或 RenderDoc 内置 overdraw overlay）。
+0658: session_id (str)<br>target (dict, 可选): {texture_id?}<br>region (dict, 可选): {x,y,w,h}<br>sampling (dict, 可选): {stride, max_samples}<br>output_path (str, 可选): 输出 heatmap 图片
+0659: success (bool)<br>overdraw (dict): {avg, max, histogram?}<br>heatmap_path (str, 可选)<br>error_message (str, 可选)
+0662: 3.11，导出、报告与可复现打包 (Export & Reporting)
+0663: 工具名称
+0664: 功能描述
+0665: 主要参数
+0666: 返回结果
+0667: rd.export.screenshot
+0668: 导出当前 event 的输出截图（等价于 UI 的保存 framebuffer）。
+0669: session_id (str)<br>target (dict, 可选): {texture_id? , rt_index?}；缺省为当前 RT0<br>event_id (int, 可选): 指定 event 输出；缺省为当前 active event<br>output_path (str)<br>file_format (str, 可选, 默认 'png')<br>include_alpha (bool, 可选, 默认 true)<br>overlay (str, 可选): 'None'|'Drawcall'|'Wireframe'|'Overdraw'
+0670: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0671: rd.export.texture
+0672: 导出纹理（快捷封装 rd.texture.save_to_file）。
+0673: session_id (str)<br>texture_id (str)<br>subresource (dict, 可选)<br>output_path (str)<br>file_format (str, 可选, 默认 'png')<br>remap (dict, 可选)
+0674: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0675: rd.export.buffer
+0676: 导出 buffer 到文件（快捷封装 rd.buffer.save_to_file）。
+0677: session_id (str)<br>buffer_id (str)<br>output_path (str)<br>offset (int, 可选, 默认 0)<br>size (int, 可选)
+0678: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0679: rd.export.mesh
+0680: 导出当前 drawcall 的 mesh（快捷封装 rd.mesh.export）。
+0681: session_id (str)<br>event_id (int, 可选)<br>format (str, 可选, 默认 'obj')<br>output_path (str)
+0682: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0683: rd.export.pipeline_state_json
+0684: 将当前 event 的 pipeline state 以 JSON 导出到文件（便于 diff/归档）。
+0685: session_id (str)<br>event_id (int, 可选)<br>output_path (str)<br>detail_level (str, 可选, 默认 'full')
+0686: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0687: rd.export.event_tree_json
+0688: 导出当前帧的 event/draw 树到 JSON。
+0689: session_id (str)<br>output_path (str)<br>max_depth (int, 可选)
+0690: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0691: rd.export.resource_list_csv
+0692: 导出资源列表到 CSV（包含名称/类型/大小/格式/维度等）。
+0693: session_id (str)<br>output_path (str)<br>types (list[str], 可选)
+0694: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0695: rd.export.pixel_history_json
+0696: 导出某像素的 pixel history 到 JSON（便于共享/复现）。
+0697: session_id (str)<br>x (int)<br>y (int)<br>target (dict, 可选)<br>output_path (str)
+0698: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0699: rd.export.shader_bundle
+0700: 导出当前 event 相关 shader 的 bundle（反射 + disasm + binary），用于离线分析。
+0701: session_id (str)<br>event_id (int, 可选)<br>output_dir (str)<br>include_binaries (bool, 可选, 默认 true)<br>include_reflection (bool, 可选, 默认 true)<br>include_disassembly (bool, 可选, 默认 true)
+0702: success (bool)<br>saved_files (list[str])<br>error_message (str, 可选)
+0703: rd.export.cbuffer_dump
+0704: 导出当前 event 的常量缓冲数据（按 stage/slot 命名），支持结构化变量值。
+0705: session_id (str)<br>output_dir (str)<br>stages (list[str], 可选): 缺省为所有 stage<br>include_raw (bool, 可选, 默认 false)<br>include_decoded (bool, 可选, 默认 true)
+0706: success (bool)<br>saved_files (list[str])<br>error_message (str, 可选)
+0707: rd.export.repro_bundle_zip
+0708: 生成可复现的 bug report 压缩包：包含 rdc、关键截图、pipeline JSON、pixel history、shader bundle、cbuffer dump 等。
+0709: session_id (str)<br>bundle_spec (dict): {include_rdc?, include_thumbnails?, include_pipeline_json?, include_pixel_history?, include_shaders?, include_cbuffers?, include_resources?}<br>focus (dict, 可选): {event_id?, x?, y?, target_texture_id?}<br>output_path (str)
+0710: success (bool)<br>zip_path (str)<br>manifest (dict, 可选): 打包内容清单<br>error_message (str, 可选)
+0711: rd.export.markdown_report
+0712: 生成 Markdown 报告（包含帧摘要、关键 pass、问题点、截图链接、数据引用）。
+0713: session_id (str)<br>report_spec (dict, 可选): {title?, include_sections?, verbosity?}<br>focus (dict, 可选)<br>output_path (str)
+0714: success (bool)<br>report_path (str)<br>error_message (str, 可选)
+0717: 3.12，远程连接与自动化抓帧 (Remote Capture & Target Control)
+0718: 以下表格详细阐述了用于远程连接 RenderDoc 服务器及进行自动化抓帧的关键工具及其功能、参数与返回结果。
+0719: 工具名称
+0720: 功能描述
+0721: 主要参数
+0722: 返回结果
+0723: rd.remote.connect
+0724: 连接到远程 RenderDoc server（RDC remote server / target control）。
+0725: host (str)<br>port (int, 可选, 默认 38920)<br>timeout_ms (int, 可选, 默认 5000)
+0726: success (bool)<br>remote_id (str)<br>server_info (dict): {version, name?, platform?, capabilities?}<br>error_message (str, 可选)
+0727: rd.remote.disconnect
+0728: 断开远程连接。
+0729: remote_id (str)
+0730: success (bool)<br>error_message (str, 可选)
+0731: rd.remote.ping
+0732: 检查远程连接可用性与延迟。
+0733: remote_id (str)
+0734: success (bool)<br>latency_ms (float, 可选)<br>error_message (str, 可选)
+0735: rd.remote.list_targets
+0736: 列出远程可连接的 targets（已注入/已运行应用、可抓帧进程等）。
+0737: remote_id (str)
+0738: success (bool)<br>targets (list[dict]): {target_id, name, pid?, api?, status}<br>error_message (str, 可选)
+0739: rd.remote.launch_app
+0740: 在远程机器启动应用并注入 RenderDoc（若 server 支持）。
+0741: remote_id (str)<br>exe_path (str)<br>working_dir (str, 可选)<br>cmdline (str, 可选)<br>env (dict, 可选)<br>capture_options (dict, 可选): 参考 rd.remote.set_capture_options
+0742: success (bool)<br>target_id (str, 可选)<br>pid (int, 可选)<br>error_message (str, 可选)
+0743: rd.remote.set_capture_options
+0744: 设置远程抓帧参数（保存路径、frame limit、禁止/允许某些 API 特性等）。
+0745: remote_id (str)<br>options (dict): {capture_file_path_template?, capture_all_cmd_lists?, allow_vsync?, hook_into_children?, ref_all_resources?, ...}
+0746: success (bool)<br>applied (dict)<br>error_message (str, 可选)
+0747: rd.remote.set_overlay_options
+0748: 设置远程 overlay（例如显示 capture 提示、frame number、FPS）。
+0749: remote_id (str)<br>options (dict): {enabled, show_frame_number?, show_fps?, show_capture_list?}
+0750: success (bool)<br>error_message (str, 可选)
+0751: rd.remote.trigger_capture
+0752: 在远程 target 上触发一次或多次捕获。
+0753: remote_id (str)<br>target_id (str, 可选): 缺省表示 server 默认 target（若存在）<br>num_frames (int, 可选, 默认 1)<br>capture_delay_ms (int, 可选, 默认 0): 延迟触发
+0754: success (bool)<br>captures (list[dict]): {capture_id, capture_path, timestamp}<br>error_message (str, 可选)
+0755: rd.remote.queue_capture
+0756: 在远程 target 上排队捕获（例如下一次 Present/下一帧），并返回队列状态。
+0757: remote_id (str)<br>target_id (str, 可选)<br>num_frames (int, 可选, 默认 1)
+0758: success (bool)<br>queue_status (dict): {queued, pending, last_capture_id?}<br>error_message (str, 可选)
+0759: rd.remote.list_captures
+0760: 列出远程服务器上所有可用捕获。
+0761: remote_id (str)
+0762: success (bool)<br>captures (list[dict]): {capture_id, timestamp, api, local_path?}<br>error_message (str, 可选)
+0763: rd.remote.copy_capture
+0764: 将远程 capture 拷贝到本地路径（兼容 V3；也可用于下载）。
+0765: remote_id (str)<br>capture_id (int)<br>local_path (str)
+0766: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
+0767: rd.remote.delete_capture
+0768: 删除远程服务器上的 capture（谨慎使用）。
+0769: remote_id (str)<br>capture_id (int)
+0770: success (bool)<br>error_message (str, 可选)
+0773: 3.13，应用内接口抽象 (In-Application Instrumentation, Optional)
+0774: 工具名称
+0775: 功能描述
+0776: 主要参数
+0777: 返回结果
+0778: rd.app.is_available
+0779: 检查目标进程是否暴露 RenderDoc In-Application API（或该 MCP server 是否已与应用建立 IPC）。
+0780: connection (dict, 可选): {pid?, endpoint?, target_id?}
+0781: success (bool)<br>available (bool)<br>detail (dict, 可选)<br>error_message (str, 可选)
+0782: rd.app.start_frame_capture
+0783: 在应用侧开始捕获（等价于 renderdoc_app.h 的 StartFrameCapture）。
+0784: connection (dict): {pid? 或 endpoint?}<br>device (str, 可选): 设备/上下文标识（多 device 情况）
+0785: success (bool)<br>error_message (str, 可选)
+0786: rd.app.end_frame_capture
+0787: 在应用侧结束捕获并生成 rdc 文件（等价于 EndFrameCapture）。
+0788: connection (dict): {pid? 或 endpoint?}<br>output_path (str, 可选): 捕获文件保存路径模板/目录
+0789: success (bool)<br>capture_path (str, 可选)<br>error_message (str, 可选)
+0790: rd.app.trigger_capture
+0791: 在应用侧触发一次 capture（start+end 封装），可用于脚本化抓帧。
+0792: connection (dict)<br>num_frames (int, 可选, 默认 1)<br>output_path (str, 可选)
+0793: success (bool)<br>capture_paths (list[str], 可选)<br>error_message (str, 可选)
+0794: rd.app.set_capture_option
+0795: 设置应用侧 capture options（如 allow_vsync、ref_all_resources、debug_device 等）。
+0796: connection (dict)<br>option (str): 选项名<br>value (bool|int|float|str)
+0797: success (bool)<br>error_message (str, 可选)
+0798: rd.app.get_capture_options
+0799: 读取应用侧当前 capture options。
+0800: connection (dict)
+0801: success (bool)<br>options (dict)<br>error_message (str, 可选)
+0802: rd.app.push_marker
+0803: 在应用侧 push marker/region（等价于 StartFrameCapture 之外的 marker API；用于让 event 树更可读）。
+0804: connection (dict)<br>name (str)
+0805: success (bool)<br>error_message (str, 可选)
+0806: rd.app.pop_marker
+0807: 在应用侧 pop marker/region。
+0808: connection (dict)
+0809: success (bool)<br>error_message (str, 可选)
+0810: rd.app.set_marker
+0811: 在应用侧插入单点 marker（即时 marker）。
+0812: connection (dict)<br>name (str)
+0813: success (bool)<br>error_message (str, 可选)
+0816: 3.14，诊断工具 (Diagnostics, Heuristic Checks)
+0817: 工具名称
+0818: 功能描述
+0819: 主要参数
+0820: 返回结果
+0821: rd.diag.scan_common_issues
+0822: 对当前 active event 执行一组常见问题扫描（空绑定、viewport/scissor、depth/blend、格式不匹配等），输出结构化 issue 列表。
+0823: session_id (str)<br>severity_min (str, 可选, 默认 'info')<br>include_suggestions (bool, 可选, 默认 true)
+0824: success (bool)<br>issues (list[dict]): {severity, category, message, evidence?, suggestion?}<br>error_message (str, 可选)
+0825: rd.diag.check_render_targets
+0826: 检查 RT 绑定/format/write mask 是否合理（例如 RT0 为空、format 与 shader 输出不兼容）。
+0827: session_id (str)<br>expect (dict, 可选): 期望约束，例如 {min_rt_count?, formats?, require_alpha?}
+0828: success (bool)<br>issues (list[dict])<br>error_message (str, 可选)
+0829: rd.diag.check_depth_stencil
+0830: 检查 depth/stencil 状态导致的“全被丢弃/全写深度失败”等问题。
+0831: session_id (str)<br>pixel (dict, 可选): {x,y} 若提供则结合 pixel history 给出更强解释
+0832: success (bool)<br>issues (list[dict])<br>error_message (str, 可选)
+0833: rd.diag.check_viewport_scissor
+0834: 检查 viewport/scissor 是否为空/越界/与 RT 尺寸不匹配。
+0835: session_id (str)
+0836: success (bool)<br>issues (list[dict])<br>error_message (str, 可选)
+0837: rd.diag.check_culling
+0838: 检查 cull mode/front face/depth clip 导致的“看不见几何体”。
+0839: session_id (str)<br>mesh_preview (bool, 可选, 默认 false): 若 true 则附带 mesh preview 截图路径
+0840: success (bool)<br>issues (list[dict])<br>artifacts (list[str], 可选)<br>error_message (str, 可选)
+0841: rd.diag.check_blend
+0842: 检查 blend state（例如全 0 写出、写 mask 关闭、premul 错误等）。
+0843: session_id (str)<br>rt_index (int, 可选, 默认 0)
+0844: success (bool)<br>issues (list[dict])<br>error_message (str, 可选)
+0845: rd.diag.check_srgb
+0846: 检查 sRGB/linear mismatch（RT 格式、采样视图、gamma 映射）。
+0847: session_id (str)<br>textures (list[str], 可选): 指定需要检查的 texture_id 列表
+0848: success (bool)<br>issues (list[dict])<br>error_message (str, 可选)
+0849: rd.diag.check_resource_bindings
+0850: 检查资源绑定：null/未初始化、dimension 不匹配、UAV/SRV 冲突、descriptor 越界等（按 API 能力）。
+0851: session_id (str)<br>stages (list[str], 可选): 缺省为所有 stage<br>include_descriptor_dump (bool, 可选, 默认 false)
+0852: success (bool)<br>issues (list[dict])<br>descriptor_dump (dict, 可选)<br>error_message (str, 可选)
+0853: rd.diag.check_constant_buffers
+0854: 检查常量缓冲：slot 为空、size 不足、offset 非对齐、变量出现 NaN/Inf（若解码）。
+0855: session_id (str)<br>stages (list[str], 可选)<br>decode_values (bool, 可选, 默认 true)
+0856: success (bool)<br>issues (list[dict])<br>error_message (str, 可选)
+0857: rd.diag.check_d3d12_resource_states
+0858: （D3D12 专用）检查关键资源在当前 event 的 resource state 是否与用途一致（heuristic）。
+0859: session_id (str)<br>resources (list[str], 可选): 指定资源；缺省为当前绑定资源集合
+0860: success (bool)<br>issues (list[dict])<br>error_message (str, 可选)
+0861: rd.diag.check_vk_dynamic_state
+0862: （Vulkan 专用）检查 dynamic state 是否遗漏设置（例如 viewport/scissor 未设置导致空渲染）。
+0863: session_id (str)
+0864: success (bool)<br>issues (list[dict])<br>error_message (str, 可选)
+0867: 3.15，专家级宏工作流 (Expert Macro Workflows)
+0868: 工具名称
+0869: 功能描述
+0870: 主要参数
+0871: 返回结果
+0872: rd.macro.summarize_frame
+0873: 生成整帧的专家级摘要：按 Pass/Marker 归类 drawcalls，列出主要 RT/DS、关键 shader、耗时热点（若可得）。
+0874: session_id (str)<br>frame_index (int, 可选): 缺省当前帧<br>max_passes (int, 可选, 默认 50)<br>max_draws_per_pass (int, 可选, 默认 50)<br>include_timings (bool, 可选, 默认 true)
+0875: success (bool)<br>summary (dict): {passes:[...], main_outputs:[...], hotspots:[...], warnings:[...]}<br>trace (list[str], 可选): 该宏内部调用的关键步骤摘要<br>error_message (str, 可选)
+0876: rd.macro.generate_pass_summary
+0877: 对指定 marker/pass 范围生成摘要（输出/输入资源、drawcall 列表、统计）。
+0878: session_id (str)<br>pass_range (dict): {begin_event_id, end_event_id}<br>include_resource_lists (bool, 可选, 默认 true)<br>include_state_changes (bool, 可选, 默认 false)
+0879: success (bool)<br>pass_summary (dict)<br>error_message (str, 可选)
+0880: rd.macro.find_pass_by_marker
+0881: 按 marker 名称/regex 查找 pass，并返回对应 event 范围（适合快速定位某个渲染阶段）。
+0882: session_id (str)<br>name_regex (str)<br>max_results (int, 可选, 默认 20)
+0883: success (bool)<br>passes (list[dict]): {name, begin_event_id, end_event_id, path?}<br>error_message (str, 可选)
+0884: rd.macro.locate_draw_affecting_pixel
+0885: 给定屏幕像素 (x,y)，定位影响该像素的 draw/dispatch 列表（排序：最近修改优先；可过滤通过 depth/stencil 的记录）。
+0886: session_id (str)<br>x (int)<br>y (int)<br>target (dict, 可选): {texture_id? , rt_index?}<br>policy (dict, 可选): {only_passed_tests?:bool, include_failed?:bool, max_items?:int}
+0887: success (bool)<br>candidates (list[dict]): {event_id, action_name, contribution, passed_tests?, pre, post}<br>error_message (str, 可选)
+0888: rd.macro.explain_pixel
+0889: 对某像素给出“专家解释”：按 pixel history 还原每次写入的 depth/stencil/blend 路径，并指出最终颜色来自哪一步。
+0890: session_id (str)<br>x (int)<br>y (int)<br>target (dict, 可选)<br>verbosity (str, 可选, 默认 'normal'): `'short'
+0891: 'normal'
+0892: rd.macro.trace_resource_lifetime
+0893: 追踪资源生命周期：创建 -> 初始化 -> 关键写入 -> 关键读取（按 pass 归纳），用于定位“某资源何时被写坏”。
+0894: session_id (str)<br>resource_id (str)<br>include_reads (bool, 可选, 默认 false)<br>group_by_pass (bool, 可选, 默认 true)<br>max_events (int, 可选, 默认 50000)
+0895: success (bool)<br>lifetime (dict): {resource, creation, writes, reads?, by_pass?}<br>error_message (str, 可选)
+0896: rd.macro.resource_dependency_graph
+0897: 构建资源依赖图：节点为资源，边表示 copy/resolve/render-to/read-from（用于复杂 frame 的因果分析）。
+0898: session_id (str)<br>event_range (dict, 可选): {start_event_id,end_event_id}<br>max_nodes (int, 可选, 默认 2000)<br>max_edges (int, 可选, 默认 10000)
+0899: success (bool)<br>graph (dict): {nodes:[{id,name,type}], edges:[{src,dst,op,event_id}] }<br>error_message (str, 可选)
+0900: rd.macro.find_state_change_point
+0901: 在 event 区间内搜索“某个状态何时从 A 变为 B”（通过 pipeline diff 快速二分/线性扫描）。
+0902: session_id (str)<br>event_range (dict): {start_event_id,end_event_id}<br>state_path (str): 例如 'OM.Blend.RT0.Enable' 或 'PS.Shader'<br>target_value (any): 期望值<br>search_policy (str, 可选, 默认 'binary'): `'binary'
+0903: 'linear'<br>max_steps (int, 可选, 默认 64`)
+0904: rd.macro.compare_events_report
+0905: 对两个 event 生成可读的对比报告：state diff + 绑定资源 diff + shader diff（含链接到导出的 artifacts）。
+0906: session_id (str)<br>event_a (int)<br>event_b (int)<br>output_path (str, 可选): 若提供则写入 Markdown 报告
+0907: success (bool)<br>report (str, 可选): 若未写文件则直接返回 Markdown 文本<br>report_path (str, 可选)<br>error_message (str, 可选)
+0908: rd.macro.find_unexpected_clear
+0909: 扫描帧内对关键 RT/DS 的 clear/Discard 操作，定位“画面被清掉/闪烁”的来源。
+0910: session_id (str)<br>targets (list[dict], 可选): [{texture_id, name?}]；缺省为当前主要 RT/DS<br>max_results (int, 可选, 默认 200)
+0911: success (bool)<br>clears (list[dict]): {event_id, action_name, target, clear_value, type}<br>error_message (str, 可选)
+0912: rd.macro.find_nan_inf_in_targets
+0913: 在指定输出纹理中查找 NaN/Inf（可采样或全量扫描），输出命中坐标与局部截图。
+0914: session_id (str)<br>texture_id (str, 可选): 缺省为当前 RT0<br>scan (dict, 可选): {stride:int=4, max_hits:int=200, region?}<br>output_dir (str, 可选)
+0915: success (bool)<br>hits (list[dict]): {x,y,value}<br>artifacts (list[str], 可选)<br>error_message (str, 可选)
+0916: rd.macro.quick_triage_missing_draw
+0917: 快速排查“某 draw/物体不见了”：结合 mesh preview、pipeline state、viewport/scissor、depth/cull/blend、binding sanity，输出结论与证据。
+0918: session_id (str)<br>event_id (int, 可选): 缺省当前 active event<br>pixel (dict, 可选): {x,y} 若提供则结合 pixel history<br>output_dir (str, 可选): 输出截图/JSON 的目录
+0919: success (bool)<br>triage (dict): {likely_root_causes:[...], evidence:[...], next_actions:[...]}<br>artifacts (list[str], 可选)<br>error_message (str, 可选)
+0920: rd.macro.build_bug_report_pack
+0921: 更高层的 bug report 打包：调用 rd.export.repro_bundle_zip 并补充解释文本、关键 diff、资源依赖图。
+0922: session_id (str)<br>focus (dict, 可选)<br>output_path (str)<br>verbosity (str, 可选, 默认 'normal')
+0923: success (bool)<br>zip_path (str)<br>summary (str, 可选): 报告摘要（可直接贴到 issue）<br>error_message (str, 可选)
+0924: rd.macro.shader_hotfix_validate
+0925: 在 session 内做“替换 shader -> 重新导出对比截图/指标”的闭环验证，用于快速验证修复假设。
+0926: session_id (str)<br>replacement (dict): 参考 rd.shader.edit_and_replace<br>validation (dict): {target_texture_id?, x?, y?, metric? , screenshot_before?, screenshot_after?}<br>output_dir (str, 可选)
+0927: success (bool)<br>result (dict): {replacement_id, metrics?, before_path?, after_path?, diff_path?}<br>error_message (str, 可选)
+0930: 3.16，通用辅助工具 (Utilities, Optional)
+0931: 工具名称
+0932: 功能描述
+0933: 主要参数
+0934: 返回结果
+0935: rd.util.compute_hash
+0936: 计算文件或字节的哈希值（默认为 sha256），主要用于验证导出内容的一致性。
+0937: path (str): 文件路径<br>algo (str, 可选, 默认 'sha256'): 哈希算法
+0938: success (bool): 操作是否成功<br>hash (str): 计算出的哈希值<br>error_message (str, 可选): 错误信息（如果存在）
+0939: rd.util.diff_text
+0940: 对比两段文本或两个文件，并输出统一差异格式 (unified diff)，这对于比较 shader disasm 或 pipeline JSON 等内容非常有用。
+0941: a (str): 文本内容或文件路径<br>b (str): 文本内容或文件路径<br>a_is_path (bool, 可选, 默认 false): 标记 a 是否为文件路径<br>b_is_path (bool, 可选, 默认 false): 标记 b 是否为文件路径<br>context_lines (int, 可选, 默认 3): 上下文行数
+0942: success (bool): 操作是否成功<br>diff (str): 差异内容<br>error_message (str, 可选): 错误信息（如果存在）
+0943: rd.util.diff_images
+0944: 对比两张图片（支持 PNG、JPEG、EXR 格式），输出差异图及相关指标，如 PSNR、SSIM 和最大绝对误差。
+0945: image_a_path (str): 第一张图片的文件路径<br>image_b_path (str): 第二张图片的文件路径<br>metrics (list[str], 可选): 需要计算的指标列表，例如 ['psnr', 'ssim', 'max_abs', 'mse']<br>output_path (str, 可选): 差异图的输出路径
+0946: success (bool): 操作是否成功<br>metrics (dict): 计算出的指标结果<br>diff_image_path (str, 可选): 差异图片路径（如果生成）<br>error_message (str, 可选): 错误信息（如果存在）
+0947: rd.util.pack_zip
+0948: 将一组文件打包成 zip 压缩文件。此为通用工具，导出功能已提供专用打包接口。
+0949: paths (list[str]): 需要打包的文件路径列表<br>output_path (str): zip 文件的输出路径
+0950: success (bool): 操作是否成功<br>zip_path (str): 生成的 zip 文件路径<br>error_message (str, 可选): 错误信息（如果存在）
+0951: rd.util.list_artifacts
+0952: 列出当前会话生成的所有 artifacts，便于后续清理或归档。
+0953: session_id (str, 可选): 会话 ID，缺省时列出全局 artifacts<br>prefix (str, 可选): 用于过滤 artifacts 路径的前缀
+0954: success (bool): 操作是否成功<br>artifacts (list[dict]): artifacts 列表，包含 {path, byte_size, mime?, created_ts?} 等信息<br>error_message (str, 可选): 错误信息（如果存在）
+0955: rd.util.cleanup_artifacts
+0956: 根据指定条件（如会话、前缀、时间或大小阈值）清理 artifacts。
+0957: session_id (str, 可选): 会话 ID<br>older_than_ms (int, 可选): 清理早于指定毫秒数的 artifacts<br>prefix (str, 可选): 用于过滤 artifacts 路径的前缀<br>max_total_bytes (int, 可选): 清理 artifacts 直到总大小低于指定字节数
+0958: success (bool): 操作是否成功<br>deleted (list[str]): 被删除的 artifacts 路径列表<br>freed_bytes (int, 可选): 释放的字节数<br>error_message (str, 可选): 错误信息（如果存在）
+0960: 四，总结
+0961: 本文通过对 RenderDoc UI 的精细解构和功能映射，详细抽象并实现了Renderdoc MCP，使其从“可用”到“专家级”的跨越。它为 AI Agent 提供了前所未有的对Renderdoc的控制粒度，使其能够模拟人类专家的完整调试流程，包括复杂的视图交互、状态设置和多窗口协同。这套工具集是实现真正智能图形调试 Agent 的坚实基础。

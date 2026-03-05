@@ -1,0 +1,40 @@
+{
+  "file_count": 7,
+  "files": [
+    {
+      "path": "d3dcompiler_47.dll",
+      "size": 4741488,
+      "sha256": "a05f99734f7c4822fefc12b367af21fd0976ed6608752fb1e1e80b6ece7ecbbb"
+    },
+    {
+      "path": "dbghelp.dll",
+      "size": 1413072,
+      "sha256": "1387a9f99c2f4342dea0d68208081f936b10a0049d28478c896b808c5c13d057"
+    },
+    {
+      "path": "pymodules/d3dcompiler_47.dll",
+      "size": 4741488,
+      "sha256": "a05f99734f7c4822fefc12b367af21fd0976ed6608752fb1e1e80b6ece7ecbbb"
+    },
+    {
+      "path": "pymodules/renderdoc.pyd",
+      "size": 7576064,
+      "sha256": "98ebdd2a432bbf0eb7b8eae6e969eac19501a3442437b06bb3a8e46faf0844a0"
+    },
+    {
+      "path": "renderdoc.dll",
+      "size": 74900480,
+      "sha256": "dd4b78d223112dcc1dad894ab50befa644c97421938c4d6cbaadebba91af4fda"
+    },
+    {
+      "path": "renderdoc.json",
+      "size": 1578,
+      "sha256": "92b89d76c0169a2651f90e4815ee405fc9bc60c6538c90d8701015036a0d7851"
+    },
+    {
+      "path": "symsrv.dll",
+      "size": 127944,
+      "sha256": "1d91eab8b40e70c7db6d53d3b15d50bf0784f113307307395302333003b63d98"
+    }
+  ]
+}

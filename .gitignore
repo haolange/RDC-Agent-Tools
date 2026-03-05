@@ -1,0 +1,7 @@
+intermediate/**
+!intermediate/**/.gitkeep
+.venv
+.pytest_cache
+*.egg-info
+__pycache__
+*.pyc
