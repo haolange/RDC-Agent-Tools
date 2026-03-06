@@ -1,7 +1,7 @@
 {
-  "source_docx": "C:\\Users\\a1824\\Desktop\\RenderDoc MCP 工具集.docx",
+  "source_docx": "D:\\Projects\\Native\\RDC-Agent Tools\\spec\\doc_extracted.txt",
   "tool_count": 196,
-  "generated_at": "2026-02-12T18:46:42.260167Z",
+  "generated_at": "2026-03-06T15:49:23.761181Z",
   "groups": {
     "3.1，核心与环境管理 (Core & Environment)": 9,
     "3.2，捕获文件与 Replay Session (Capture & Replay)": 13,
@@ -52,9 +52,9 @@
     {
       "name": "rd.core.get_capabilities",
       "group": "3.1，核心与环境管理 (Core & Environment)",
-      "description": "获取当前环境能力详情（Replay、远程抓帧、shader debug、mesh 后变换导出、shader binary/export、shader compile、counter 支持等）。",
+      "description": "获取当前环境能力详情（Replay、远程抓帧、shader debug、counter 支持等）。",
       "parameter_raw": "detail_level (str, 可选, 默认 'summary'): 'summary' | 'full'",
-      "returns_raw": "success (bool)<br>capabilities (dict): 每项至少包含 {available, reason, optional, source}；例如 {replay: {...}, remote: {...}, app_api: {...}, shader_debug: {...}, mesh_post_transform: {...}, shader_binary_export: {...}, shader_compile: {...}, counters: {...}}<br>error_message (str, 可选)",
+      "returns_raw": "success (bool)<br>capabilities (dict): 例如 {replay: {...}, remote: {...}, shader_debug: {...}, counters: {...}}<br>error_message (str, 可选)",
       "param_names": [
         "detail_level"
       ]
@@ -1054,9 +1054,9 @@
     {
       "name": "rd.mesh.get_post_vs_data",
       "group": "3.7，缓冲区与网格数据访问 (Buffer & Mesh Data Access)",
-      "description": "获取指定 drawcall 的 Post-VS 数据（位置/属性等）；若当前 build 不支持，会返回结构化 capability error。",
+      "description": "获取指定 drawcall 的 Post-VS 数据（位置/属性等）。",
       "parameter_raw": "session_id (str)<br>event_id (int, 可选): 缺省使用当前 active event<br>view (str, 可选, 默认 'vs_out'): 'vs_out'|'gs_out'|'ts_out'|'ms_out'<br>instance (int, 可选, 默认 0)<br>view_index (int, 可选, 默认 0): multiview/VR<br>max_vertices (int, 可选): 限制导出顶点数",
-      "returns_raw": "success (bool)<br>mesh_data (dict): {vertex_count, index_count?, attributes:[...], data_path? 或 inline?}<br>error_message (str, 可选；可能返回 capability=`mesh_post_transform` 的结构化错误)",
+      "returns_raw": "success (bool)<br>mesh_data (dict): {vertex_count, index_count?, attributes:[...], data_path? 或 inline?}<br>error_message (str, 可选)",
       "param_names": [
         "session_id",
         "event_id",
@@ -1069,9 +1069,9 @@
     {
       "name": "rd.mesh.get_post_gs_data",
       "group": "3.7，缓冲区与网格数据访问 (Buffer & Mesh Data Access)",
-      "description": "获取指定 drawcall 的 Post-GS 数据（若管线包含 GS）；若当前 build 不支持，会返回结构化 capability error。",
+      "description": "获取指定 drawcall 的 Post-GS 数据（若管线包含 GS）。",
       "parameter_raw": "session_id (str)<br>event_id (int, 可选)<br>instance (int, 可选, 默认 0)<br>max_primitives (int, 可选)",
-      "returns_raw": "success (bool)<br>mesh_data (dict)<br>error_message (str, 可选；可能返回 capability=`mesh_post_transform` 的结构化错误)",
+      "returns_raw": "success (bool)<br>mesh_data (dict)<br>error_message (str, 可选)",
       "param_names": [
         "session_id",
         "event_id",
@@ -1167,8 +1167,8 @@
       "name": "rd.shader.get_disassembly",
       "group": "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)",
       "description": "获取指定 shader 的反汇编/IR（如 DXBC/DXIL/spirv disasm）。",
-      "parameter_raw": "session_id (str)<br>shader_id (str)<br>target (str, 可选): `'auto'",
-      "returns_raw": "'dxbc'",
+      "parameter_raw": "session_id (str)<br>shader_id (str)<br>target (str, 可选): `'auto'<br>'dxbc'",
+      "returns_raw": "",
       "param_names": [
         "session_id",
         "shader_id",
@@ -1190,9 +1190,9 @@
     {
       "name": "rd.shader.extract_binary",
       "group": "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)",
-      "description": "提取 shader 的二进制 blob（DXIL/DXBC/SPIR-V 等），并保存为文件；若当前 replay backend 不支持，会返回结构化 capability error。",
-      "parameter_raw": "session_id (str)<br>shader_id (str)<br>output_path (str, 可选)<br>container (str, 可选): 'auto' | 'dxil' | 'dxbc' | 'spirv'",
-      "returns_raw": "success (bool)<br>saved_path (str, 可选)<br>error_message (str, 可选；可能返回 capability=`shader_binary_export` 的结构化错误)",
+      "description": "提取 shader 的二进制 blob（DXIL/DXBC/SPIR-V 等），并保存为文件。",
+      "parameter_raw": "session_id (str)<br>shader_id (str)<br>output_path (str, 可选)<br>container (str, 可选): `'auto'<br>'dxil'",
+      "returns_raw": "",
       "param_names": [
         "session_id",
         "shader_id",
@@ -1203,9 +1203,9 @@
     {
       "name": "rd.shader.save_binary",
       "group": "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)",
-      "description": "兼容工具：等价于 rd.shader.extract_binary（保留更直观的名称）；若当前 replay backend 不支持，会返回结构化 capability error。",
+      "description": "兼容工具：等价于 rd.shader.extract_binary（保留更直观的名称）。",
       "parameter_raw": "session_id (str)<br>shader_id (str)<br>output_path (str)<br>container (str, 可选)",
-      "returns_raw": "success (bool)<br>saved_path (str)<br>error_message (str, 可选；可能返回 capability=`shader_binary_export` 的结构化错误)",
+      "returns_raw": "success (bool)<br>saved_path (str)<br>error_message (str, 可选)",
       "param_names": [
         "session_id",
         "shader_id",
@@ -1266,8 +1266,8 @@
       "name": "rd.shader.edit_and_replace",
       "group": "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)",
       "description": "在当前 Replay Session 中替换 shader（实时验证修复假设）。",
-      "parameter_raw": "session_id (str)<br>stage (str): `'VS'",
-      "returns_raw": "'PS'",
+      "parameter_raw": "session_id (str)<br>stage (str): `'VS'<br>'PS'",
+      "returns_raw": "",
       "param_names": [
         "session_id",
         "stage"
@@ -1298,8 +1298,8 @@
       "name": "rd.shader.get_messages",
       "group": "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)",
       "description": "获取 RenderDoc 在 shader 编译/替换/调试过程产生的 messages。",
-      "parameter_raw": "session_id (str)<br>severity_min (str, 可选, 默认 'info'): `'debug'",
-      "returns_raw": "'info'",
+      "parameter_raw": "session_id (str)<br>severity_min (str, 可选, 默认 'info'): `'debug'<br>'info'",
+      "returns_raw": "",
       "param_names": [
         "session_id",
         "severity_min"
@@ -1308,9 +1308,9 @@
     {
       "name": "rd.shader.compile",
       "group": "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)",
-      "description": "（可选扩展）在 server 侧调用外部编译器（dxc/glslangValidator/metal）编译 shader，返回 binary 路径；若当前 build 未配置，会返回结构化 capability error。",
+      "description": "（可选扩展）在 server 侧调用外部编译器（dxc/glslangValidator/metal）编译 shader，返回 binary 路径；用于构建替换输入。",
       "parameter_raw": "source (str): HLSL/GLSL/MSL 源码<br>stage (str)<br>entry (str)<br>target (str): 例如 'vs_6_6'/'ps_6_6' 或 'spirv1.6'<br>defines (dict, 可选)<br>include_dirs (list[str], 可选)<br>additional_args (list[str], 可选)<br>output_path (str, 可选)",
-      "returns_raw": "success (bool)<br>binary_path (str, 可选)<br>stderr (str, 可选)<br>error_message (str, 可选；可能返回 capability=`shader_compile` 的结构化错误)",
+      "returns_raw": "success (bool)<br>binary_path (str, 可选)<br>stderr (str, 可选)<br>error_message (str, 可选)",
       "param_names": [
         "source",
         "stage",
@@ -1325,9 +1325,9 @@
     {
       "name": "rd.shader.debug_start",
       "group": "3.9，Shader Debugger 与像素/顶点级调试 (Shader Debugging)",
-      "description": "启动 shader debugger（默认 pixel），返回 debug session 句柄；pixel 模式会记录已解析上下文、target 选择来源和尝试日志。",
-      "parameter_raw": "session_id (str)<br>mode (str, 可选, 默认 'pixel'): 'pixel' | 'vertex' | 'compute'<br>event_id (int, 可选): 缺省为当前 active event<br>params (dict):<br>- pixel: {x, y, sample?, view?, primitive?, target?}<br>- pixel.target: {texture_id?, rt_index?, subresource?}<br>- pixel.target.subresource: {mip?, slice?, sample?}<br>- vertex: {vertex_index, instance, view?}<br>- compute: {group_x, group_y, group_z, thread_x, thread_y, thread_z}<br>timeout_ms (int, 可选, 默认 10000)",
-      "returns_raw": "success (bool)<br>shader_debug_id (str)<br>initial_state (dict): {pc, location?, variables_summary?}<br>resolved_context (dict): {event_id, x, y, sample, view, primitive, target, debug_backend?}<br>selected_target_source (str, 可选)<br>pixel_history_summary (dict, 可选)<br>synthetic_debug (bool, 可选)<br>error_message (str, 可选；失败时 error.details 会包含 resolved_context / pixel_history_summary / attempts / selected_target_source)",
+      "description": "启动 shader debugger（默认 pixel），返回 debug session 句柄。",
+      "parameter_raw": "session_id (str)<br>mode (str, 可选, 默认 'pixel'): 'pixel' | 'vertex' | 'compute'<br>event_id (int, 可选): 缺省为当前 active event<br>params (dict):<br>- pixel: {x, y, sample?, target?}<br>- vertex: {vertex_index, instance, view?}<br>- compute: {group_x, group_y, group_z, thread_x, thread_y, thread_z}<br>timeout_ms (int, 可选, 默认 10000)",
+      "returns_raw": "success (bool)<br>shader_debug_id (str)<br>initial_state (dict): {pc, location?, variables_summary?}<br>error_message (str, 可选)",
       "param_names": [
         "session_id",
         "mode",
@@ -2177,8 +2177,8 @@
       "name": "rd.macro.explain_pixel",
       "group": "3.15，专家级宏工作流 (Expert Macro Workflows)",
       "description": "对某像素给出“专家解释”：按 pixel history 还原每次写入的 depth/stencil/blend 路径，并指出最终颜色来自哪一步。",
-      "parameter_raw": "session_id (str)<br>x (int)<br>y (int)<br>target (dict, 可选)<br>verbosity (str, 可选, 默认 'normal'): `'short'",
-      "returns_raw": "'normal'",
+      "parameter_raw": "session_id (str)<br>x (int)<br>y (int)<br>target (dict, 可选)<br>verbosity (str, 可选, 默认 'normal'): `'short'<br>'normal'",
+      "returns_raw": "",
       "param_names": [
         "session_id",
         "x",
@@ -2218,14 +2218,15 @@
       "name": "rd.macro.find_state_change_point",
       "group": "3.15，专家级宏工作流 (Expert Macro Workflows)",
       "description": "在 event 区间内搜索“某个状态何时从 A 变为 B”（通过 pipeline diff 快速二分/线性扫描）。",
-      "parameter_raw": "session_id (str)<br>event_range (dict): {start_event_id,end_event_id}<br>state_path (str): 例如 'OM.Blend.RT0.Enable' 或 'PS.Shader'<br>target_value (any): 期望值<br>search_policy (str, 可选, 默认 'binary'): `'binary'",
-      "returns_raw": "'linear'<br>max_steps (int, 可选, 默认 64`)",
+      "parameter_raw": "session_id (str)<br>event_range (dict): {start_event_id,end_event_id}<br>state_path (str): 例如 'OM.Blend.RT0.Enable' 或 'PS.Shader'<br>target_value (any): 期望值<br>search_policy (str, 可选, 默认 'binary'): `'binary'<br>'linear'<br>max_steps (int, 可选, 默认 64`)",
+      "returns_raw": "",
       "param_names": [
         "session_id",
         "event_range",
         "state_path",
         "target_value",
-        "search_policy"
+        "search_policy",
+        "max_steps"
       ]
     },
     {

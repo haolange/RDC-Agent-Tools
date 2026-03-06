@@ -1,11 +1,4 @@
-﻿"""Pipeline state 妫€鏌ヤ笌 shader artifact 瀵煎嚭 service銆?
-
-灏?RenderDoc 鐨?pipeline state introspection 涓?shader disassembly
-APIs 灏佽涓?async 鎿嶄綔锛岃繑鍥炵粨鏋勫寲鐨?Pydantic models 涓庣増鏈寲 artifacts銆?
-
-鎵€鏈夐樆濉炵殑 RenderDoc 璋冪敤閮戒細閫氳繃 ``asyncio.to_thread`` 鍒嗘淳鍒扮嚎绋嬨€?
-``renderdoc`` module 閲囩敤寤惰繜瀵煎叆鈥斺€斾粎鍦?RenderDoc replay context 涓彲鐢ㄣ€?
-"""
+"""Pipeline state inspection and shader artifact export service."""
 
 from __future__ import annotations
 
@@ -31,14 +24,13 @@ from rdx.models import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Lazy renderdoc import锛堝欢杩熷鍏ワ級
 # ---------------------------------------------------------------------------
 
 _rd_module: Any = None
 
 
 def _get_rd() -> Any:
-    """杩斿洖 ``renderdoc`` module锛屽苟鍦ㄩ娆¤闂椂瀵煎叆銆?"""
+    """Internal helper."""
     global _rd_module
     if _rd_module is None:
         try:
@@ -55,26 +47,25 @@ def _get_rd() -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Dependency protocols锛堜緷璧栧崗璁級
 # ---------------------------------------------------------------------------
 
 
 @runtime_checkable
 class SessionManager(Protocol):
-    """session lifecycle manager 鐨勬渶灏忕粨鏋勫寲绾﹀畾銆?"""
+    """Internal helper."""
 
     def get_controller(self, session_id: str) -> Any:
-        """杩斿洖缁戝畾鍒?*session_id* 鐨?``ReplayController``銆?"""
+        """Internal helper."""
         ...
 
     def get_output(self, session_id: str) -> Any:
-        """杩斿洖缁戝畾鍒?*session_id* 鐨?``ReplayOutput``銆?"""
+        """Internal helper."""
         ...
 
 
 @runtime_checkable
 class ArtifactStore(Protocol):
-    """artifact persistence layer 鐨勬渶灏忕粨鏋勫寲绾﹀畾銆?"""
+    """Internal helper."""
 
     async def store(
         self,
@@ -84,15 +75,13 @@ class ArtifactStore(Protocol):
         suffix: str,
         meta: Optional[Dict[str, Any]] = None,
     ) -> ArtifactRef:
-        """鎸佷箙鍖?*data* 骞惰繑鍥炶拷韪敤鐨?:class:`ArtifactRef`銆?"""
+        """Internal helper."""
         ...
 
 
 # ---------------------------------------------------------------------------
-# Shader stage enumeration helpers锛坰hader stage 鏋氫妇杈呭姪锛?
 # ---------------------------------------------------------------------------
 
-# 鏋氫妇缁戝畾 shader 鏃堕亶鍘嗙殑 graphics stages锛岄『搴忎笌鍏稿瀷 graphics pipeline 涓€鑷淬€?
 _GRAPHICS_STAGES: Tuple[str, ...] = (
     "Vertex",
     "Hull",
@@ -105,7 +94,7 @@ _COMPUTE_STAGES: Tuple[str, ...] = ("Compute",)
 
 
 def _rd_shader_stages() -> List[Any]:
-    """杩斿洖鎵€鏈?graphics 涓?compute stages 鐨?``rd.ShaderStage`` 鍒楄〃銆?"""
+    """Internal helper."""
     rd = _get_rd()
     return [
         rd.ShaderStage.Vertex,
@@ -118,7 +107,7 @@ def _rd_shader_stages() -> List[Any]:
 
 
 def _map_shader_stage(rd_stage: Any) -> ShaderStage:
-    """灏?RenderDoc ``ShaderStage`` enum 鏄犲皠涓烘垜浠殑 ``ShaderStage``銆?"""
+    """Internal helper."""
     rd = _get_rd()
     mapping: Dict[Any, ShaderStage] = {
         rd.ShaderStage.Vertex: ShaderStage.VS,
@@ -132,7 +121,7 @@ def _map_shader_stage(rd_stage: Any) -> ShaderStage:
 
 
 def _our_stage_to_rd(stage: ShaderStage) -> Any:
-    """灏嗘垜浠殑 ``ShaderStage`` 鏄犲皠鍥?RenderDoc ``ShaderStage``銆?"""
+    """Internal helper."""
     rd = _get_rd()
     mapping: Dict[ShaderStage, Any] = {
         ShaderStage.VS: rd.ShaderStage.Vertex,
@@ -149,12 +138,11 @@ def _our_stage_to_rd(stage: ShaderStage) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Graphics API mapping锛圙raphics API 鏄犲皠锛?
 # ---------------------------------------------------------------------------
 
 
 def _map_graphics_api(rd_api: Any) -> GraphicsAPI:
-    """灏?``rd.GraphicsAPI`` 鏄犲皠涓烘垜浠殑 ``GraphicsAPI`` enum銆?"""
+    """Internal helper."""
     rd = _get_rd()
     mapping: Dict[Any, GraphicsAPI] = {
         rd.GraphicsAPI.D3D11: GraphicsAPI.D3D11,
@@ -166,12 +154,11 @@ def _map_graphics_api(rd_api: Any) -> GraphicsAPI:
 
 
 # ---------------------------------------------------------------------------
-# Null ResourceId helper锛堢┖ ResourceId 鍒ゆ柇锛?
 # ---------------------------------------------------------------------------
 
 
 def _is_null_id(resource_id: Any) -> bool:
-    """褰?*resource_id* 涓虹┖/null 鏃惰繑鍥?``True``銆?"""
+    """Internal helper."""
     rd = _get_rd()
     try:
         return resource_id == rd.ResourceId()
@@ -180,15 +167,11 @@ def _is_null_id(resource_id: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# API-specific state retrieval锛圓PI 鐗瑰畾 state 鑾峰彇锛?
 # ---------------------------------------------------------------------------
 
 
 def _get_api_specific_state(controller: Any, rd_api: Any) -> Any:
-    """杩斿洖 API 鐗瑰畾鐨?pipeline state 瀵硅薄銆?
-
-    鑻?API 鏃犳硶璇嗗埆鍒欒繑鍥?``None``銆?
-    """
+    """Internal helper."""
     rd = _get_rd()
     if rd_api == rd.GraphicsAPI.D3D11:
         return controller.GetD3D11PipelineState()
@@ -202,15 +185,11 @@ def _get_api_specific_state(controller: Any, rd_api: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Blend state extraction锛圓PI 鐗瑰畾锛?
 # ---------------------------------------------------------------------------
 
 
 def _extract_blend_state(api_state: Any, api: GraphicsAPI) -> List[BlendState]:
-    """浠?API 鐗瑰畾 state 涓彁鍙栨瘡涓?RT 鐨?blend 閰嶇疆銆?
-
-    姣忎釜 render target slot 杩斿洖涓€涓?:class:`BlendState`銆?
-    """
+    """Internal helper."""
     blends: List[BlendState] = []
     if api_state is None:
         return blends
@@ -242,7 +221,6 @@ def _extract_blend_state(api_state: Any, api: GraphicsAPI) -> List[BlendState]:
 
 
 # ---------------------------------------------------------------------------
-# Depth / stencil extraction锛圓PI 鐗瑰畾锛?
 # ---------------------------------------------------------------------------
 
 
@@ -250,7 +228,7 @@ def _extract_depth_stencil(
     api_state: Any,
     api: GraphicsAPI,
 ) -> DepthStencilState:
-    """浠?API 鐗瑰畾 state 涓彁鍙?depth/stencil 閰嶇疆銆?"""
+    """Internal helper."""
     ds = DepthStencilState()
     if api_state is None:
         return ds
@@ -280,7 +258,6 @@ def _extract_depth_stencil(
 
 
 # ---------------------------------------------------------------------------
-# Render target extraction锛堟覆鏌撶洰鏍囨彁鍙栵級
 # ---------------------------------------------------------------------------
 
 
@@ -289,13 +266,7 @@ async def _extract_render_targets(
     api: GraphicsAPI,
     controller: Any,
 ) -> Tuple[List[RenderTargetInfo], Optional[RenderTargetInfo]]:
-    """鎻愬彇 colour render targets 涓?depth target銆?
-
-    浣跨敤鎶借薄鎺ュ彛 ``PipeState.GetOutputTargets()`` 涓?
-    ``PipeState.GetDepthTarget()``锛屽洜姝ら€昏緫涓?API 鏃犲叧銆?
-
-    杩斿洖 ``(colour_targets, depth_target)``銆?
-    """
+    """Internal helper."""
     colour_targets: List[RenderTargetInfo] = []
     depth_target: Optional[RenderTargetInfo] = None
 
@@ -315,7 +286,6 @@ async def _extract_render_targets(
                 rt.format = str(tex.format.Name()) if hasattr(tex.format, "Name") else str(tex.format)
                 rt.width = int(tex.width)
                 rt.height = int(tex.height)
-                # 缁忛獙鍒ゆ柇锛氭鏌?format 鍚嶇О涓槸鍚﹀寘鍚?sRGB銆?
                 rt.is_srgb = "srgb" in rt.format.lower()
             colour_targets.append(rt)
     except (AttributeError, TypeError) as exc:
@@ -340,12 +310,11 @@ async def _extract_render_targets(
 
 
 # ---------------------------------------------------------------------------
-# Viewport / scissor extraction锛圓PI 鐗瑰畾锛?
 # ---------------------------------------------------------------------------
 
 
 def _extract_viewport(api_state: Any, api: GraphicsAPI) -> Dict[str, float]:
-    """杩斿洖绗竴涓?viewport锛屾牸寮忎负 ``{x, y, width, height, minDepth, maxDepth}``銆?"""
+    """Internal helper."""
     try:
         if api in (GraphicsAPI.D3D11, GraphicsAPI.D3D12, GraphicsAPI.OPENGL):
             vp = api_state.rasterizer.viewports[0]
@@ -374,7 +343,7 @@ def _extract_viewport(api_state: Any, api: GraphicsAPI) -> Dict[str, float]:
 
 
 def _extract_scissor(api_state: Any, api: GraphicsAPI) -> Dict[str, int]:
-    """杩斿洖绗竴涓?scissor rect锛屾牸寮忎负 ``{x, y, width, height}``銆?"""
+    """Internal helper."""
     try:
         if api in (GraphicsAPI.D3D11, GraphicsAPI.D3D12, GraphicsAPI.OPENGL):
             sc = api_state.rasterizer.scissors[0]
@@ -399,12 +368,11 @@ def _extract_scissor(api_state: Any, api: GraphicsAPI) -> Dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# Topology extraction锛圓PI 鐗瑰畾锛?
 # ---------------------------------------------------------------------------
 
 
 def _extract_topology(api_state: Any, api: GraphicsAPI) -> str:
-    """杩斿洖鍙鐨?primitive topology 瀛楃涓层€?"""
+    """Internal helper."""
     try:
         if api in (GraphicsAPI.D3D11, GraphicsAPI.D3D12, GraphicsAPI.VULKAN):
             return str(api_state.inputAssembly.topology)
@@ -416,7 +384,6 @@ def _extract_topology(api_state: Any, api: GraphicsAPI) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Resource binding helpers锛堣祫婧愮粦瀹氳緟鍔╋級
 # ---------------------------------------------------------------------------
 
 
@@ -573,16 +540,11 @@ def _collect_bindings_for_stage(
 
     return entries
 # ---------------------------------------------------------------------------
-# Shader reflection serialisation锛堝簭鍒楀寲锛?
 # ---------------------------------------------------------------------------
 
 
 def _reflection_to_dict(refl: Any) -> Dict[str, Any]:
-    """灏?``ShaderReflection`` 杞崲涓?JSON-safe 鐨勫瓧鍏搞€?
-
-    浠呬繚鐣欏璋冭瘯鏈€鏈変环鍊肩殑閮ㄥ垎锛歴ignatures銆乧onstant blocks锛?
-    浠ュ強 resource bindings锛坣ames銆乼ypes銆乥ind points锛夈€?
-    """
+    """Internal helper."""
     result: Dict[str, Any] = {}
 
     # ---- Input / output signatures ----
@@ -665,10 +627,7 @@ def _reflection_to_dict(refl: Any) -> Dict[str, Any]:
 
 
 class PipelineService:
-    """Pipeline state 妫€鏌ヤ笌 shader artifact 瀵煎嚭銆?
-
-    鎵€鏈夊叕寮€鏂规硶鍧囦负 ``async``锛屾帴鏀舵樉寮忎緷璧栵紝骞惰繑鍥炵粨鏋勫寲鐨?Pydantic models銆?
-    """
+    """Internal helper."""
 
     # ------------------------------------------------------------------
     # snapshot_pipeline
@@ -680,23 +639,7 @@ class PipelineService:
         event_id: int,
         session_manager: SessionManager,
     ) -> PipelineSnapshot:
-        """鍦ㄦ寚瀹?event 鎹曡幏瀹屾暣鐨?pipeline state snapshot銆?
-
-        Parameters
-        ----------
-        session_id:
-            娲昏穬 replay session id銆?
-        event_id:
-            闇€瑕佹鏌ョ殑 API event銆?
-        session_manager:
-            鎻愪緵 ``ReplayController``銆?
-
-        Returns
-        -------
-        PipelineSnapshot
-            鍖呭惈 shaders銆乺ender targets銆乥lend銆乨epth/stencil銆?
-            viewport銆乻cissor銆乼opology 涓?bindings 鐨勫畬鏁?pipeline state銆?
-        """
+        """Internal helper."""
         rd = _get_rd()
         controller = session_manager.get_controller(session_id)
 
@@ -711,7 +654,6 @@ class PipelineService:
             _get_api_specific_state, controller, api_props.pipelineType,
         )
 
-        # ---- Shaders锛堢潃鑹插櫒锛?----------------------------------------
         shaders: List[ShaderInfo] = []
         for rd_stage in _rd_shader_stages():
             try:
@@ -740,12 +682,10 @@ class PipelineService:
                     rd_stage, exc,
                 )
 
-        # ---- Render targets 涓?depth target -------------------------
         render_targets, depth_target = await _extract_render_targets(
             pipe, api, controller,
         )
 
-        # ---- Blend state锛堟贩鍚堢姸鎬侊級-----------------------------------
         blend_states = _extract_blend_state(api_state, api)
 
         # ---- Depth / stencil state -----------------------------------
@@ -758,7 +698,6 @@ class PipelineService:
         # ---- Topology ------------------------------------------------
         topology = _extract_topology(api_state, api)
 
-        # ---- Resource bindings锛坅ll stages锛?-------------------------
         bindings: List[ResourceBindingEntry] = []
         for rd_stage in _rd_shader_stages():
             try:
@@ -798,27 +737,7 @@ class PipelineService:
         session_manager: SessionManager,
         artifact_store: ArtifactStore,
     ) -> ShaderExportBundle:
-        """瀵煎嚭 *stage* 缁戝畾鐨?shader锛氬寘鍚?reflection + disassembly artifacts銆?
-
-        Parameters
-        ----------
-        session_id:
-            娲昏穬 replay session id銆?
-        event_id:
-            闇€瑕佹鏌ョ殑 API event銆?
-        stage:
-            鎴戜滑鐨?``ShaderStage`` enum 鍊硷紙渚嬪 ``ShaderStage.PS``锛夈€?
-        session_manager:
-            鎻愪緵 ``ReplayController``銆?
-        artifact_store:
-            鐢熸垚 artifacts 鐨勬寔涔呭寲灞傘€?
-
-        Returns
-        -------
-        ShaderExportBundle
-            鍖呭惈 shader reflection JSON 涓?disassembly 鏂囨湰鐨?artifact 寮曠敤锛?
-            浠ュ強鐩稿叧 metadata銆?
-        """
+        """Internal helper."""
         rd = _get_rd()
         controller = session_manager.get_controller(session_id)
 
@@ -840,7 +759,6 @@ class PipelineService:
                 f"at event {event_id}"
             )
 
-        # 纭畾鐢ㄤ簬 disassembly 鐨?pipeline object ResourceId銆?
         pipeline_rid = rd.ResourceId()
         try:
             if stage == ShaderStage.CS:
@@ -848,10 +766,8 @@ class PipelineService:
             else:
                 pipeline_rid = pipe.GetGraphicsPipelineObject()
         except (AttributeError, TypeError):
-            # 鍥為€€锛歯ull pipeline锛堝鏁?API 鍙敤锛夈€?
             pass
 
-        # 瑙ｆ瀽 entry point銆?
         entry_point = "main"
         encoding = ""
         if hasattr(refl, "entryPoint"):
@@ -859,7 +775,6 @@ class PipelineService:
         if hasattr(refl, "encoding"):
             encoding = str(refl.encoding)
 
-        # ---- Reflection JSON artifact锛堝弽灏勶級---------------------------
         refl_dict = _reflection_to_dict(refl)
         refl_dict["_meta"] = {
             "event_id": event_id,
@@ -880,7 +795,6 @@ class PipelineService:
             },
         )
 
-        # ---- Disassembly artifact锛堝弽姹囩紪锛?-----------------------------
         disasm_artifact: Optional[ArtifactRef] = None
         try:
             targets: List[str] = await asyncio.to_thread(
@@ -888,8 +802,6 @@ class PipelineService:
             )
 
             if targets:
-                # 浼樺厛浣跨敤绗竴涓彲鐢ㄧ殑 disassembly target锛涘悓鏃跺皢鎵€鏈?
-                # 鎴愬姛鐨勫弽姹囩紪鍚堝苟鎴愪竴涓甫鍒嗗尯鏍囬鐨勬枃鏈紝渚夸簬涓嬫父閫夋嫨銆?
                 sections: List[str] = []
                 for target_name in targets:
                     try:
@@ -930,7 +842,6 @@ class PipelineService:
         # ---- Compute a content hash for the shader -------------------
         shader_hash = ""
         try:
-            # 灏?reflection JSON 鐨?hash 浣滀负绋冲畾 identity銆?
             shader_hash = hashlib.sha256(refl_bytes).hexdigest()[:16]
         except Exception:
             pass
@@ -954,22 +865,7 @@ class PipelineService:
         event_id: int,
         session_manager: SessionManager,
     ) -> List[ResourceBindingEntry]:
-        """杩斿洖鎵€鏈夋椿璺?shader stages 鐨勮祫婧愮粦瀹氥€?
-
-        Parameters
-        ----------
-        session_id:
-            娲昏穬 replay session id銆?
-        event_id:
-            闇€瑕佹鏌ョ殑 API event銆?
-        session_manager:
-            鎻愪緵 ``ReplayController``銆?
-
-        Returns
-        -------
-        list[ResourceBindingEntry]
-            鎵€鏈夋椿璺?stages 鐨勭粦瀹氳祫婧愭墎骞冲垪琛ㄣ€?
-        """
+        """Internal helper."""
         rd = _get_rd()
         controller = session_manager.get_controller(session_id)
 
@@ -989,7 +885,6 @@ class PipelineService:
                     pipe, rd_stage, our_stage,
                 )
 
-                # 鑻ュ彲鐢紝鍒欑敤 reflection 濉厖 resource names銆?
                 refl = pipe.GetShaderReflection(rd_stage)
                 if refl is not None:
                     _enrich_binding_names(stage_entries, refl)
@@ -1004,7 +899,6 @@ class PipelineService:
 
 
 # ---------------------------------------------------------------------------
-# Post-processing helpers锛堝悗澶勭悊杈呭姪锛?
 # ---------------------------------------------------------------------------
 
 
@@ -1012,11 +906,7 @@ def _enrich_binding_names(
     entries: List[ResourceBindingEntry],
     refl: Any,
 ) -> None:
-    """浠?shader reflection 濉厖 ``resource_name`` 涓?``format``銆?
-
-    閫氳繃 binding index 涓?reflection 鐨勮祫婧愬垪琛ㄥ尮閰嶏紝骞跺師鍦颁慨鏀?*entries*銆?
-    """
-    # 浠?reflection 鏋勫缓蹇€熸煡鎵捐〃銆?
+    """Internal helper."""
     ro_by_bind: Dict[int, Any] = {}
     rw_by_bind: Dict[int, Any] = {}
     cb_by_bind: Dict[int, Any] = {}
