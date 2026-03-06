@@ -1,23 +1,64 @@
-"""Runtime path helpers for the standalone rdx-tools distribution."""
+﻿"""Runtime path helpers for the standalone rdx-tools distribution."""
 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
+_RDX_TOOLS_ROOT_ENV = "RDX_TOOLS_ROOT"
+_WARNED_ROOT_OVERRIDE = False
+
+
 def tools_root() -> Path:
-    """Return rdx-tools root directory."""
-    env = os.environ.get("RDX_TOOLS_ROOT", "").strip()
-    if env:
-        p = Path(env).expanduser().resolve()
-        if p.is_dir():
-            return p
-    # <root>/rdx/runtime_paths.py
-    return Path(__file__).resolve().parents[1]
+    """Return rdx-tools root directory with env-first resolution.
+
+    Resolution strategy (in priority order):
+    1) ``RDX_TOOLS_ROOT`` if set and valid.
+    2) Directory containing this file's package root (``rdx/`` parent).
+
+    If both are set and different, a single warning is emitted and env takes
+    precedence.
+    """
+
+    global _WARNED_ROOT_OVERRIDE
+    fallback = Path(__file__).resolve().parents[1]
+
+    env_root = os.environ.get(_RDX_TOOLS_ROOT_ENV, "").strip()
+    if env_root:
+        candidate = Path(env_root).expanduser().resolve()
+        if candidate.is_dir():
+            if not _WARNED_ROOT_OVERRIDE and candidate != fallback:
+                print(
+                    f"[rdx] warning: {_RDX_TOOLS_ROOT_ENV} overrides script root, "
+                    f"using {candidate} (script root: {fallback})",
+                    file=sys.stderr,
+                )
+                _WARNED_ROOT_OVERRIDE = True
+            return candidate
+
+    return fallback
+
+
+def require_tools_root() -> Path:
+    """Return tools root and raise when invalid."""
+    root = tools_root()
+    if not root.is_dir():
+        raise RuntimeError(f"rdx-tools root not found: {root}")
+    return root
+
+
+def ensure_tools_root_env(*, force: bool = False) -> Path:
+    """Ensure ``RDX_TOOLS_ROOT`` is set to the resolved root."""
+    root = tools_root()
+    if force or not os.environ.get(_RDX_TOOLS_ROOT_ENV):
+        os.environ[_RDX_TOOLS_ROOT_ENV] = str(root)
+    return root
 
 
 def binaries_root() -> Path:
+    """Directory containing ``renderdoc.dll`` and third-party runtime artifacts."""
     return tools_root() / "binaries" / "windows" / "x64"
 
 

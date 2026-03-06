@@ -1,4 +1,4 @@
-"""Client utilities for RDX daemon over Windows named pipes."""
+﻿"""Client utilities for RDX daemon over Windows named pipes."""
 
 from __future__ import annotations
 
@@ -8,21 +8,24 @@ import secrets
 import subprocess
 import sys
 import time
+from multiprocessing.connection import Client
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
-
-from multiprocessing.connection import Client
 
 from rdx.runtime_paths import cli_runtime_dir
 
 STATE_DIR = cli_runtime_dir()
 DAEMON_STATE_FILE = STATE_DIR / "daemon_state.json"
 SESSION_STATE_FILE = STATE_DIR / "session_state.json"
+POLL_DELAYS = (0.1, 0.2, 0.3, 0.5, 0.8, 1.2, 1.6, 2.0)
+MAX_STOP_TIMEOUT_S = 8.0
 
 
 def _normalize_context(context: Optional[str]) -> str:
     ctx = str(context or "").strip()
-    return ctx if ctx and ctx.lower() != "default" else "default"
+    if not ctx or ctx.lower() == "default":
+        return "default"
+    return ctx
 
 
 def _daemon_state_path(context: Optional[str]) -> Path:
@@ -78,6 +81,46 @@ def save_session_state(payload: Dict[str, Any]) -> None:
     _save_json(SESSION_STATE_FILE, payload)
 
 
+def _is_windows_process_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        if not ok:
+            return True
+        return bool(code.value == 259)
+    except Exception:
+        return False
+
+
+def _kill_process(pid: int) -> bool:
+    try:
+        proc = subprocess.run(
+            ["taskkill", "/PID", str(int(pid)), "/F", "/T"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=3,
+            creationflags=0x08000000 if os.name == "nt" else 0,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _is_process_running(pid: int) -> bool:
+    if os.name == "nt":
+        return _is_windows_process_running(pid)
+    return False
+
+
 def daemon_request(
     method: str,
     *,
@@ -109,6 +152,27 @@ def daemon_request(
     if not isinstance(response, dict):
         raise RuntimeError(f"Invalid daemon response: {type(response).__name__}")
     return response
+
+
+def _wait_for_daemon_ready(state: Dict[str, Any]) -> bool:
+    for delay in POLL_DELAYS:
+        try:
+            daemon_request("ping", params={}, timeout=1.0, state=state)
+            return True
+        except Exception:
+            time.sleep(delay)
+    return False
+
+
+def _wait_for_pid_exit(pid: int, timeout_s: float) -> bool:
+    if pid <= 0:
+        return True
+    deadline = time.time() + max(0.0, timeout_s)
+    while time.time() < deadline:
+        if not _is_process_running(pid):
+            return True
+        time.sleep(0.2)
+    return not _is_process_running(pid)
 
 
 def start_daemon(
@@ -143,18 +207,13 @@ def start_daemon(
     env = dict(os.environ)
     tools_root = str(env.get("RDX_TOOLS_ROOT", "")).strip()
     if tools_root:
-        tools_root_path = str(Path(tools_root).resolve())
         py_path = env.get("PYTHONPATH", "")
-        if py_path:
-            env["PYTHONPATH"] = tools_root_path + os.pathsep + py_path
-        else:
-            env["PYTHONPATH"] = tools_root_path
+        env["PYTHONPATH"] = str(Path(tools_root).resolve()) + os.pathsep + py_path if py_path else str(Path(tools_root).resolve())
     popen_kwargs["env"] = env
-    # Start daemon in background without opening a new console window.
     if os.name == "nt":
         popen_kwargs["creationflags"] = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-    proc = subprocess.Popen(cmd, **popen_kwargs)
 
+    proc = subprocess.Popen(cmd, **popen_kwargs)
     state = {
         "pipe_name": chosen_pipe,
         "token": chosen_token,
@@ -163,31 +222,46 @@ def start_daemon(
         "daemon_context": chosen_ctx,
         "owner_pid": int(owner_pid) if owner_pid else 0,
     }
-    # Wait for ping.
-    for _ in range(80):
+
+    if not _wait_for_daemon_ready(state):
         try:
-            resp = daemon_request("ping", params={}, timeout=0.5, state=state)
-            if bool(resp.get("ok")):
-                save_daemon_state(state, context=chosen_ctx)
-                return True, f"daemon started ({chosen_pipe})", state
-        except Exception:
-            time.sleep(0.1)
-            continue
-    try:
-        proc.kill()
-    except Exception:
-        pass
-    return False, "daemon failed to start", {}
+            if proc and proc.pid:
+                _kill_process(int(proc.pid))
+        finally:
+            clear_daemon_state(context=chosen_ctx)
+        return False, "daemon failed to start (ready timeout)", {}
+
+    save_daemon_state(state, context=chosen_ctx)
+    return True, f"daemon started ({chosen_pipe})", state
+
+
+def _shutdown_stateful_daemon(pid: int | None, state: Dict[str, Any], context: str) -> None:
+    if pid and _is_process_running(pid):
+        for _ in range(4):
+            try:
+                daemon_request("shutdown", params={}, state=state, context=context)
+            except Exception:
+                pass
+            if _wait_for_pid_exit(pid, 2.0):
+                return
+            time.sleep(0.5)
+
+        _kill_process(pid)
+        _wait_for_pid_exit(pid, 3.0)
 
 
 def stop_daemon(context: Optional[str] = "default") -> Tuple[bool, str]:
     chosen_ctx = _normalize_context(context)
     st = load_daemon_state(context=chosen_ctx)
     if not st:
+        clear_daemon_state(context=chosen_ctx)
         return False, "no active daemon"
-    try:
-        daemon_request("shutdown", params={}, context=chosen_ctx)
-    except Exception:
-        pass
+
+    pid = int(st.get("pid") or 0)
+    _shutdown_stateful_daemon(pid, st, chosen_ctx)
+
+    if pid and _is_process_running(pid):
+        return False, "daemon stop timed out"
+
     clear_daemon_state(context=chosen_ctx)
     return True, "daemon stopped"

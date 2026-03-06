@@ -1,401 +1,467 @@
-#!/usr/bin/env python3
-"""Aggregate command smoke and tool-contract outputs into a fixed desktop report."""
+﻿#!/usr/bin/env python3
+"""Aggregate rdx.bat smoke + tool contract reports into a unified smoke summary."""
 
 from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-def _tools_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-def _default_output() -> Path:
-    return Path.home() / "Desktop" / "rdx_smoke_issues_blockers.md"
+from collections import defaultdict
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _tools_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
-def _summary_stats(items: list[dict[str, Any]]) -> dict[str, int]:
-    return {
-        "total": len(items),
-        "pass": sum(1 for item in items if item.get("status") == "pass"),
-        "issue": sum(1 for item in items if item.get("status") == "issue"),
-        "blocker": sum(1 for item in items if item.get("status") == "blocker"),
-    }
+def _safe(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, (dict, list)):
+        try:
+            return json.dumps(v, ensure_ascii=False)
+        except Exception:
+            return str(v)
+    return str(v)
 
 
-def _short(value: Any, max_len: int = 380) -> str:
-    text = str(value or "")
-    text = text.replace("\r", " ").replace("\n", " ").strip()
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 3] + "..."
-
-
-def _load_command_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    results = payload.get("results")
-    return results if isinstance(results, list) else []
-
-
-def _load_tool_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _tool_command_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     transports = payload.get("transports", {})
     if not isinstance(transports, dict):
         return out
-
-    for transport, transport_payload in transports.items():
+    for transport_name, transport_payload in transports.items():
         if not isinstance(transport_payload, dict):
             continue
-        for item in transport_payload.get("items", []):
+        items = transport_payload.get("items", [])
+        for item in items if isinstance(items, list) else []:
             if not isinstance(item, dict):
                 continue
-            merged = dict(item)
-            merged["transport"] = str(merged.get("transport") or transport)
-            out.append(merged)
-
+            copy = dict(item)
+            copy.setdefault("transport", str(transport_name))
+            out.append(copy)
     return out
 
 
-def _is_remote_app_issue(item: dict[str, Any]) -> bool:
-    return str(item.get("issue_type") or "").strip() == "remote_app_dependency"
+def _overall_status(blocker: int, issue: int) -> str:
+    if blocker > 0:
+        return "FAIL"
+    if issue > 0:
+        return "PARTIAL"
+    return "PASS"
 
 
-def _is_sample_compatibility_issue(item: dict[str, Any]) -> bool:
-    return str(item.get("issue_type") or "").strip() == "sample_compatibility"
+def _command_summary(payload: dict[str, Any]) -> dict[str, int]:
+    results = payload.get("results", [])
+    if not isinstance(results, list):
+        return {"total": 0, "pass": 0, "issue": 0, "blocker": 0}
+    return {
+        "total": len(results),
+        "pass": sum(1 for item in results if isinstance(item, dict) and item.get("status") == "pass"),
+        "issue": sum(1 for item in results if isinstance(item, dict) and item.get("status") == "issue"),
+        "blocker": sum(1 for item in results if isinstance(item, dict) and item.get("status") == "blocker"),
+    }
 
 
-def _is_usability_issue(item: dict[str, Any]) -> bool:
-    if str(item.get("tool") or "") != "rdx.bat":
-        return False
-    return str(item.get("issue_type") or "").strip() in {"usability", "issue"}
+def _transport_summary(payload: dict[str, Any], transport: str) -> dict[str, int]:
+    transport_payload = payload.get("transports", {}).get(transport, {})
+    if not isinstance(transport_payload, dict):
+        return {"total": 0, "pass": 0, "issue": 0, "blocker": 0, "scope_skip": 0}
+    summary = transport_payload.get("summary", {})
+    if isinstance(summary, dict):
+        return {
+            "total": int(summary.get("total", 0)),
+            "pass": int(summary.get("pass", 0)),
+            "issue": int(summary.get("issue", 0)),
+            "blocker": int(summary.get("blocker", 0)),
+            "scope_skip": int(summary.get("scope_skip", 0)),
+            "callable_pass": int(summary.get("callable_pass", 0)),
+            "contract_pass": int(summary.get("contract_pass", 0)),
+        }
+    return {"total": 0, "pass": 0, "issue": 0, "blocker": 0, "scope_skip": 0}
 
 
-def _collect_blockers(items: list[dict[str, Any]]) -> list[tuple[int, str, dict[str, Any]]]:
-    blockers: list[tuple[int, str, dict[str, Any]]] = []
+def _transport_health_tool_count(payload: dict[str, Any], transport: str) -> dict[str, int]:
+    items = [item for item in _tool_command_items(payload) if item.get("transport") == transport]
+    if not items:
+        return {"local": 0, "remote": 0, "total": 0}
+
+    local_total = sum(1 for item in items if str(item.get("matrix") or "") == "local")
+    remote_total = sum(1 for item in items if str(item.get("matrix") or "") == "remote")
+    skip = sum(1 for item in items if str(item.get("issue_type") or "") == "scope_skip")
+    return {
+        "total": len(items),
+        "local": local_total,
+        "remote": remote_total,
+        "scope_skip": skip,
+    }
+
+
+def _collect_scope_skip(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
     for item in items:
-        if str(item.get("status") or "") != "blocker":
+        if str(item.get("issue_type") or "") != "scope_skip":
             continue
-
-        impact = str(item.get("impact_scope") or item.get("matrix") or "")
-        low_impact = impact.lower()
-        if "main chain" in low_impact or "contract" in low_impact or "schema" in low_impact:
-            severity = 0
-        elif "remote_id" in low_impact or "remote" in low_impact:
-            severity = 1
-        elif "daemon" in low_impact:
-            severity = 2
-        elif "command" in low_impact or "menu" in low_impact:
-            severity = 3
-        else:
-            severity = 4
-
-        source = str(item.get("tool") or item.get("id") or "")
-        blockers.append((severity, source.lower(), item))
-
-    blockers.sort(key=lambda item: (item[0], item[1]))
-    return blockers
+        result.append(item)
+    return result
 
 
-def _build_tool_diff(tool_items: list[dict[str, Any]]) -> list[str]:
-    grouped: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    for item in tool_items:
-        tool_name = str(item.get("tool") or "")
-        transport = str(item.get("transport") or "")
-        if not tool_name or transport not in {"mcp", "daemon"}:
+def _collect_items_by_status(items: list[dict[str, Any]], status: str) -> list[dict[str, Any]]:
+    return [item for item in items if str(item.get("status") or "") == status]
+
+
+def _collect_env_issues(command_payload: dict[str, Any], tool_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    env_items: list[dict[str, Any]] = []
+    for item in command_payload.get("results", []) if isinstance(command_payload.get("results"), list) else []:
+        if not isinstance(item, dict):
             continue
-        grouped[tool_name][transport] = item
+        if str(item.get("id") or "") in {"mcp-ensure-env", "daemon-shell-lifecycle"}:
+            env_items.append(item)
+        if str(item.get("error_code") or "") in {
+            "runtime_layout_missing",
+            "dependencies_missing",
+            "renderdoc_import_failed",
+            "no_python_found",
+            "startup_failed",
+        }:
+            env_items.append(item)
 
-    lines: list[str] = []
-    for tool_name, transport_map in sorted(grouped.items()):
-        mcp = transport_map.get("mcp", {})
-        daemon = transport_map.get("daemon", {})
-        mcp_status = mcp.get("status")
-        daemon_status = daemon.get("status")
-        if not mcp_status or not daemon_status or mcp_status == daemon_status:
+    for transport_name in ("mcp", "daemon"):
+        transport_payload = tool_payload.get("transports", {}).get(transport_name, {})
+        if not isinstance(transport_payload, dict):
             continue
+        if isinstance(transport_payload.get("fatal_error"), str) and transport_payload.get("fatal_error"):
+            env_items.append(
+                {
+                    "tool": transport_name,
+                    "transport": transport_name,
+                    "matrix": "local",
+                    "status": "blocker",
+                    "reason": str(transport_payload.get("fatal_error")),
+                    "issue_type": "env",
+                    "impact_scope": "runtime setup",
+                    "error_code": "startup_blocked",
+                    "fix_hint": "Verify runtime directories and RenderDoc bootstrap state.",
+                    "repro_command": f"python {transport_name}/run_{transport_name}.py --help",
+                    "evidence": str(transport_payload.get("fatal_error")),
+                }
+            )
 
-        mcp_issue = _short(str(mcp.get("issue_type") or mcp.get("error_code") or "n/a"), 200)
-        daemon_issue = _short(str(daemon.get("issue_type") or daemon.get("error_code") or "n/a"), 200)
-        mcp_reason = str(mcp.get("reason") or "")
-        daemon_reason = str(daemon.get("reason") or "")
-
-        if mcp_status == "blocker" and daemon_status != "blocker":
-            suggestion = "先修 MCP/标准链路；确认 stdio 注册、工具列表与 schema 完整。"
-        elif daemon_status == "blocker" and mcp_status != "blocker":
-            suggestion = "先修 daemon 路径（daemon 启动、上下文、call 命令顺序、连接保持）。"
-        else:
-            suggestion = "对比差异原因，两链路分别补齐；优先定位首个报错工具。"
-
-        lines.append(
-            f"- `{tool_name}`: mcp={mcp_status}({mcp_issue}) / daemon={daemon_status}({daemon_issue})"
-            f"\n  - reason_delta: {_short(mcp_reason or daemon_reason, 220)}"
-            f"\n  - suggest: {suggestion}"
-        )
-
-    return lines
+    return env_items
 
 
-def _collect_cleanup_residual(command_payload: dict[str, Any], tool_payload: dict[str, Any]) -> list[str]:
-    residual: list[str] = []
+def _cleanliness(payload: dict[str, Any]) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    blocked = False
 
-    command_cleanup = command_payload.get("cleanup", {})
+    command_cleanup = payload.get("command", {}).get("cleanup") if isinstance(payload.get("command"), dict) else payload.get("cleanup")
     if isinstance(command_cleanup, dict):
-        for key, value in command_cleanup.items():
-            residual.append(f"command::{key}={_short(value, 180)}")
+        daemons = command_cleanup.get("contexts") or []
+        if daemons and not all(isinstance(i, str) and i for i in daemons):
+            blocked = True
+            reasons.append("command cleanup contains non-string context entries")
+    else:
+        # No explicit cleanup section means command report cannot assert clean state.
+        reasons.append("command report missing cleanup metadata")
 
-    daemon_payload = tool_payload.get("transports", {}).get("daemon", {})
-    if isinstance(daemon_payload, dict):
-        daemon_cleanup = daemon_payload.get("cleanup", {})
-        if isinstance(daemon_cleanup, dict):
-            for key, value in daemon_cleanup.items():
-                residual.append(f"daemon::{key}={_short(value, 180)}")
-
-    if not residual:
-        residual.append("no residual metadata found")
-
-    return residual
-
-
-def _remote_workflow_summary(payload: dict[str, Any]) -> list[str]:
-    lines: list[str] = []
-    transports_payload = payload.get("transports", {})
+    tool_payload = payload.get("tool", {})
     for transport in ("mcp", "daemon"):
-        t_payload = transports_payload.get(transport)
-        if not isinstance(t_payload, dict):
-            continue
-        events = t_payload.get("remote_workflow_events", [])
-        if not isinstance(events, list):
-            lines.append(f"{transport}: no remote workflow data")
-            continue
-        if not events:
-            lines.append(f"{transport}: no remote workflow events")
-            continue
-        joined = " -> ".join(str(item) for item in events)
-        has_connect = any(str(item).startswith(f"{transport}-connect") for item in events)
-        has_tool = any(str(item).startswith(f"{transport}-tool") for item in events)
-        has_disconnect = any(str(item).startswith(f"{transport}-disconnect") for item in events)
-        if has_connect and has_tool and has_disconnect:
-            status = "OK"
-        elif has_connect and has_tool:
-            status = "INCOMPLETE (missing disconnect)"
-        else:
-            status = "BROKEN"
-        lines.append(f"{transport}: {status} | {joined}")
-    if not lines:
-        lines.append("no transport payload found")
-    return lines
+        transport_payload = tool_payload.get("transports", {}).get(transport, {}) if isinstance(tool_payload, dict) else {}
+        cleanup = transport_payload.get("cleanup", {}) if isinstance(transport_payload, dict) else {}
+        if isinstance(cleanup, dict):
+            for key, value in cleanup.items():
+                if isinstance(value, str) and ("fail" in value.lower() or "error" in value.lower()):
+                    blocked = True
+                    reasons.append(f"{transport} cleanup issue: {value}")
+
+    if not reasons and not blocked:
+        return "已清理", []
+
+    if blocked:
+        return "未完全清理（含原因）", reasons
+
+    return "已清理", reasons
 
 
-def _collect_clear_state(residual: list[str]) -> tuple[str, list[str]]:
-    blockers = [line for line in residual if "False" in line or "failed" in line.lower() or "error" in line.lower()]
-    if blockers:
-        return "未完全清理（含残留项与手动清理命令）", residual
-    return "已清理", residual
+def _append_blocklist(lines: list[str], items: list[dict[str, Any]], title: str) -> None:
+    lines.append(f"### {title}")
+    if not items:
+        lines.append("- (none)")
+        return
+    for item in items:
+        transport = item.get("transport")
+        tool = item.get("tool") or item.get("id")
+        status = item.get("status")
+        scope = item.get("matrix") or item.get("impact_scope") or "unknown"
+        reason = item.get("reason") or ""
+        code = item.get("error_code") or ""
+        repro = item.get("repro_command") or ""
+        lines.append(f"- [{transport or 'command'}] {tool} ({scope}) [{status}] {reason}")
+        lines.append(f"  - error_code: {code}")
+        if repro:
+            lines.append(f"  - repro: `{_safe(repro)}`")
+        if item.get("fix_hint"):
+            lines.append(f"  - fix_hint: {item.get('fix_hint')}")
+
+
+def _append_stats(lines: list[str], transport_name: str, summary: dict[str, int], counts: dict[str, int]) -> None:
+    lines.extend(
+        [
+            f"#### {transport_name}",
+            f"- total: {summary['total']}",
+            f"- local: {counts.get('local', 0)}",
+            f"- remote: {counts.get('remote', 0)}",
+            f"- pass: {summary['pass']}",
+            f"- issue: {summary['issue']}",
+            f"- blocker: {summary['blocker']}",
+            f"- scope_skip: {summary['scope_skip']}",
+            f"- local_effective: {max(0, summary['total'] - summary['scope_skip']) if summary['total'] >= summary['scope_skip'] else 0}",
+            f"- callable_pass: {summary.get('callable_pass', 0)}",
+            f"- contract_pass: {summary.get('contract_pass', 0)}",
+        ]
+    )
+
+
+def _write_report(
+    out_path: Path,
+    command_payload: dict[str, Any],
+    tool_payload: dict[str, Any],
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    command_summary = _command_summary(command_payload)
+    transport_summaries = {
+        name: _transport_summary(tool_payload, name) for name in ("mcp", "daemon")
+    }
+    tool_items = _tool_command_items(tool_payload)
+
+    mcp_scope_skip = _collect_scope_skip([item for item in tool_items if str(item.get("transport") or "") == "mcp"])
+    daemon_scope_skip = _collect_scope_skip([item for item in tool_items if str(item.get("transport") or "") == "daemon"])
+    all_blockers = _collect_items_by_status(tool_items, "blocker") + [
+        item
+        for item in command_payload.get("results", [])
+        if isinstance(item, dict) and item.get("status") == "blocker"
+    ]
+    all_issues = _collect_items_by_status(tool_items, "issue") + [
+        item
+        for item in command_payload.get("results", [])
+        if isinstance(item, dict) and item.get("status") == "issue"
+    ]
+
+    total_blocker = command_summary["blocker"] + transport_summaries["mcp"]["blocker"] + transport_summaries["daemon"]["blocker"]
+    total_issue = command_summary["issue"] + transport_summaries["mcp"]["issue"] + transport_summaries["daemon"]["issue"]
+
+    global_status = _overall_status(blocker=total_blocker, issue=total_issue)
+    env_issues = _collect_env_issues(command_payload, tool_payload)
+
+    cleanup_status, cleanup_reasons = _cleanliness({"command": command_payload, "tool": tool_payload})
+
+    mcp_count = _transport_health_tool_count(tool_payload, "mcp")
+    daemon_count = _transport_health_tool_count(tool_payload, "daemon")
+
+    lines = [
+        "# RDC-Tools 本地链路稳定性汇总",
+        "",
+        f"- generated_at_utc: {_now_iso()}",
+        f"- local_rdc: `{tool_payload.get('local_rdc', command_payload.get('local_rdc', ''))}`",
+        f"- remote_rdc: `{tool_payload.get('remote_rdc', command_payload.get('remote_rdc', ''))}`",
+        f"- mcp_tools: {transport_summaries['mcp']['total']}",
+        f"- daemon_tools: {transport_summaries['daemon']['total']}",
+        f"- scope_skip_total: {transport_summaries['mcp']['scope_skip'] + transport_summaries['daemon']['scope_skip']}",
+        f"- command_blocker: {command_summary['blocker']}",
+        f"- tool_blocker: {transport_summaries['mcp']['blocker'] + transport_summaries['daemon']['blocker']}",
+        f"- global_status: {global_status}",
+        "",
+        "## 一、总体结论",
+        f"- 结论: {global_status}",
+        f"- 命令层可用性: pass={command_summary['pass']} issue={command_summary['issue']} blocker={command_summary['blocker']}",
+        f"- MCP: pass={transport_summaries['mcp']['pass']} issue={transport_summaries['mcp']['issue']} blocker={transport_summaries['mcp']['blocker']} scope_skip={transport_summaries['mcp']['scope_skip']}",
+        f"- Daemon: pass={transport_summaries['daemon']['pass']} issue={transport_summaries['daemon']['issue']} blocker={transport_summaries['daemon']['blocker']} scope_skip={transport_summaries['daemon']['scope_skip']}",
+        "",
+        "## 二、环境与运行问题（daemon/mcp/env）",
+        f"- environment_items: {len(env_issues)}",
+        "- details:",
+    ]
+
+    for item in env_issues:
+        tool = item.get("tool")
+        code = item.get("error_code") or "unknown"
+        reason = item.get("reason") or ""
+        lines.append(f"  - {tool}: {code} | {reason}")
+
+    if not env_issues:
+        lines.append("  - (none)")
+
+    lines.extend(
+        [
+            "",
+            "## 三、196 工具健康评级",
+            f"- MCP target: 172（{_safe(transport_summaries['mcp']['total'])}）",
+            f"- Daemon target: 172（{_safe(transport_summaries['daemon']['total'])}）",
+            f"- MCP 本地有效: pass={transport_summaries['mcp']['pass']} scope_skip={transport_summaries['mcp']['scope_skip']} (effective={max(0, transport_summaries['mcp']['total'] - transport_summaries['mcp']['scope_skip'])})",
+            f"- Daemon 本地有效: pass={transport_summaries['daemon']['pass']} scope_skip={transport_summaries['daemon']['scope_skip']} (effective={max(0, transport_summaries['daemon']['total'] - transport_summaries['daemon']['scope_skip'])})",
+            "- rating:",
+        ]
+    )
+    mcp_status = _overall_status(transport_summaries['mcp']['blocker'], transport_summaries['mcp']['issue'])
+    daemon_status = _overall_status(transport_summaries['daemon']['blocker'], transport_summaries['daemon']['issue'])
+    lines.extend(
+        [
+            f"  - MCP: {mcp_status}",
+            f"  - Daemon: {daemon_status}",
+        ]
+    )
+
+    lines.append("")
+    lines.append("#### 合约明细")
+    _append_stats(lines, "MCP", transport_summaries['mcp'], mcp_count)
+    _append_stats(lines, "Daemon", transport_summaries['daemon'], daemon_count)
+
+    lines.extend(
+        [
+            "",
+            "## 四、Blocker / Issue 列表及复现命令",
+            "### Blockers",
+        ]
+    )
+    _append_blocklist(lines, all_blockers, "阻塞项")
+
+    lines.extend(["### Issues", "- 主要按 issue_type 分组："])
+    by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in all_issues:
+        issue_type = str(item.get("issue_type") or "unknown")
+        by_type[issue_type].append(item)
+    if not by_type:
+        lines.append("- (none)")
+    else:
+        for issue_type, grouped in sorted(by_type.items(), key=lambda i: i[0]):
+            lines.append(f"#### {issue_type}")
+            _append_blocklist(lines, grouped, "")
+
+    lines.extend(
+        [
+            "### scope_skip 明细",
+            f"- mcp: {len(mcp_scope_skip)}",
+            f"- daemon: {len(daemon_scope_skip)}",
+            "",
+        ]
+    )
+    for item in (mcp_scope_skip + daemon_scope_skip):
+        tool = item.get("tool")
+        repro = item.get("repro_command") or ""
+        lines.append(f"- {tool}: {item.get('matrix')} {item.get('transport')} | {repro}")
+
+    lines.extend(
+        [
+            "",
+            "## 五、清理结论",
+            f"- {cleanup_status}",
+        ]
+    )
+    if cleanup_reasons:
+        lines.append("- 原因:")
+        for reason in cleanup_reasons:
+            lines.append(f"  - {reason}")
+
+    lines.append("")
+    lines.extend(
+        [
+            "## 命令层 block / issue 一览",
+            f"- command_total: {command_summary['total']}",
+            f"- command_pass: {command_summary['pass']}",
+            f"- command_issue: {command_summary['issue']}",
+            f"- command_blocker: {command_summary['blocker']}",
+        ]
+    )
+
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Aggregate rdx.bat smoke and tool-contract outputs.")
-    parser.add_argument("--command-json", default="intermediate/logs/rdx_bat_command_smoke.json")
-    parser.add_argument("--tool-json", default="intermediate/logs/tool_contract_report.json")
-    parser.add_argument("--usability-json", default="intermediate/logs/rdx_bat_usability_report.json")
-    parser.add_argument("--out", default=str(_default_output()))
+    parser = argparse.ArgumentParser(description="Aggregate rdx.bat and tool contract smoke outputs")
+    parser.add_argument("--command-json", required=True)
+    parser.add_argument("--tool-json", required=True)
+    parser.add_argument("--usability-json", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--detailed-out", default="")
     return parser.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
     root = _tools_root()
-    command_json = (root / args.command_json).resolve()
-    tool_json = (root / args.tool_json).resolve()
-    usability_json = (root / args.usability_json).resolve()
-    out_path = Path(args.out).resolve()
 
-    command_payload = _load_json(command_json)
-    tool_payload = _load_json(tool_json)
-    usability_payload = _load_json(usability_json)
+    command_path = Path(args.command_json)
+    tool_path = Path(args.tool_json)
+    usability_path = Path(args.usability_json)
+    if not command_path.is_absolute():
+        command_path = root / command_path
+    if not tool_path.is_absolute():
+        tool_path = root / tool_path
+    if not usability_path.is_absolute():
+        usability_path = root / usability_path
+
+    command_payload = _load_json(command_path.resolve())
+    tool_payload = _load_json(tool_path.resolve())
+    usability_payload = _load_json(usability_path.resolve())
 
     if not command_payload:
-        print(f"[aggregate] missing command json: {command_json}")
+        print(f"[aggregate] missing command payload: {command_path}")
         return 2
     if not tool_payload:
-        print(f"[aggregate] missing tool json: {tool_json}")
+        print(f"[aggregate] missing tool payload: {tool_path}")
         return 2
 
-    command_items = _load_command_items(command_payload)
-    tool_items = _load_tool_items(tool_payload)
+    out_path = Path(args.out)
+    if not out_path.is_absolute():
+        out_path = root / out_path
 
-    command_summary = _summary_stats(command_items)
-    tool_summary_mcp = _summary_stats([item for item in tool_items if str(item.get("transport") or "") == "mcp"])
-    tool_summary_daemon = _summary_stats([item for item in tool_items if str(item.get("transport") or "") == "daemon"])
-    combined = command_items + tool_items
-    total_summary = _summary_stats(combined)
+    _write_report(out_path, command_payload, tool_payload)
 
-    usability = usability_payload.get("usability", {})
-    usability_status = str(usability.get("overall") or "UNKNOWN").upper()
-    usability_summary = usability.get("summary", {})
-    usability_checks = usability.get("checks", [])
-
-    blockers = _collect_blockers(combined)
-    issues = [item for item in combined if item.get("status") == "issue"]
-    remote_app_issues = [item for item in issues if _is_remote_app_issue(item)]
-    sample_compatibility_issues = [item for item in issues if _is_sample_compatibility_issue(item)]
-    usability_issues = [item for item in issues if _is_usability_issue(item)]
-    other_issues = [
-        item
-        for item in issues
-        if item not in remote_app_issues and item not in sample_compatibility_issues and item not in usability_issues
-    ]
-
-    diff_lines = _build_tool_diff(tool_items)
-    residual = _collect_cleanup_residual(command_payload, tool_payload)
-    cleanup_status, cleanup_details = _collect_clear_state(residual)
-
-    lines: list[str] = [
-        "# rdx-tools smoke report (dual sample + rdx.bat usability)",
-        "",
-        f"- generated_at_utc: {_now_iso()}",
-        f"- local_rdc: `{command_payload.get('local_rdc', tool_payload.get('local_rdc', ''))}`",
-        f"- remote_rdc: `{command_payload.get('remote_rdc', tool_payload.get('remote_rdc', ''))}`",
-        f"- command_json: `{command_json}`",
-        f"- tool_json: `{tool_json}`",
-        f"- usability_json: `{usability_json}`",
-        "",
-        "## 总览",
-        f"- total: {total_summary['total']}",
-        f"- pass: {total_summary['pass']}",
-        f"- issue: {total_summary['issue']}",
-        f"- blocker: {total_summary['blocker']}",
-        "",
-        "## 覆盖统计",
-        f"- commands: {command_summary['total']} (pass={command_summary['pass']}, issue={command_summary['issue']}, blocker={command_summary['blocker']})",
-        f"- tools_mcp: {tool_summary_mcp['total']} (pass={tool_summary_mcp['pass']}, issue={tool_summary_mcp['issue']}, blocker={tool_summary_mcp['blocker']})",
-        f"- tools_daemon: {tool_summary_daemon['total']} (pass={tool_summary_daemon['pass']}, issue={tool_summary_daemon['issue']}, blocker={tool_summary_daemon['blocker']})",
-        f"- rdx.bat-usability: {usability_summary.get('total', len(usability_checks))} (overall={usability_status})",
-        "",
-        "## rdx.bat 可直接点开使用",
-        f"- status: {usability_status}",
-        f"- based_on: {_short((usability.get('impact') or []), 220) or 'usability evidence available in checks section'}",
-        "",
-        "## Blocker Top（按严重性）",
-    ]
-
-    if not blockers:
-        lines.append("- (none)")
+    detailed_out = Path(args.detailed_out)
+    if str(detailed_out).strip():
+        if not detailed_out.is_absolute():
+            detailed_out = out_path.parent / detailed_out
     else:
-        for _, _, item in blockers[:120]:
-            lines.extend(
-                [
-                    f"- tool: {item.get('tool') or item.get('id') or 'unknown'} [{str(item.get('transport') or '')}]",
-                    f"  - root_cause: {_short(item.get('reason'), 280)}",
-                    f"  - repro_command: `{_short(item.get('repro_command'), 340)}`",
-                    f"  - evidence: {_short(item.get('evidence'), 340)}",
-                    f"  - impact_scope: {_short(item.get('impact_scope') or item.get('matrix') or 'main chain', 140)}",
-                    f"  - fix_hint: {_short(item.get('fix_hint') or 'no direct hint')}",
-                ]
-            )
+        detailed_out = out_path.parent / "rdx_smoke_detailed_report.md"
 
-    lines.extend(
-        [
-            "",
-            "## Issues",
-            "",
-            "### remote/app 依赖不足",
-        ]
-    )
-    if not remote_app_issues:
-        lines.append("- (none)")
-    else:
-        for item in remote_app_issues:
-            lines.extend(
-                [
-                    f"- {item.get('tool')} [{item.get('transport')}]",
-                    f"  - reason: {_short(item.get('reason'), 240)}",
-                    f"  - repro_command: `{_short(item.get('repro_command'), 320)}`",
-                    f"  - fix_hint: {_short(item.get('fix_hint'))}",
-                ]
-            )
+    _write_report(detailed_out, command_payload, tool_payload)
 
-    lines.append("### 文案/交互直观性问题")
-    if not usability_issues:
-        lines.append("- (none)")
-    else:
-        for item in usability_issues:
-            lines.extend(
-                [
-                    f"- {item.get('tool')} [{item.get('transport', 'command')}]",
-                    f"  - reason: {_short(item.get('reason'), 240)}",
-                    f"  - repro_command: `{_short(item.get('repro_command'), 320)}`",
-                    f"  - fix_hint: {_short(item.get('fix_hint'))}",
-                ]
-            )
-
-    lines.append("### sample_compatibility 与 remote-toolchain 分层")
-    if not sample_compatibility_issues:
-        lines.append("- (none)")
-    else:
-        for item in sample_compatibility_issues:
-            lines.extend(
-                [
-                    f"- {item.get('tool')} [{item.get('transport', 'command')}]",
-                    f"  - reason: {_short(item.get('reason'), 240)}",
-                    f"  - repro_command: `{_short(item.get('repro_command'), 320)}`",
-                    f"  - fix_hint: {_short(item.get('fix_hint'))}",
-                    f"  - impact_scope: {_short(item.get('impact_scope') or 'remote matrix path', 140)}",
-                ]
-            )
-
-    lines.append("### 其他 Issues")
-    if not other_issues:
-        lines.append("- (none)")
-    else:
-        for item in other_issues:
-            lines.append(
-                f"- {item.get('tool')}[{item.get('transport')}] {item.get('error_code')} - {_short(item.get('reason'), 220)}"
-            )
-
-    lines.extend(
-        [
-            "",
-            "## MCP / Daemon 差异清单",
-        ]
-    )
-    if not diff_lines:
-        lines.append("- (none)")
-    else:
-        lines.extend(diff_lines)
-
-    lines.extend(
-        [
-            "",
-            "## 清理结果",
-            f"- {cleanup_status}",
-        ]
-    )
-    for detail in cleanup_details:
-        lines.append(f"- {detail}")
-
-    lines.extend(["", "## remote workflow evidence"])
-    lines.extend([f"- {line}" for line in _remote_workflow_summary(tool_payload)])
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"[aggregate] wrote: {out_path}")
+    print(f"[aggregate] wrote detailed: {detailed_out}")
 
-    return 0 if total_summary["blocker"] == 0 else 1
+    command_summary = command_payload.get("summary", {}) if isinstance(command_payload.get("summary"), dict) else {}
+    if int(command_summary.get("blocker", 0)) > 0:
+        return 1
+
+    for transport in ("mcp", "daemon"):
+        transport_payload = tool_payload.get("transports", {}).get(transport, {})
+        if not isinstance(transport_payload, dict):
+            return 1
+        summary = transport_payload.get("summary", {})
+        if not isinstance(summary, dict):
+            return 1
+        if int(summary.get("blocker", 0)) > 0:
+            return 1
+        if str(transport_payload.get("fatal_error") or "").strip():
+            return 1
+
+    return 0
 
 
 if __name__ == "__main__":

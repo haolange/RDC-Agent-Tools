@@ -16,9 +16,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-
+from rdx.runtime_paths import ensure_tools_root_env, ensure_runtime_dirs, artifacts_dir, binaries_root, pymodules_dir
 
 CANONICAL_KEYS = {"schema_version", "tool_version", "result_kind", "ok", "data", "artifacts", "error"}
 DESTRUCTIVE_TAIL = ("rd.capture.close_replay", "rd.capture.close_file", "rd.core.shutdown")
@@ -51,9 +55,11 @@ SAMPLE_COMPATIBILITY_SNIPPETS = (
     "Failed to open capture",
 )
 
+SESSION_RETRY_LIMIT = 2
+
 
 def _tools_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return ensure_tools_root_env()
 
 
 def _catalog_path() -> Path:
@@ -102,6 +108,30 @@ def _payload_error(payload: dict[str, Any] | None) -> tuple[str, str]:
     return legacy_code, message
 
 
+def _coalesce_error(
+    payload: dict[str, Any] | None,
+    raw: str | None,
+    exc: str | None,
+) -> tuple[str, str]:
+    code, message = _payload_error(payload)
+    if message:
+        return code, message
+
+    if isinstance(raw, str) and raw.strip():
+        parsed = _extract_json_payload(raw)
+        if parsed is not None:
+            parsed_code, parsed_message = _payload_error(parsed)
+            if parsed_message:
+                return parsed_code or code, parsed_message
+
+    if isinstance(exc, str):
+        text = str(exc).strip()
+        if text:
+            return code, text
+
+    return code, message
+
+
 def _classify_transport_impact(tool: str, matrix: str, transport: str) -> str:
     if tool.startswith("rd.remote.") or matrix == "remote":
         if matrix == "remote":
@@ -129,10 +159,12 @@ def _is_session_related_failure(payload: dict[str, Any] | None) -> bool:
         return False
     if bool(payload.get("ok")):
         return False
-    _, message = _payload_error(payload)
-    if not message:
+
+    code, message = _payload_error(payload)
+    haystack = " ".join([str(code or ""), str(message or "")]).lower()
+    if not haystack:
         return False
-    return any(snippet in message for snippet in SESSION_ERROR_SNIPPETS)
+    return any(snippet.lower() in haystack for snippet in SESSION_ERROR_SNIPPETS)
 
 
 def _is_remote_matrix_tool(tool_name: str, param_names: list[str]) -> bool:
@@ -143,11 +175,13 @@ def _is_remote_matrix_tool(tool_name: str, param_names: list[str]) -> bool:
 
 def _server_env() -> dict[str, str]:
     root = _tools_root()
+    artifacts = Path(os.environ.get("RDX_ARTIFACT_DIR", str(artifacts_dir())))
+    renderdoc_dir = Path(os.environ.get("RDX_RENDERDOC_PATH", str(pymodules_dir())))
     env = dict(os.environ)
     env["RDX_TOOLS_ROOT"] = str(root)
     env.setdefault("RDX_LOG_LEVEL", "ERROR")
-    env.setdefault("RDX_ARTIFACT_DIR", str(root / "intermediate" / "artifacts"))
-    env.setdefault("RDX_RENDERDOC_PATH", str(root / "binaries" / "windows" / "x64" / "pymodules"))
+    env["RDX_ARTIFACT_DIR"] = str(artifacts)
+    env["RDX_RENDERDOC_PATH"] = str(renderdoc_dir)
     return env
 
 
@@ -460,6 +494,22 @@ def _default_for_id(param: str, state: SampleState) -> Any:
     return None
 
 
+def _ensure_fixture_inputs(files: dict[str, Path]) -> None:
+    fixtures: list[tuple[Path, bytes]] = [
+        (files["sample"], b"\x00\x01\x02\x03"),
+        (files["text_a"], b"left\n"),
+        (files["text_b"], b"right\n"),
+        (files["png_a"],
+         b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0cIDAT\x08\x99c```\x08\xff\x1f\x00\x03\x03\x01\x00\xb4\x89\xc5\x0f\x00\x00\x00\x00IEND\xaeB`\x82"),
+        (files["png_b"],
+         b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0cIDAT\x08\x99c```\x08\xff\x1f\x00\x03\x03\x01\x00\xb4\x89\xc5\x0f\x00\x00\x00\x00IEND\xaeB`\x82"),
+    ]
+
+    for path, payload in fixtures:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(payload)
+
 def _build_args(tool: str, param_names: list[str], state: SampleState, files: dict[str, Path]) -> dict[str, Any]:
     args: dict[str, Any] = {}
     for param in param_names:
@@ -688,20 +738,23 @@ def _classify_result(
     transport: str,
     tool_error: str,
 ) -> tuple[str, str, str, str, str, str]:
-    code = tool_error or ""
-    message = ""
-    if payload is not None:
-        code, message = _payload_error(payload)
-        message = message.strip()
+    code, message = _coalesce_error(payload, raw, exc)
 
     has_output = bool(raw.strip() or (exc or "").strip() or message)
     transport_scope = _classify_transport_impact(tool, matrix, transport)
+    lower_msg = message.lower()
+    lower_exc = str(exc or "").lower()
 
     if payload is None:
         reason = exc or (raw[:240] if has_output else "non-json response")
-        return "blocker", reason, code or "non_json", "structural", (
-            "tool should emit JSON contract; keep payload parse path aligned with --json output"
-        ), transport_scope
+        return (
+            "blocker",
+            reason,
+            code or "non_json",
+            "structural",
+            "tool should emit JSON contract; keep payload parse path aligned with --json output",
+            transport_scope,
+        )
 
     if not contract_ok:
         return (
@@ -716,14 +769,14 @@ def _classify_result(
     if bool(payload.get("ok")):
         return "pass", "", "", "", "", transport_scope
 
-    if "Unknown remote_id" in message or "unknown remote_id" in message.lower():
+    if "unknown remote_id" in lower_msg:
         return (
-            "blocker",
-            message,
-            code or "remote_id_chain",
-            "main_chain",
-            "Fix remote flow: connect -> remote tools -> disconnect in same chain",
-            "main chain",
+            "issue",
+            message or "remote_id unavailable in this environment",
+            code or "remote_app_dependency",
+            "remote_app_dependency",
+            "remote tools require a live remote endpoint or mock workflow",
+            "only affects remote_id scope",
         )
 
     if _is_sample_compatibility_error(message, code):
@@ -746,13 +799,33 @@ def _classify_result(
             transport_scope,
         )
 
-    if "Unknown session_id" in message or "Unknown capture_file_id" in message:
+    if "unknown session_id" in lower_msg or "no session_id" in lower_msg or "no active session" in lower_msg:
         return (
             "blocker",
-            message,
+            message or "session context missing",
             code or "session_chain",
             "main_chain",
-            "Rebuild session/replay context and retry with valid session_id/capture_file_id",
+            "rebuild session/replay context and retry with valid session_id/capture_file_id",
+            "main chain",
+        )
+
+    if "unknown capture_file_id" in lower_msg or "capture file not found" in lower_msg:
+        return (
+            "blocker",
+            message or "capture context missing",
+            code or "session_chain",
+            "main_chain",
+            "rebuild capture context and retry with valid capture_file_id",
+            "main chain",
+        )
+
+    if _is_session_related_failure(payload) or "session_id" in lower_msg or "capture_file_id" in lower_msg:
+        return (
+            "blocker",
+            message or exc or "session-related contract failure",
+            code or "session_chain",
+            "main_chain",
+            "rebuild session context and retry with fresh capture replay state",
             "main chain",
         )
 
@@ -765,6 +838,7 @@ def _classify_result(
         transport_scope,
     )
 
+
 async def _invoke_with_repair(
     call_fn: Any,
     tool: str,
@@ -773,24 +847,38 @@ async def _invoke_with_repair(
     files: dict[str, Path],
 ) -> tuple[dict[str, Any] | None, str, str]:
     timeout_s = 90.0 if tool == "rd.core.shutdown" else 25.0
-    payload, raw, exc = await call_fn(tool, args, timeout_s=timeout_s)
-    if payload is not None and not _is_session_related_failure(payload):
-        return payload, raw, exc
+    last_payload: dict[str, Any] | None = None
+    last_raw = ""
+    last_exc = ""
 
-    if exc and "TaskGroup" in exc:
-        return payload, raw, exc
+    attempt_args = dict(args)
+    for attempt in range(1, SESSION_RETRY_LIMIT + 1):
+        _ensure_fixture_inputs(files)
+        payload, raw, exc = await call_fn(tool, attempt_args, timeout_s=timeout_s)
+        last_payload, last_raw, last_exc = payload, raw, exc
 
-    if _is_session_related_failure(payload) or "Unknown session_id" in exc or "Unknown capture_file_id" in exc:
-        await _ensure_context(call_fn, state, files, need_capture=True, need_remote=False)
-        retry_args = dict(args)
-        for key in list(retry_args.keys()):
-            if hasattr(state, key):
-                value = getattr(state, key)
-                if value is not None:
-                    retry_args[key] = value
-        return await call_fn(tool, retry_args, timeout_s=timeout_s)
+        if payload is not None and not _is_session_related_failure(payload):
+            return payload, raw, exc
 
-    return payload, raw, exc
+        if exc and "TaskGroup" in exc:
+            return payload, raw, exc
+
+        if not _is_session_related_failure(payload) and not ("session" in (str(exc).lower())):
+            return payload, raw, exc
+
+        if attempt >= SESSION_RETRY_LIMIT:
+            break
+
+        if _is_session_related_failure(payload) or "session" in (str(exc).lower()):
+            await _ensure_context(call_fn, state, files, need_capture=True, need_remote=False)
+            attempt_args = dict(args)
+            for key in list(attempt_args.keys()):
+                if hasattr(state, key):
+                    value = getattr(state, key)
+                    if value is not None:
+                        attempt_args[key] = value
+
+    return last_payload, last_raw, last_exc
 
 
 def _ordered_tool_names(names: list[str]) -> list[str]:
@@ -808,6 +896,7 @@ def _transport_summary(items: list[dict[str, Any]]) -> dict[str, int]:
         "pass": sum(1 for item in items if item.get("status") == "pass"),
         "issue": sum(1 for item in items if item.get("status") == "issue"),
         "blocker": sum(1 for item in items if item.get("status") == "blocker"),
+        "scope_skip": sum(1 for item in items if str(item.get("issue_type") or "") == "scope_skip"),
         "callable_pass": sum(1 for item in items if bool(item.get("callable"))),
         "contract_pass": sum(1 for item in items if bool(item.get("contract"))),
         "ok_true": sum(1 for item in items if bool(item.get("ok"))),
@@ -842,6 +931,7 @@ def _write_markdown_report(result: dict[str, Any], out_path: Path) -> None:
                 f"- pass: {summary.get('pass', 0)}",
                 f"- issue: {summary.get('issue', 0)}",
                 f"- blocker: {summary.get('blocker', 0)}",
+                f"- scope_skip: {summary.get('scope_skip', 0)}",
                 f"- callable_pass: {summary.get('callable_pass', 0)}",
                 f"- contract_pass: {summary.get('contract_pass', 0)}",
                 f"- ok_true: {summary.get('ok_true', 0)}",
@@ -1466,6 +1556,18 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
