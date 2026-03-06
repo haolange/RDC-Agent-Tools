@@ -1,4 +1,4 @@
-﻿"""Runtime path helpers for the standalone rdx-tools distribution."""
+"""Runtime path helpers for the standalone rdx-tools distribution."""
 
 from __future__ import annotations
 
@@ -60,6 +60,12 @@ def ensure_tools_root_env(*, force: bool = False) -> Path:
 def binaries_root() -> Path:
     """Directory containing ``renderdoc.dll`` and third-party runtime artifacts."""
     return tools_root() / "binaries" / "windows" / "x64"
+
+
+
+def android_binaries_root() -> Path:
+    """Directory containing packaged Android `RenderDocCmd` APKs."""
+    return tools_root() / "binaries" / "android"
 
 
 def pymodules_dir() -> Path:

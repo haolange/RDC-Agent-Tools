@@ -165,3 +165,26 @@ rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --
 短时间误关 shell 后，通常仍可在相同 context 上重新附着。
 
 长时间无人接管时，daemon 会因无 attached client 且超过 idle TTL 自动退出。
+
+## `rd.remote.connect` 成功了，但后续 `rd.capture.open_replay(options.remote_id=...)` 仍然失败
+
+先区分两类问题：
+
+- `rd.remote.connect` / `rd.remote.ping` 本身失败
+  - 这说明 live endpoint 没建起来，不应继续使用该 `remote_id`。
+- `rd.remote.connect` / `rd.remote.ping` 成功，但 `open_replay` 失败
+  - 优先检查 remote endpoint 本身、样本兼容性、以及 remote host 是否真的有可用 replay 环境。
+
+对 Android remote，`rd.remote.connect` 会负责 `adb` bootstrap；因此如果你是通过 `rdx-tools` 入口复现问题，不应再把“先手工开 `qrenderdoc`”当成默认前置。
+
+## Android remote 常见失败面
+
+优先检查：
+
+- `adb devices -l` 是否只有一个 `device`，或你是否显式传了 `options.device_serial`
+- 仓库内 APK 是否存在：`binaries/android/arm32/`、`binaries/android/arm64/`
+- `rd.remote.connect` 的 `options.transport` 是否设为 `adb_android`
+- `rd.remote.ping` 是否成功
+- `adb forward --list` 中是否看到了本次链路创建的本地端口
+
+如果 `rd.remote.connect` 失败，先修它；不要继续把依赖 `remote_id` 的后续报错误判成 replay 层问题。

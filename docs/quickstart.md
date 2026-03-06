@@ -101,6 +101,18 @@ python mcp/run_mcp.py --transport streamable-http --host 127.0.0.1 --port 8765 -
 5. `rd.event.get_actions`
 
 这条链路只负责建立可操作 session，不代表任何上层 debug 或 analysis workflow。
+### 4.1 Android remote 最小链路
+
+如果目标是 Android remote replay / debug，建议按这条顺序链路执行：
+
+1. `rd.core.init`
+2. `rd.remote.connect`，并在 `options` 中传 `transport="adb_android"`
+3. `rd.remote.ping`
+4. `rd.capture.open_file`
+5. `rd.capture.open_replay`，并在 `options.remote_id` 中传上一步返回的 `remote_id`
+6. `rd.replay.set_frame`
+
+`rd.remote.connect` 在该路径上会负责 Android `adb` bootstrap：选择设备、选择仓库内 APK、启动 `RenderDocCmd`、push `renderdoc.conf`、建立 `adb forward`。如果它失败，不应继续盲跑依赖 `remote_id` 的后续链路。
 
 ## 5. 进一步阅读
 

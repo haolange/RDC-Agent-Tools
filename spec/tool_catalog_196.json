@@ -166,7 +166,7 @@
       "name": "rd.capture.open_replay",
       "group": "3.2，捕获文件与 Replay Session (Capture & Replay)",
       "description": "基于 capture_file_id 创建一个可回放的 Replay Session（会启动 replay driver）。",
-      "parameter_raw": "capture_file_id (str)<br>options (dict, 可选): 回放选项，例如 {force_api?, gpu_id?, software_replay?, enable_debug?, replay_cache_mb?}",
+      "parameter_raw": "capture_file_id (str)<br>options (dict, 可选): 回放选项，例如 {force_api?, gpu_id?, software_replay?, enable_debug?, replay_cache_mb?, remote_id?}",
       "returns_raw": "success (bool)<br>session_id (str): Replay Session 句柄<br>frame_count (int)<br>api_properties (dict): API 特性与限制<br>error_message (str, 可选)",
       "param_names": [
         "capture_file_id",
@@ -1767,12 +1767,13 @@
       "name": "rd.remote.connect",
       "group": "3.12，远程连接与自动化抓帧 (Remote Capture & Target Control)",
       "description": "连接到远程 RenderDoc server（RDC remote server / target control）。",
-      "parameter_raw": "host (str)<br>port (int, 可选, 默认 38920)<br>timeout_ms (int, 可选, 默认 5000)",
+      "parameter_raw": "host (str)<br>port (int, 鍙€? 榛樿 38920)<br>timeout_ms (int, 鍙€? 榛樿 5000)<br>options (dict, 鍙€?: {transport?, device_serial?, local_port?, install_apk?, push_config?})",
       "returns_raw": "success (bool)<br>remote_id (str)<br>server_info (dict): {version, name?, platform?, capabilities?}<br>error_message (str, 可选)",
       "param_names": [
         "host",
         "port",
-        "timeout_ms"
+        "timeout_ms",
+        "options"
       ]
     },
     {

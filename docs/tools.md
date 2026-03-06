@@ -20,6 +20,11 @@
 
 - `spec/tool_catalog_196.json`
 
+## Remote 说明
+
+- `rd.remote.connect` 现在支持可选 `options`，用于选择 `renderdoc` 或 `adb_android` transport，以及 Android 设备 / 本地转发参数。
+- `rd.remote.connect` 返回的 `remote_id` 代表 live remote connection；若连接失败，不会返回占位 handle。
+- `rd.capture.open_replay` 的 remote 入口是 `options.remote_id`，而不是隐式回退到 `localhost`。
 ## 校验
 
 ```bat

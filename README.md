@@ -66,6 +66,12 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 ```
 
 文档示例默认按顺序执行语义编写。除非显式声明支持并发，否则不应把并发观测结果视为平台定义。
+当前 remote debug 主链路也已明确化：
+
+- `rd.remote.connect` 返回的是 live `remote_id`，不是占位 handle。
+- `rd.remote.ping` 用于确认该 `remote_id` 仍然连着 live endpoint。
+- `rd.capture.open_replay` 需要通过 `options.remote_id` 显式进入 remote replay backend。
+- Android remote 可通过 `rd.remote.connect` 的 `options.transport="adb_android"` 触发仓库内置的 `adb` bootstrap。
 
 更完整的操作说明见 [docs/quickstart.md](docs/quickstart.md)。
 

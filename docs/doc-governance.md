@@ -43,6 +43,17 @@
 - `docs/troubleshooting.md`
 - `docs/doc-governance.md`
 
+### remote endpoint / bootstrap 变更
+
+如果改动影响 `rd.remote.connect`、`rd.remote.ping`、`options.remote_id`、Android `adb` bootstrap、remote endpoint 建连或清理语义，至少检查：
+
+- `README.md`
+- `docs/quickstart.md`
+- `docs/session-model.md`
+- `docs/agent-model.md`
+- `docs/troubleshooting.md`
+- `docs/tools.md`
+- `docs/doc-governance.md`
 ### tool schema / contract 变更
 
 如果改动影响 `rd.*` tool、tool 参数、tool 返回字段、能力边界或共享契约，至少检查：

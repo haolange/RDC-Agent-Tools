@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Run dual-sample contract checks for all 196 rd.* tools via MCP and daemon CLI."""
 
 from __future__ import annotations
@@ -457,6 +457,9 @@ class SampleState:
     debug_target: dict[str, Any] = field(default_factory=dict)
     debug_params: dict[str, Any] = field(default_factory=dict)
     remote_id: str | None = None
+    remote_error_code: str = ""
+    remote_issue_type: str = "remote_endpoint"
+    remote_reason: str = ""
     counter_id: int | None = None
     counter_error_code: str = ""
     counter_issue_type: str = ""
@@ -540,6 +543,36 @@ class DaemonExecutor:
 
         return await asyncio.to_thread(_call)
 
+
+def _remote_connect_args() -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "host": "127.0.0.1",
+        "port": 38920,
+        "timeout_ms": 2000,
+    }
+    transport = str(os.environ.get("RDX_REMOTE_CONNECT_TRANSPORT", "renderdoc") or "renderdoc").strip().lower()
+    options: dict[str, Any] = {}
+    if transport and transport != "renderdoc":
+        options["transport"] = transport
+    if serial := str(os.environ.get("RDX_REMOTE_DEVICE_SERIAL", "") or "").strip():
+        options["device_serial"] = serial
+    if local_port := str(os.environ.get("RDX_REMOTE_LOCAL_PORT", "") or "").strip():
+        try:
+            options["local_port"] = int(local_port)
+        except ValueError:
+            pass
+    for env_name, option_name in (
+        ("RDX_REMOTE_INSTALL_APK", "install_apk"),
+        ("RDX_REMOTE_PUSH_CONFIG", "push_config"),
+    ):
+        raw = str(os.environ.get(env_name, "") or "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            options[option_name] = True
+        elif raw in {"0", "false", "no", "off"}:
+            options[option_name] = False
+    if options:
+        args["options"] = options
+    return args
 
 async def _ensure_context(
     call_fn: Any,
@@ -842,17 +875,36 @@ async def _ensure_context(
             state.shader_debug_reason = "pixel shader unavailable from current pipeline state"
 
     if need_remote and not state.remote_id:
-        remote_payload, _, _ = await call_fn(
+        state.remote_error_code = ""
+        state.remote_reason = ""
+        state.remote_issue_type = "remote_endpoint"
+        remote_payload, remote_raw, remote_exc = await call_fn(
             "rd.remote.connect",
-            {"host": "127.0.0.1", "port": 38920, "timeout_ms": 200},
-            timeout_s=10.0,
+            _remote_connect_args(),
+            timeout_s=20.0,
         )
         if remote_payload and remote_payload.get("ok"):
             data = _payload_data(remote_payload)
             state.remote_id = str(remote_payload.get("remote_id") or data.get("remote_id") or "")
             if not state.remote_id:
                 state.remote_id = None
-
+                state.remote_error_code = "remote_id_missing"
+                state.remote_reason = "rd.remote.connect succeeded without returning remote_id"
+            else:
+                ping_payload, ping_raw, ping_exc = await call_fn(
+                    "rd.remote.ping",
+                    {"remote_id": state.remote_id},
+                    timeout_s=10.0,
+                )
+                if not (ping_payload and ping_payload.get("ok")):
+                    state.remote_error_code, state.remote_reason = _coalesce_error(ping_payload, ping_raw, ping_exc)
+                    state.remote_error_code = state.remote_error_code or "remote_ping_failed"
+                    state.remote_reason = state.remote_reason or "rd.remote.ping failed"
+                    state.remote_id = None
+        else:
+            state.remote_error_code, state.remote_reason = _coalesce_error(remote_payload, remote_raw, remote_exc)
+            state.remote_error_code = state.remote_error_code or "remote_connect_failed"
+            state.remote_reason = state.remote_reason or "rd.remote.connect failed"
 
 def _default_for_id(param: str, state: SampleState) -> Any:
     if param == "counter_id":
@@ -1684,6 +1736,28 @@ async def _run_transport_mcp(
                         await _ensure_context(_call_mcp, state, files, need_capture=False, need_remote=True)
                         if state.remote_id and not had_remote_id:
                             remote_workflow_events.append(f"mcp-connect:{state.remote_id}")
+                    if matrix == "remote" and not state.remote_id and state.remote_reason:
+                        args = _build_args(name, param_names, state, files)
+                        items.append(
+                            {
+                                "tool": name,
+                                "transport": "mcp",
+                                "matrix": matrix,
+                                "status": "blocker",
+                                "reason": state.remote_reason,
+                                "issue_type": state.remote_issue_type or "remote_endpoint",
+                                "fix_hint": "Repair rd.remote.connect/rd.remote.ping or the Android bootstrap path before continuing remote smoke.",
+                                "impact_scope": "only affects remote_id flow",
+                                "ok": False,
+                                "callable": False,
+                                "contract": True,
+                                "args": args,
+                                "error_code": state.remote_error_code or "remote_connect_failed",
+                                "evidence": state.remote_reason,
+                                "repro_command": f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
+                            },
+                        )
+                        continue
                     if ("session_id" in param_names or "capture_file_id" in param_names) and not (
                         state.session_id and state.capture_file_id
                     ):
@@ -1960,6 +2034,31 @@ async def _run_transport_daemon(
                 await _ensure_context(_call_daemon, state, files, need_capture=False, need_remote=True)
                 if state.remote_id and not had_remote_id:
                     remote_workflow_events.append(f"daemon-connect:{state.remote_id}")
+            if matrix == "remote" and not state.remote_id and state.remote_reason:
+                args = _build_args(name, param_names, state, files)
+                items.append(
+                    {
+                        "tool": name,
+                        "transport": "daemon",
+                        "matrix": matrix,
+                        "status": "blocker",
+                        "reason": state.remote_reason,
+                        "issue_type": state.remote_issue_type or "remote_endpoint",
+                        "fix_hint": "Repair rd.remote.connect/rd.remote.ping or the Android bootstrap path before continuing remote smoke.",
+                        "impact_scope": "only affects remote_id flow",
+                        "ok": False,
+                        "callable": False,
+                        "contract": True,
+                        "args": args,
+                        "error_code": state.remote_error_code or "remote_connect_failed",
+                        "evidence": state.remote_reason,
+                        "repro_command": (
+                            f"python cli/run_cli.py --daemon-context {context_name} call {name} "
+                            f"--args-json '{json.dumps(args, ensure_ascii=False)}' --json --connect"
+                        ),
+                    },
+                )
+                continue
             if ("session_id" in param_names or "capture_file_id" in param_names) and not (
                 state.session_id and state.capture_file_id
             ):

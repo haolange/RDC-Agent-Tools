@@ -53,6 +53,9 @@
   - `MCP` client 应先完成 tool discovery，再决定调用顺序。
 - 先建立 session，再做 inspection。
   - 对 `.rdc` 的平台最小链路是 `rd.core.init -> rd.capture.open_file -> rd.capture.open_replay -> rd.replay.set_frame`。
+- 对 remote 路径，先拿到 live `remote_id`。
+  - 推荐链路是 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
+  - 对 Android remote，不要假设外部 `qrenderdoc` 已经替你做了 bootstrap；`rd.remote.connect` 的 `options.transport="adb_android"` 才是平台定义入口。
 - 显式保存关键状态。
   - 至少保存 `capture_file_id`、`session_id`、当前 `frame_index`、必要时保存 `event_id`。
 - 把 handle 当作短生命周期引用。

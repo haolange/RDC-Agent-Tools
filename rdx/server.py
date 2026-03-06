@@ -1,4 +1,4 @@
-"""
+﻿"""
 RDX-MCP server with registry-driven tool registration.
 
 - Registers all 196 doc-defined tools from `rdx/spec/tool_catalog_196.json`
@@ -22,6 +22,7 @@ import re
 import shutil
 import struct
 import sys
+import time
 import textwrap
 import zipfile
 from contextlib import asynccontextmanager
@@ -46,6 +47,13 @@ from rdx.core.render_service import RenderService
 from rdx.core.session_manager import SessionError, SessionManager
 from rdx.daemon.client import daemon_request
 from rdx.models import _new_id
+from rdx.remote_bootstrap import (
+    AndroidBootstrapOptions,
+    AndroidRemoteBootstrapError,
+    bootstrap_android_remote,
+    cleanup_android_remote,
+    describe_android_remote,
+)
 from rdx.runtime_bootstrap import bootstrap_renderdoc_runtime
 from rdx.runtime_paths import artifacts_dir, ensure_runtime_dirs, runtime_root
 from rdx.utils.artifact_store import ArtifactStore
@@ -85,6 +93,12 @@ class RemoteHandle:
     host: str
     port: int
     connected: bool
+    transport: str = "renderdoc"
+    remote_server: Any = None
+    server_info: Dict[str, Any] = field(default_factory=dict)
+    bootstrap: Dict[str, Any] = field(default_factory=dict)
+    bootstrap_result: Any = None
+    leased_session_id: str = ""
     detail: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -315,11 +329,117 @@ def _get_rd() -> Any:
     return rd
 
 
-def _check_status(status: Any, operation: str) -> None:
+def _status_ok(status: Any) -> bool:
+    try:
+        ok = getattr(status, "OK", None)
+        if callable(ok):
+            return bool(ok())
+    except Exception:
+        pass
     rd = _get_rd()
-    if status != rd.ResultCode.Succeeded:
-        raise RuntimeError(f"{operation} failed with status: {status}")
+    return status == rd.ResultCode.Succeeded
 
+
+def _status_text(status: Any) -> str:
+    try:
+        message = getattr(status, "Message", None)
+        if callable(message):
+            text = str(message() or "").strip()
+            if text:
+                return text
+    except Exception:
+        pass
+    return str(status)
+
+
+def _check_status(status: Any, operation: str) -> None:
+    if not _status_ok(status):
+        raise RuntimeError(f"{operation} failed with status: {_status_text(status)}")
+
+
+def _renderdoc_version_value() -> str:
+    try:
+        rd = _get_rd()
+        if hasattr(rd, "GetVersionString"):
+            return str(rd.GetVersionString())
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _remote_url(host: str, port: int) -> str:
+    return f"{host}:{port}" if int(port or 0) > 0 else str(host)
+
+
+def _wait_for_remote_endpoint(url: str, timeout_ms: int) -> None:
+    rd = _get_rd()
+    timeout_s = max(int(timeout_ms or 0), 1) / 1000.0
+    deadline = time.perf_counter() + timeout_s
+    last_detail = "unknown remote error"
+    while True:
+        status = rd.CheckRemoteServerConnection(url)
+        if _status_ok(status):
+            return
+        last_detail = _status_text(status)
+        if time.perf_counter() >= deadline:
+            raise RuntimeError(f"CheckRemoteServerConnection({url}) failed: {last_detail}")
+        time.sleep(min(0.25, max(deadline - time.perf_counter(), 0.05)))
+
+
+def _create_remote_server_connection(url: str) -> Any:
+    rd = _get_rd()
+    status, remote = rd.CreateRemoteServerConnection(url)
+    if not _status_ok(status) or remote is None:
+        raise RuntimeError(f"CreateRemoteServerConnection({url}) failed: {_status_text(status)}")
+    return remote
+
+
+def _collect_remote_server_info(
+    remote_server: Any,
+    *,
+    host: str,
+    port: int,
+    transport: str,
+    bootstrap: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    info: Dict[str, Any] = {
+        "version": _renderdoc_version_value(),
+        "name": str(host),
+        "platform": "android" if transport == "adb_android" else "unknown",
+        "transport": str(transport),
+        "endpoint": _remote_url(host, port),
+    }
+    try:
+        info["driver_name"] = str(remote_server.DriverName() or "")
+    except Exception:
+        info["driver_name"] = ""
+    try:
+        replays = remote_server.RemoteSupportedReplays()
+        info["capabilities"] = {
+            "supported_replays": [str(item) for item in list(replays or [])],
+        }
+    except Exception:
+        info.setdefault("capabilities", {})
+    if bootstrap:
+        info["bootstrap"] = dict(bootstrap)
+        if transport == "adb_android":
+            info["platform"] = "android"
+    return info
+
+
+def _disconnect_remote_handle_sync(handle: RemoteHandle) -> List[str]:
+    errors: List[str] = []
+    if handle.remote_server is not None:
+        try:
+            if handle.transport == "adb_android" and hasattr(handle.remote_server, "ShutdownServerAndConnection"):
+                handle.remote_server.ShutdownServerAndConnection()
+            else:
+                handle.remote_server.ShutdownConnection()
+        except Exception as exc:
+            errors.append(f"remote shutdown failed: {exc}")
+    if handle.transport == "adb_android" and handle.bootstrap_result is not None:
+        errors.extend(cleanup_android_remote(handle.bootstrap_result))
+    return errors
 
 def _require(fields: Dict[str, Any], *names: str) -> None:
     missing = []
@@ -1142,6 +1262,13 @@ async def runtime_shutdown() -> None:
                 await _session_manager.close_session(info.session_id)
             except Exception:
                 pass
+    for remote_id in list(_runtime.remotes.keys()):
+        handle = _runtime.remotes.pop(remote_id, None)
+        if handle is not None:
+            try:
+                await _offload(_disconnect_remote_handle_sync, handle)
+            except Exception:
+                pass
     _runtime_bootstrapped = False
     _record_log("info", "RDX runtime shutdown complete")
 
@@ -1344,7 +1471,13 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
         _runtime.replays.clear()
         _runtime.captures.clear()
         _runtime.shader_debugs.clear()
-        _runtime.remotes.clear()
+        for remote_id in list(_runtime.remotes.keys()):
+            handle = _runtime.remotes.pop(remote_id, None)
+            if handle is not None:
+                try:
+                    await _offload(_disconnect_remote_handle_sync, handle)
+                except Exception:
+                    pass
         _runtime.initialized = False
         return _ok(released=released)
 
@@ -1424,20 +1557,18 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
 
 
 async def _core_get_version_value() -> str:
-    try:
-        rd = _get_rd()
-        if hasattr(rd, "GetVersionString"):
-            return str(rd.GetVersionString())
-    except Exception:
-        pass
-    return "unknown"
-
+    return _renderdoc_version_value()
 
 async def _core_capabilities(*, detail: str) -> Dict[str, Any]:
+    remote_connected = any(handle.connected for handle in _runtime.remotes.values())
     remote_reason = (
         "Remote tools are disabled by config."
         if not _runtime.enable_remote
-        else "Requires a live RenderDoc remote endpoint."
+        else (
+            "At least one live RenderDoc remote endpoint is connected."
+            if remote_connected
+            else "Requires a live RenderDoc remote endpoint."
+        )
     )
     app_reason = (
         "App API tools are disabled by config and require in-process RenderDoc instrumentation."
@@ -1452,11 +1583,12 @@ async def _core_capabilities(*, detail: str) -> Dict[str, Any]:
             source="bundled_runtime",
         ),
         "remote": _capability_entry(
-            False,
+            bool(_runtime.enable_remote and remote_connected),
             reason=remote_reason,
             optional=True,
             source="external_dependency",
             enabled_by_config=bool(_runtime.enable_remote),
+            connected_handles=sum(1 for handle in _runtime.remotes.values() if handle.connected),
         ),
         "app_api": _capability_entry(
             False,
@@ -1583,33 +1715,79 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
         if handle is None:
             return _err(f"Unknown capture_file_id: {capture_file_id}")
         options = _as_dict(args.get("options"), default={})
-        backend_type = "remote" if options.get("remote_id") else "local"
+        remote_id = str(options.get("remote_id") or "").strip()
+        backend_config: Dict[str, Any] = {"type": "local"}
+        remote_handle_for_session: RemoteHandle | None = None
+        if remote_id:
+            remote_handle = _runtime.remotes.get(remote_id)
+            if remote_handle is None:
+                return _err(
+                    f"Unknown remote_id: {remote_id}",
+                    code="remote_not_found",
+                    category="runtime",
+                    details={"remote_id": remote_id},
+                )
+            if remote_handle.leased_session_id:
+                return _err(
+                    f"Remote handle {remote_id} is already leased to session {remote_handle.leased_session_id}",
+                    code="remote_in_use",
+                    category="runtime",
+                    details={"remote_id": remote_id, "session_id": remote_handle.leased_session_id},
+                )
+            if not remote_handle.connected or remote_handle.remote_server is None:
+                return _err(
+                    f"Remote handle {remote_id} is not connected",
+                    code="remote_not_connected",
+                    category="runtime",
+                    details={"remote_id": remote_id, "endpoint": _remote_url(remote_handle.host, remote_handle.port)},
+                )
+            remote_handle_for_session = remote_handle
+            backend_config = {
+                "type": "remote",
+                "host": remote_handle.host,
+                "port": remote_handle.port,
+                "transport": remote_handle.transport,
+                "remote_id": remote_id,
+                "remote_server": remote_handle.remote_server,
+            }
         session_info = await _session_manager.create_session(
-            backend_config={"type": backend_type},
+            backend_config=backend_config,
             replay_config={},
         )
-        cap_info = await _session_manager.open_capture(session_info.session_id, handle.file_path)
-        controller = await _get_controller(session_info.session_id)
-        roots = await _offload(controller.GetRootActions)
-        active_event_id = int(getattr(roots[0], "eventId", 0)) if roots else 0
-        _runtime.replays[session_info.session_id] = ReplayHandle(
-            session_id=session_info.session_id,
-            capture_file_id=capture_file_id,
-            frame_index=0,
-            active_event_id=active_event_id,
-        )
-        api_properties = {}
+        if remote_handle_for_session is not None:
+            remote_handle_for_session.remote_server = None
+            remote_handle_for_session.connected = False
+            remote_handle_for_session.leased_session_id = session_info.session_id
+            remote_handle_for_session.detail["connected"] = False
+            remote_handle_for_session.detail["leased_session_id"] = session_info.session_id
         try:
-            props = await _offload(controller.GetAPIProperties)
-            api_properties = {"pipeline_type": str(getattr(props, "pipelineType", ""))}
-        except Exception:
+            cap_info = await _session_manager.open_capture(session_info.session_id, handle.file_path)
+            controller = await _get_controller(session_info.session_id)
+            roots = await _offload(controller.GetRootActions)
+            active_event_id = int(getattr(roots[0], "eventId", 0)) if roots else 0
+            _runtime.replays[session_info.session_id] = ReplayHandle(
+                session_id=session_info.session_id,
+                capture_file_id=capture_file_id,
+                frame_index=0,
+                active_event_id=active_event_id,
+            )
             api_properties = {}
-        return _ok(
-            session_id=session_info.session_id,
-            frame_count=max(1, int(getattr(cap_info, "frame_count", 1))),
-            api_properties=api_properties,
-        )
-
+            try:
+                props = await _offload(controller.GetAPIProperties)
+                api_properties = {"pipeline_type": str(getattr(props, "pipelineType", ""))}
+            except Exception:
+                api_properties = {}
+            return _ok(
+                session_id=session_info.session_id,
+                frame_count=max(1, int(getattr(cap_info, "frame_count", 1))),
+                api_properties=api_properties,
+            )
+        except Exception:
+            try:
+                await _session_manager.close_session(session_info.session_id)
+            except Exception:
+                pass
+            raise
     if action == "close_replay":
         _require(args, "session_id")
         session_id = str(args["session_id"])
@@ -4231,8 +4409,11 @@ async def _dispatch_util(action: str, args: Dict[str, Any]) -> str:
 async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
     if action == "connect":
         _require(args, "host")
-        host = str(args["host"])
+        host = str(args["host"] or "").strip()
         port = _as_int(args.get("port"), 38920)
+        timeout_ms = max(_as_int(args.get("timeout_ms"), 5000), 1)
+        options = _as_dict(args.get("options"), default={})
+        transport = str(options.get("transport") or "renderdoc").strip().lower() or "renderdoc"
         if not _runtime.enable_remote:
             return _capability_error(
                 "remote_disabled",
@@ -4242,21 +4423,169 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
                 source="runtime_config",
                 optional=True,
             )
+        if transport not in {"renderdoc", "adb_android"}:
+            return _err(
+                f"Unsupported remote transport: {transport}",
+                code="remote_transport_unsupported",
+                category="runtime",
+                details={"transport": transport},
+            )
+
+        endpoint_host = host
+        endpoint_port = port
+        bootstrap_detail: Dict[str, Any] = {}
+        bootstrap_result = None
+
+        try:
+            if transport == "adb_android":
+                if host not in {"", "127.0.0.1", "localhost"}:
+                    return _err(
+                        "Android adb transport requires host=127.0.0.1 or localhost",
+                        code="android_remote_host_invalid",
+                        category="runtime",
+                        details={"host": host},
+                    )
+                bootstrap_result = await _offload(
+                    bootstrap_android_remote,
+                    remote_port=port,
+                    options=AndroidBootstrapOptions(
+                        device_serial=str(options.get("device_serial") or ""),
+                        local_port=_as_int(options.get("local_port"), 0),
+                        install_apk=_as_bool(options.get("install_apk"), True),
+                        push_config=_as_bool(options.get("push_config"), True),
+                    ),
+                )
+                bootstrap_detail = describe_android_remote(bootstrap_result)
+                endpoint_host = str(bootstrap_result.host)
+                endpoint_port = int(bootstrap_result.port)
+
+            url = _remote_url(endpoint_host, endpoint_port)
+            await _offload(_wait_for_remote_endpoint, url, timeout_ms)
+            remote_server = await _offload(_create_remote_server_connection, url)
+            ping_status = await _offload(remote_server.Ping)
+            if not _status_ok(ping_status):
+                raise RuntimeError(f"RemoteServer.Ping({url}) failed: {_status_text(ping_status)}")
+            server_info = await _offload(
+                _collect_remote_server_info,
+                remote_server,
+                host=endpoint_host,
+                port=endpoint_port,
+                transport=transport,
+                bootstrap=bootstrap_detail,
+            )
+        except AndroidRemoteBootstrapError as exc:
+            return _err(exc.message, code=exc.code, category="runtime", details=exc.details)
+        except Exception as exc:
+            if bootstrap_result is not None:
+                try:
+                    await _offload(cleanup_android_remote, bootstrap_result)
+                except Exception:
+                    pass
+            return _err(
+                str(exc),
+                code="remote_connect_failed",
+                category="runtime",
+                details={
+                    "transport": transport,
+                    "host": endpoint_host,
+                    "port": endpoint_port,
+                    "requested_host": host,
+                    "requested_port": port,
+                },
+            )
+
         remote_id = _new_id("remote")
+        detail = {
+            "connected": True,
+            "requires_remote_device": transport == "adb_android",
+            "transport": transport,
+            "endpoint": _remote_url(endpoint_host, endpoint_port),
+        }
+        if bootstrap_detail:
+            detail["bootstrap"] = dict(bootstrap_detail)
         _runtime.remotes[remote_id] = RemoteHandle(
             remote_id=remote_id,
-            host=host,
-            port=port,
-            connected=False,
-            detail={"requires_remote_device": True},
+            host=endpoint_host,
+            port=endpoint_port,
+            connected=True,
+            transport=transport,
+            remote_server=remote_server,
+            server_info=server_info,
+            bootstrap=bootstrap_detail,
+            bootstrap_result=bootstrap_result,
+            detail=detail,
         )
-        return _ok(remote_id=remote_id, detail={"requires_remote_device": True, "connected": False})
+        return _ok(remote_id=remote_id, server_info=server_info, detail=detail)
+
     if action == "disconnect":
         _require(args, "remote_id")
-        _runtime.remotes.pop(str(args["remote_id"]), None)
-        return _ok()
+        remote_id = str(args["remote_id"])
+        handle = _runtime.remotes.get(remote_id)
+        if handle is None:
+            return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
+        if handle.leased_session_id and handle.leased_session_id in _runtime.replays:
+            return _err(
+                f"Remote handle {remote_id} is currently in use by session {handle.leased_session_id}",
+                code="remote_in_use",
+                category="runtime",
+                details={"remote_id": remote_id, "session_id": handle.leased_session_id},
+            )
+        handle = _runtime.remotes.pop(remote_id, None)
+        if handle is None:
+            return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
+        errors = await _offload(_disconnect_remote_handle_sync, handle)
+        if errors:
+            return _ok(detail={"connected": False, "cleanup_errors": errors})
+        return _ok(detail={"connected": False})
+
+    if action == "ping":
+        _require(args, "remote_id")
+        remote_id = str(args["remote_id"])
+        handle = _runtime.remotes.get(remote_id)
+        if handle is None:
+            return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
+        if handle.leased_session_id and handle.leased_session_id in _runtime.replays:
+            return _err(
+                f"Remote handle {remote_id} is currently leased to session {handle.leased_session_id}",
+                code="remote_in_use",
+                category="runtime",
+                details={"remote_id": remote_id, "session_id": handle.leased_session_id},
+            )
+        if not handle.connected or handle.remote_server is None:
+            return _err(
+                f"Remote handle {remote_id} is not connected",
+                code="remote_not_connected",
+                category="runtime",
+                details={"remote_id": remote_id},
+            )
+        started = time.perf_counter()
+        try:
+            status = await _offload(handle.remote_server.Ping)
+        except Exception as exc:
+            handle.connected = False
+            return _err(
+                f"RemoteServer.Ping({_remote_url(handle.host, handle.port)}) failed: {exc}",
+                code="remote_ping_failed",
+                category="runtime",
+                details={"remote_id": remote_id},
+            )
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        if not _status_ok(status):
+            handle.connected = False
+            return _err(
+                f"RemoteServer.Ping({_remote_url(handle.host, handle.port)}) failed: {_status_text(status)}",
+                code="remote_ping_failed",
+                category="runtime",
+                details={"remote_id": remote_id, "latency_ms": latency_ms},
+            )
+        handle.detail["connected"] = True
+        return _ok(
+            latency_ms=latency_ms,
+            server_info=handle.server_info,
+            detail={"connected": True, "transport": handle.transport},
+        )
+
     if action in {
-        "ping",
         "list_targets",
         "launch_app",
         "set_capture_options",
@@ -4270,7 +4599,7 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
         _require(args, "remote_id")
         remote_id = str(args["remote_id"])
         if remote_id not in _runtime.remotes:
-            return _err(f"Unknown remote_id: {remote_id}")
+            return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
         return _capability_error(
             "remote_dependency",
             "Remote target interaction requires a live RenderDoc remote endpoint",
@@ -4281,8 +4610,6 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
             requires_remote_device=True,
         )
     return _err(f"Unsupported remote action: {action}")
-
-
 async def _dispatch_app(action: str, args: Dict[str, Any]) -> str:
     connection = _as_dict(args.get("connection"), default={})
     conn_key = json.dumps(connection, sort_keys=True, ensure_ascii=False)
@@ -4373,3 +4700,7 @@ def main_streamable_http() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+
