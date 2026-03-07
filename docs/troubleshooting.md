@@ -77,6 +77,26 @@ rdx context clear
 
 如果目标是继续使用当前 `.rdc` 链路，优先检查当前 context，并视情况重新执行 `capture open`。
 
+## `rd.event.set_active` 返回 `event_not_found`
+
+这通常表示你给的 `event_id` 不是 action tree 中可解析的 canonical event。
+
+常见来源：
+
+- 把 `rd.resource.get_usage` / `rd.resource.get_history` 里的 `raw_event_id` 误当成可直接 round-trip 的 `event_id`
+- capture 已切换帧或 session 已重建，旧 event 引用不再对应当前 action tree
+
+当前平台语义是：
+
+- `rd.event.set_active` 会失败
+- 现有 runtime / context 中的 `active_event_id` 保持不变
+- 后续 `pipeline` / `shader` / `pixel_history` 不应建立在这次失败输入上
+
+排查时优先确认：
+
+- `rd.event.get_action_details(event_id=...)` 是否成功
+- `rd.resource.get_usage` / `rd.resource.get_history` 返回的是 canonical `event_id` 还是仅供诊断的 `raw_event_id`
+
 ## `CLI` 中 `--daemon-context` 放哪里
 
 `--daemon-context` 是顶层参数，必须放在子命令前：

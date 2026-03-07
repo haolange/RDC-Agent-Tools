@@ -1075,8 +1075,26 @@ def _flatten_actions(actions: Sequence[Any], out: Optional[List[Any]] = None) ->
     return out
 
 
-def _pick_default_event_id(actions: Sequence[Any]) -> int:
+def _build_action_index(actions: Sequence[Any]) -> Tuple[List[Any], Dict[int, Any]]:
     flat = _flatten_actions(actions)
+    by_event: Dict[int, Any] = {}
+    for action in flat:
+        event_id = int(getattr(action, "eventId", 0))
+        if event_id > 0 and event_id not in by_event:
+            by_event[event_id] = action
+    return flat, by_event
+
+
+async def _load_action_index(session_id: str, *, controller: Optional[Any] = None) -> Tuple[Sequence[Any], List[Any], Dict[int, Any]]:
+    if controller is None:
+        controller = await _get_controller(session_id)
+    roots = await _offload(controller.GetRootActions)
+    flat, by_event = _build_action_index(roots)
+    return roots, flat, by_event
+
+
+def _pick_default_event_id(actions: Sequence[Any]) -> int:
+    flat, _ = _build_action_index(actions)
     for action in flat:
         flags = _map_action_flags(getattr(action, "flags", 0))
         if flags.get("is_draw") or flags.get("is_dispatch"):
@@ -1201,20 +1219,51 @@ def _active_event(session_id: str) -> int:
     return replay.active_event_id
 
 
+def _raise_event_not_found(session_id: str, event_id: int) -> None:
+    raise CoreError(
+        code="event_not_found",
+        message=f"Event not found: {int(event_id)}",
+        category="not_found",
+        details={
+            "session_id": str(session_id or ""),
+            "event_id": int(event_id),
+        },
+    )
+
+
+def _require_action_event(session_id: str, event_id: int, by_event: Dict[int, Any]) -> int:
+    resolved = int(event_id)
+    if resolved <= 0 or resolved not in by_event:
+        _raise_event_not_found(session_id, resolved)
+    return resolved
+
+
+def _store_active_event(session_id: str, event_id: int, *, context_id: Optional[str] = None) -> None:
+    resolved = int(event_id or 0)
+    if session_id in _runtime.replays:
+        _runtime.replays[session_id].active_event_id = resolved
+    _set_context_active_event(session_id, resolved, context_id=context_id)
+
+
 async def _ensure_event(session_id: str, event_id: Optional[int]) -> int:
     controller = await _get_controller(session_id)
+    roots, _, by_event = await _load_action_index(session_id, controller=controller)
+    should_repair_state = False
     if event_id is None:
-        event = _active_event(session_id)
-        if event <= 0:
-            roots = await _offload(controller.GetRootActions)
-            event = _pick_default_event_id(roots)
+        active_event = _active_event(session_id)
+        if active_event > 0 and active_event in by_event:
+            resolved_event = active_event
+        else:
+            resolved_event = _pick_default_event_id(roots)
+            should_repair_state = active_event != resolved_event
     else:
-        event = int(event_id)
-    if event > 0:
-        await _offload(controller.SetFrameEvent, event, True)
-        if session_id in _runtime.replays:
-            _runtime.replays[session_id].active_event_id = event
-    return event
+        resolved_event = _require_action_event(session_id, int(event_id), by_event)
+    if resolved_event > 0:
+        await _offload(controller.SetFrameEvent, resolved_event, True)
+        _store_active_event(session_id, resolved_event)
+    elif should_repair_state:
+        _store_active_event(session_id, resolved_event)
+    return resolved_event
 
 
 async def _resolve_resource_id(session_id: str, resource_id: Any) -> Any:
@@ -2300,9 +2349,7 @@ async def _dispatch_event(action: str, args: Dict[str, Any]) -> str:
     session_id = str(args["session_id"])
     controller = await _get_controller(session_id)
 
-    roots = await _offload(controller.GetRootActions)
-    flat = _flatten_actions(roots)
-    by_event = {int(getattr(a, "eventId", 0)): a for a in flat}
+    roots, flat, by_event = await _load_action_index(session_id, controller=controller)
 
     def _parent_chain(event_id: int) -> List[Any]:
         chain: List[Any] = []
@@ -2325,11 +2372,10 @@ async def _dispatch_event(action: str, args: Dict[str, Any]) -> str:
     if action == "set_active":
         _require(args, "event_id")
         event_id = _as_int(args["event_id"])
-        await _offload(controller.SetFrameEvent, event_id, True)
-        if session_id in _runtime.replays:
-            _runtime.replays[session_id].active_event_id = event_id
-        _set_context_active_event(session_id, event_id)
-        return _ok(active_event_id=event_id)
+        resolved_event = _require_action_event(session_id, event_id, by_event)
+        await _offload(controller.SetFrameEvent, resolved_event, True)
+        _store_active_event(session_id, resolved_event)
+        return _ok(active_event_id=resolved_event)
 
     if action == "get_active":
         return _ok(active_event_id=_active_event(session_id))
@@ -2537,12 +2583,17 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
     _require(args, "session_id")
     session_id = str(args["session_id"])
     stage = _parse_stage(args.get("stage"))
-    snapshot = await _pipeline_snapshot(session_id, event_id=None)
+    resolved_event_id = await _ensure_event(session_id, _as_int(args["event_id"]) if args.get("event_id") is not None else None)
+    assert _pipeline_service is not None
+    snapshot = await _pipeline_service.snapshot_pipeline(
+        session_id=session_id,
+        event_id=resolved_event_id,
+        session_manager=_session_manager,
+    )
     snapshot_dict = snapshot.model_dump(mode="json")
     controller = await _get_controller(session_id)
-    event_id = _active_event(session_id)
-    if event_id > 0:
-        await _offload(controller.SetFrameEvent, event_id, True)
+    if resolved_event_id > 0:
+        await _offload(controller.SetFrameEvent, resolved_event_id, True)
     pipe = await _offload(controller.GetPipelineState)
 
     if action == "get_state":
@@ -2619,10 +2670,10 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
     if action == "get_depth_target":
         return _ok(depth_target=snapshot_dict.get("depth_target"))
     if action == "get_resource_bindings":
-        bindings = await _pipeline_service.get_resource_bindings(session_id, _active_event(session_id), _session_manager)
+        bindings = await _pipeline_service.get_resource_bindings(session_id, resolved_event_id, _session_manager)
         return _ok(bindings=[b.model_dump(mode="json") for b in bindings])
     if action == "get_uav_bindings":
-        all_bindings = await _pipeline_service.get_resource_bindings(session_id, _active_event(session_id), _session_manager)
+        all_bindings = await _pipeline_service.get_resource_bindings(session_id, resolved_event_id, _session_manager)
         uavs = [b.model_dump(mode="json") for b in all_bindings if b.type.upper() == "UAV"]
         return _ok(uavs=uavs)
     if action == "get_sampler_bindings":
@@ -2658,6 +2709,7 @@ async def _dispatch_resource(action: str, args: Dict[str, Any]) -> str:
     session_id = str(args["session_id"])
     controller = await _get_controller(session_id)
     binding_index_cache: Optional[Dict[str, List[str]]] = None
+    event_lookup_cache: Optional[Dict[int, Any]] = None
 
     async def get_binding_index() -> Dict[str, List[str]]:
         nonlocal binding_index_cache
@@ -2667,6 +2719,22 @@ async def _dispatch_resource(action: str, args: Dict[str, Any]) -> str:
                 _active_event(session_id),
             )
         return binding_index_cache
+
+    async def get_event_lookup() -> Dict[int, Any]:
+        nonlocal event_lookup_cache
+        if event_lookup_cache is None:
+            _, _, event_lookup_cache = await _load_action_index(session_id, controller=controller)
+        return event_lookup_cache
+
+    async def usage_event_payload(entry: Any) -> Dict[str, Any]:
+        raw_event_id = int(getattr(entry, "eventId", 0))
+        event_lookup = await get_event_lookup()
+        resolvable = raw_event_id > 0 and raw_event_id in event_lookup
+        return {
+            "event_id": raw_event_id if resolvable else None,
+            "raw_event_id": raw_event_id,
+            "event_resolvable": resolvable,
+        }
 
     async def list_textures() -> List[Dict[str, Any]]:
         textures = await _offload(controller.GetTextures)
@@ -2740,9 +2808,10 @@ async def _dispatch_resource(action: str, args: Dict[str, Any]) -> str:
         usage_raw = await _offload(controller.GetUsage, rid)
         usage = []
         for entry in usage_raw:
+            event_info = await usage_event_payload(entry)
             usage.append(
                 {
-                    "event_id": int(getattr(entry, "eventId", 0)),
+                    **event_info,
                     "usage": str(getattr(entry, "usage", "")),
                 },
             )
@@ -2753,9 +2822,10 @@ async def _dispatch_resource(action: str, args: Dict[str, Any]) -> str:
         usage_raw = await _offload(controller.GetUsage, rid)
         history = []
         for entry in usage_raw:
+            event_info = await usage_event_payload(entry)
             history.append(
                 {
-                    "event_id": int(getattr(entry, "eventId", 0)),
+                    **event_info,
                     "usage": str(getattr(entry, "usage", "")),
                     "is_write": "Write" in str(getattr(entry, "usage", "")),
                 },

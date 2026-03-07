@@ -47,7 +47,8 @@ remote endpoint
 - `frame_index`
   - 当前 replay 所选帧。
 - `active_event_id`
-  - 当前焦点事件，常作为后续 event 级分析的起点。
+  - 当前焦点 action event，常作为后续 event 级分析的起点。
+  - 只有可被 `rd.event.get_action_details` round-trip 的 event 才会被写入这里；`rd.event.set_active` 对不可解析 event 会直接失败并保持现状。
 - `context snapshot`
   - `rd.session.get_context` 返回的 context 级快照。
   - 它汇总当前 runtime 选中的 `session_id`、`capture_file_id`、remote 生命周期、focus 与 recent artifacts，供 Agent 长链调用复用。
@@ -105,6 +106,11 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
   - 真正的 replay、debug、active event、controller 等进程内对象。
 - context snapshot
   - 供 Agent 或自动化读取的 context 级快照，汇总 runtime / remote / focus / recent artifacts。
+
+补充一条 event 语义边界：
+
+- runtime / context 中保存的 `active_event_id` 是 canonical action event。
+- `rd.resource.get_usage` / `rd.resource.get_history` 里的 `raw_event_id` 只是底层记录值，不保证能被 `rd.event.*` 直接 round-trip。
 
 理解状态时应按这个顺序思考：
 

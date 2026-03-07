@@ -27,6 +27,7 @@
 - `capture_file_id`、`session_id` 是运行时句柄，不是长期稳定标识。
 - remote 路径还存在 `remote_id` consumed 生命周期，不能把它当作可无限复用的句柄。
 - 长链任务如果没有 context snapshot，模型很容易忘记上一轮 focus 与 artifact 路径。
+- 不是所有底层 RenderDoc `eventId` 都能回灌到 `rd.event.*`；上层必须区分 canonical `event_id` 与 `raw_event_id`。
 - 失败恢复依赖共享契约，调用端需要明确检查 `ok`、`error_message` 与 `error.details`。
 
 因此，Agent 需要的不只是 catalog，还需要平台使用模型。
@@ -62,6 +63,8 @@
 - 显式保存关键状态。
   - 至少保存 `capture_file_id`、`session_id`、当前 `frame_index`、必要时保存 `event_id`。
   - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
+- 只把可 round-trip 的 canonical `event_id` 当作后续 `rd.event.set_active` 候选。
+  - `rd.resource.get_usage` / `rd.resource.get_history` 返回的 `raw_event_id` 仅用于诊断，不应默认直接传回 `rd.event.*`。
 - 把 handle 当作短生命周期引用。
   - 上层如需缓存，必须准备重建 session 的恢复路径，而不是把 handle 当成永久主键。
 - 显式参数优先于 snapshot 默认值。

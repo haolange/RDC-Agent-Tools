@@ -78,6 +78,7 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - If a stale `remote_id` is reused, the expected lifecycle error code is `remote_handle_consumed`.
 - Android remote 可通过 `rd.remote.connect` 的 `options.transport="adb_android"` 触发仓库内置的 `adb` bootstrap。
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
+- `active_event_id` 与对外暴露的 canonical `event_id` 只表示可被 `rd.event.get_action_details` round-trip 的 action event；对 `rd.resource.get_usage` / `rd.resource.get_history` 中不可 round-trip 的底层记录，应查看 `raw_event_id` 与 `event_resolvable`。
 
 更完整的操作说明见 [docs/quickstart.md](docs/quickstart.md)。
 
@@ -99,6 +100,7 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - catalog 当前数量以 `tool_count` 字段为准；当前为 `198`，后续变更必须同步更新 validator、help 输出与文档口径。
 - 运行时响应遵循共享契约；调试时优先检查 `ok`、`error_message`，必要时继续看 `error.details`。
 - 默认参考根目录由 `rdx.bat` 或脚本自身位置推导；`RDX_TOOLS_ROOT` 仅用于覆盖默认值。
+- `rd.event.set_active` 若收到不可解析的 `event_id`，必须失败且保持现有 runtime / context 状态不变。
 
 ## 验证
 

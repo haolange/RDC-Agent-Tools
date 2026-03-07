@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from rdx import server
+from rdx.context_snapshot import clear_context_snapshot
+
+
+class _FakeActionFlags:
+    Drawcall = 1
+    Draw = 1
+    Dispatch = 2
+    MeshDispatch = 4
+    DispatchRay = 8
+    SetMarker = 16
+    PushMarker = 32
+    PopMarker = 64
+    Copy = 128
+    Resolve = 256
+    Clear = 512
+    Present = 1024
+    PassBoundary = 2048
+
+
+class _FakeShaderStage:
+    Vertex = "vs"
+    Hull = "hs"
+    Domain = "ds"
+    Geometry = "gs"
+    Pixel = "ps"
+    Compute = "cs"
+    Mesh = "ms"
+    Amplification = "as"
+
+
+class _FakeAction:
+    def __init__(
+        self,
+        event_id: int,
+        *,
+        name: str = "",
+        flags: int = 0,
+        children: list[_FakeAction] | None = None,
+        outputs: list[str] | None = None,
+    ) -> None:
+        self.eventId = event_id
+        self.customName = name or f"event_{event_id}"
+        self.name = self.customName
+        self.flags = flags
+        self.children = list(children or [])
+        self.outputs = list(outputs or [])
+        self.numIndices = 0
+        self.numInstances = 1
+
+
+class _FakeUsageEntry:
+    def __init__(self, event_id: int, usage: str) -> None:
+        self.eventId = event_id
+        self.usage = usage
+
+
+class _FakePipe:
+    def __init__(self, event_id: int) -> None:
+        self._event_id = int(event_id)
+
+    def GetShader(self, stage: object) -> str:
+        return f"shader@{self._event_id}"
+
+    def GetShaderReflection(self, stage: object) -> SimpleNamespace:
+        return SimpleNamespace(entryPoint=f"main_{self._event_id}", encoding="dxil")
+
+    def GetVBuffers(self) -> list[object]:
+        return []
+
+    def GetIBuffer(self) -> SimpleNamespace:
+        return SimpleNamespace(resourceId="", byteOffset=0, byteStride=0)
+
+
+class _FakeController:
+    def __init__(
+        self,
+        *,
+        roots: list[_FakeAction],
+        usage_entries: list[_FakeUsageEntry] | None = None,
+        resources: list[object] | None = None,
+    ) -> None:
+        self._roots = list(roots)
+        self._usage_entries = list(usage_entries or [])
+        self._resources = list(resources or [])
+        self.current_event = 0
+        self.set_frame_calls: list[int] = []
+
+    def GetRootActions(self) -> list[_FakeAction]:
+        return self._roots
+
+    def SetFrameEvent(self, event_id: int, apply: bool) -> None:
+        self.current_event = int(event_id)
+        self.set_frame_calls.append(int(event_id))
+
+    def GetPipelineState(self) -> _FakePipe:
+        return _FakePipe(self.current_event)
+
+    def GetUsage(self, resource_id: object) -> list[_FakeUsageEntry]:
+        return list(self._usage_entries)
+
+    def GetTextures(self) -> list[object]:
+        return list(self._resources)
+
+    def GetBuffers(self) -> list[object]:
+        return []
+
+    def GetResources(self) -> list[object]:
+        return []
+
+
+class _FakeSnapshot:
+    def __init__(self, event_id: int) -> None:
+        self._event_id = int(event_id)
+
+    def model_dump(self, mode: str = "json") -> dict[str, object]:
+        return {
+            "api": "Vulkan",
+            "shaders": [{"stage": "PS", "shader_id": f"shader@{self._event_id}"}],
+            "render_targets": [{"resource_id": f"rt@{self._event_id}"}],
+            "bindings": [{"resource_id": f"bind@{self._event_id}"}],
+            "topology": "trianglelist",
+            "viewport": {"x": 0.0, "y": 0.0},
+            "blend_states": [],
+            "depth_stencil": {},
+            "depth_target": {"resource_id": f"depth@{self._event_id}"},
+        }
+
+
+class _FakeBinding:
+    def __init__(self, event_id: int, binding_type: str) -> None:
+        self.type = binding_type
+        self._event_id = int(event_id)
+
+    def model_dump(self, mode: str = "json") -> dict[str, object]:
+        return {
+            "resource_id": f"{self.type.lower()}@{self._event_id}",
+            "type": self.type,
+        }
+
+
+class _FakePipelineService:
+    def __init__(self) -> None:
+        self.snapshot_calls: list[int] = []
+        self.binding_calls: list[int] = []
+
+    async def snapshot_pipeline(self, session_id: str, event_id: int, session_manager: object) -> _FakeSnapshot:
+        self.snapshot_calls.append(int(event_id))
+        return _FakeSnapshot(event_id)
+
+    async def get_resource_bindings(self, session_id: str, event_id: int, session_manager: object) -> list[_FakeBinding]:
+        self.binding_calls.append(int(event_id))
+        return [
+            _FakeBinding(event_id, "SRV"),
+            _FakeBinding(event_id, "UAV"),
+        ]
+
+
+def _install_common_env(monkeypatch: pytest.MonkeyPatch, controller: _FakeController) -> None:
+    async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return fn(*args, **kwargs)
+
+    async def _fake_get_controller(session_id: str) -> _FakeController:
+        return controller
+
+    fake_rd = SimpleNamespace(
+        ActionFlags=_FakeActionFlags,
+        ShaderStage=_FakeShaderStage,
+    )
+    monkeypatch.setattr(server, "_offload", _inline_offload)
+    monkeypatch.setattr(server, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(server, "_get_rd", lambda: fake_rd)
+
+
+def _seed_session(active_event_id: int) -> None:
+    server._runtime.replays = {
+        "sess_demo": server.ReplayHandle(
+            session_id="sess_demo",
+            capture_file_id="capf_demo",
+            frame_index=0,
+            active_event_id=active_event_id,
+        )
+    }
+    server._set_context_runtime_session(
+        "sess_demo",
+        capture_file_id="capf_demo",
+        backend_type="local",
+        frame_index=0,
+        active_event_id=active_event_id,
+    )
+
+
+def _poison_active_event(event_id: int) -> None:
+    server._runtime.replays["sess_demo"].active_event_id = int(event_id)
+    server._set_context_active_event("sess_demo", int(event_id))
+
+
+@pytest.fixture(autouse=True)
+def _reset_server_state() -> None:
+    original_replays = dict(server._runtime.replays)
+    original_contexts = dict(server._runtime.context_snapshots)
+    original_pipeline_service = server._pipeline_service
+    original_session_manager = server._session_manager
+    clear_context_snapshot()
+    server._runtime.context_snapshots.clear()
+    try:
+        yield
+    finally:
+        clear_context_snapshot()
+        server._runtime.context_snapshots.clear()
+        server._runtime.replays = original_replays
+        server._runtime.context_snapshots.update(original_contexts)
+        server._pipeline_service = original_pipeline_service
+        server._session_manager = original_session_manager
+
+
+def test_event_set_active_validates_before_mutating_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[
+            _FakeAction(101, flags=_FakeActionFlags.Drawcall),
+            _FakeAction(202, flags=_FakeActionFlags.Drawcall),
+        ]
+    )
+    _install_common_env(monkeypatch, controller)
+    _seed_session(202)
+
+    invalid = json.loads(asyncio.run(server._dispatch_tool_legacy("rd.event.set_active", {"session_id": "sess_demo", "event_id": 53})))
+    assert invalid["success"] is False
+    assert invalid["code"] == "event_not_found"
+    assert invalid["category"] == "not_found"
+    assert invalid["details"] == {"session_id": "sess_demo", "event_id": 53}
+    assert controller.set_frame_calls == []
+    assert server._runtime.replays["sess_demo"].active_event_id == 202
+    assert server._context_snapshot()["runtime"]["active_event_id"] == 202
+
+    valid = json.loads(asyncio.run(server._dispatch_tool_legacy("rd.event.set_active", {"session_id": "sess_demo", "event_id": 101})))
+    assert valid["success"] is True
+    assert valid["active_event_id"] == 101
+    assert controller.set_frame_calls == [101]
+    assert server._runtime.replays["sess_demo"].active_event_id == 101
+    assert server._context_snapshot()["runtime"]["active_event_id"] == 101
+
+
+def test_ensure_event_repairs_polluted_active_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[
+            _FakeAction(101, flags=_FakeActionFlags.Drawcall),
+            _FakeAction(202, flags=_FakeActionFlags.Drawcall),
+        ]
+    )
+    _install_common_env(monkeypatch, controller)
+    _seed_session(53)
+
+    resolved = asyncio.run(server._ensure_event("sess_demo", None))
+    assert resolved == 101
+    assert controller.set_frame_calls == [101]
+    assert server._runtime.replays["sess_demo"].active_event_id == 101
+    assert server._context_snapshot()["runtime"]["active_event_id"] == 101
+
+
+def test_pipeline_dispatch_uses_one_resolved_event_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[
+            _FakeAction(101, flags=_FakeActionFlags.Drawcall, outputs=["rt0"]),
+            _FakeAction(202, flags=_FakeActionFlags.Drawcall, outputs=["rt1"]),
+        ]
+    )
+    pipeline_service = _FakePipelineService()
+    _install_common_env(monkeypatch, controller)
+    server._pipeline_service = pipeline_service
+    server._session_manager = SimpleNamespace()
+    _seed_session(53)
+
+    summary = json.loads(asyncio.run(server._dispatch_pipeline("get_state_summary", {"session_id": "sess_demo"})))
+    assert summary["success"] is True
+    assert summary["summary"]["render_targets"][0]["resource_id"] == "rt@101"
+    assert pipeline_service.snapshot_calls == [101]
+
+    _poison_active_event(53)
+    render_targets = json.loads(asyncio.run(server._dispatch_pipeline("get_render_targets", {"session_id": "sess_demo"})))
+    assert render_targets["success"] is True
+    assert render_targets["render_targets"][0]["resource_id"] == "rt@101"
+    assert pipeline_service.snapshot_calls == [101, 101]
+
+    _poison_active_event(53)
+    output_targets = json.loads(asyncio.run(server._dispatch_pipeline("get_output_targets", {"session_id": "sess_demo"})))
+    assert output_targets["success"] is True
+    assert output_targets["framebuffer"]["depth_target"]["resource_id"] == "depth@101"
+    assert pipeline_service.snapshot_calls == [101, 101, 101]
+
+    _poison_active_event(53)
+    shader = json.loads(asyncio.run(server._dispatch_pipeline("get_shader", {"session_id": "sess_demo", "stage": "ps"})))
+    assert shader["success"] is True
+    assert shader["shader"]["shader_id"] == "shader@101"
+    assert pipeline_service.snapshot_calls == [101, 101, 101, 101]
+
+    _poison_active_event(53)
+    bindings = json.loads(asyncio.run(server._dispatch_pipeline("get_resource_bindings", {"session_id": "sess_demo"})))
+    assert bindings["success"] is True
+    assert bindings["bindings"][0]["resource_id"] == "srv@101"
+    assert pipeline_service.snapshot_calls == [101, 101, 101, 101, 101]
+    assert pipeline_service.binding_calls == [101]
+
+
+def test_resource_usage_and_history_expose_canonical_and_raw_event_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[
+            _FakeAction(101, flags=_FakeActionFlags.Drawcall),
+            _FakeAction(202, flags=_FakeActionFlags.Drawcall),
+        ],
+        usage_entries=[
+            _FakeUsageEntry(101, "Read"),
+            _FakeUsageEntry(53, "Write"),
+            _FakeUsageEntry(1042, "Read"),
+        ],
+        resources=[
+            SimpleNamespace(
+                resourceId="ResourceId::7",
+                name="main_color",
+                width=1,
+                height=1,
+                depth=1,
+                mips=1,
+                format=SimpleNamespace(Name=lambda: "R8G8B8A8_UNORM"),
+            )
+        ],
+    )
+    _install_common_env(monkeypatch, controller)
+    _seed_session(101)
+
+    usage = json.loads(
+        asyncio.run(
+            server._dispatch_resource(
+                "get_usage",
+                {"session_id": "sess_demo", "resource_id": "ResourceId::7", "max_events": 10},
+            )
+        )
+    )
+    assert usage["success"] is True
+    assert usage["usage"] == [
+        {"event_id": 101, "raw_event_id": 101, "event_resolvable": True, "usage": "Read"},
+        {"event_id": None, "raw_event_id": 53, "event_resolvable": False, "usage": "Write"},
+        {"event_id": None, "raw_event_id": 1042, "event_resolvable": False, "usage": "Read"},
+    ]
+
+    history = json.loads(
+        asyncio.run(
+            server._dispatch_resource(
+                "get_history",
+                {"session_id": "sess_demo", "resource_id": "ResourceId::7"},
+            )
+        )
+    )
+    assert history["success"] is True
+    assert history["history"] == [
+        {"event_id": 101, "raw_event_id": 101, "event_resolvable": True, "usage": "Read", "is_write": False},
+        {"event_id": None, "raw_event_id": 53, "event_resolvable": False, "usage": "Write", "is_write": True},
+        {"event_id": None, "raw_event_id": 1042, "event_resolvable": False, "usage": "Read", "is_write": False},
+    ]

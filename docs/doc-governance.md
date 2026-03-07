@@ -98,6 +98,7 @@
 - 不把恢复 ownership 错放给仓库。
 - 如果 `remote_id` 被写入文档，必须说明它在 remote `open_replay` 成功后会被消费。
 - 如果 catalog 已公开 `rd.session.get_context` / `rd.session.update_context`，核心文档中必须能找到它们的角色说明。
+- 如果文档写到 `event_id`，必须区分 canonical action event 与底层 `raw_event_id`；不得暗示任意 RenderDoc 原始 `eventId` 都能直接喂回 `rd.event.set_active`。
 
 ## 5. 量化指标
 

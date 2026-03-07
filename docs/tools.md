@@ -30,6 +30,16 @@
 - 让上层 Agent 只补充 user-owned 字段，例如 `focus_pixel`、`focus_resource_id`、`focus_shader_id`、`notes`。
 - 不允许人工或 Agent 通过它们直接篡改 runtime-owned 字段，如 `session_id`、`capture_file_id`、`active_event_id`、`remote_id`。
 
+## Event 语义
+
+- `rd.event.set_active` 只接受可被 action tree 解析的 canonical `event_id`；失败不会污染 runtime / context 中现有的 `active_event_id`。
+- `rd.pipeline.*` 的同次调用内，snapshot 与 live pipeline 读取共享同一个已解析 event 上下文，不允许前后错位。
+- `rd.resource.get_usage` / `rd.resource.get_history` 会同时暴露：
+  - canonical `event_id`
+  - `raw_event_id`
+  - `event_resolvable`
+- 只有 canonical `event_id` 可以直接作为 `rd.event.*` 输入；`raw_event_id` 仅用于诊断底层 RenderDoc 记录。
+
 ## Remote 说明
 
 - `rd.remote.connect` 返回的 `remote_id` 代表 live remote connection；若连接失败，不会返回占位 handle。

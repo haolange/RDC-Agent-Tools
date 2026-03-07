@@ -209,7 +209,7 @@
     {
       "name": "rd.event.set_active",
       "group": "3.2，捕获文件与 Replay Session (Capture & Replay)",
-      "description": "设置当前 active event（后续 pipeline/resource/debug 查询均以该 event 为上下文）。",
+      "description": "设置当前 active event（仅接受可被 action tree 解析的 event；失败不会污染 runtime/context，后续 pipeline/resource/debug 查询均以成功写入的 event 为上下文）。",
       "parameter_raw": "session_id (str)<br>event_id (int)",
       "returns_raw": "success (bool)<br>active_event_id (int)<br>error_message (str, 可选)",
       "param_names": [
@@ -402,7 +402,7 @@
     {
       "name": "rd.pipeline.get_state_summary",
       "group": "3.4，管线状态查询 (Pipeline State Inspection)",
-      "description": "获取 Pipeline State 的紧凑摘要（适合大模型快速阅读）。",
+      "description": "获取 Pipeline State 的紧凑摘要（适合大模型快速阅读；同次调用内的 snapshot / live 数据来自同一个已解析 event 上下文）。",
       "parameter_raw": "session_id (str)<br>include_bindings (bool, 可选, 默认 true)<br>include_shaders (bool, 可选, 默认 true)",
       "returns_raw": "success (bool)<br>summary (dict): {ia, shaders, raster, om, descriptors?, warnings?}<br>error_message (str, 可选)",
       "param_names": [
@@ -515,7 +515,7 @@
     {
       "name": "rd.pipeline.get_output_targets",
       "group": "3.4，管线状态查询 (Pipeline State Inspection)",
-      "description": "获取 Output Merger / Framebuffer：RT/DS 绑定、formats、mip/slice、load/store（若可得）。",
+      "description": "获取 Output Merger / Framebuffer：RT/DS 绑定、formats、mip/slice、load/store（若可得）；同次调用内与其他 pipeline 读取共享同一个已解析 event 上下文。",
       "parameter_raw": "session_id (str)",
       "returns_raw": "success (bool)<br>framebuffer (dict): {render_targets:[], depth_target?, samples?, formats?}<br>error_message (str, 可选)",
       "param_names": [
@@ -525,7 +525,7 @@
     {
       "name": "rd.pipeline.get_render_targets",
       "group": "3.4，管线状态查询 (Pipeline State Inspection)",
-      "description": "仅获取 Render Targets 列表（包含 resource_id、format、mip/slice、name）。",
+      "description": "仅获取 Render Targets 列表（包含 resource_id、format、mip/slice、name）；同次调用内与其他 pipeline 读取共享同一个已解析 event 上下文。",
       "parameter_raw": "session_id (str)",
       "returns_raw": "success (bool)<br>render_targets (list[dict])<br>error_message (str, 可选)",
       "param_names": [
@@ -700,9 +700,9 @@
     {
       "name": "rd.resource.get_usage",
       "group": "3.5，资源探查 (Resource Inspection & History)",
-      "description": "获取资源的使用情况，即哪些 event 读/写/绑定该资源，兼容 V3。",
+      "description": "获取资源的使用情况，即哪些 event 读/写/绑定该资源；返回仅可 round-trip 的 canonical `event_id`，并保留 `raw_event_id` 与 `event_resolvable` 诊断字段。",
       "parameter_raw": "session_id (str)<br>resource_id (str)<br>max_events (int, 可选, 默认 20000)",
-      "returns_raw": "success (bool)<br>usage (list[dict]): `{event_id, usage_type:'Read'",
+      "returns_raw": "success (bool)<br>usage (list[dict]): {event_id?(int|null), raw_event_id(int), event_resolvable(bool), usage(str)}<br>error_message (str, 可选)",
       "param_names": [
         "session_id",
         "resource_id",
@@ -712,9 +712,9 @@
     {
       "name": "rd.resource.get_history",
       "group": "3.5，资源探查 (Resource Inspection & History)",
-      "description": "获取资源的读写历史，按时间排序，包含写入来源、清除、copy 等。",
+      "description": "获取资源的读写历史，按时间排序，包含写入来源、清除、copy 等；返回仅可 round-trip 的 canonical `event_id`，并保留 `raw_event_id` 与 `event_resolvable` 诊断字段。",
       "parameter_raw": "session_id (str)<br>resource_id (str)<br>include_reads (bool, 可选, 默认 false): 若为 true 则包含 reads（可能很长）<br>include_writes (bool, 可选, 默认 true)",
-      "returns_raw": "success (bool)<br>history (list[dict]): {event_id, op, stage?, src_resource_id?, dst_resource_id?, detail?}<br>error_message (str, 可选)",
+      "returns_raw": "success (bool)<br>history (list[dict]): {event_id?(int|null), raw_event_id(int), event_resolvable(bool), usage, is_write, ...}<br>error_message (str, 可选)",
       "param_names": [
         "session_id",
         "resource_id",

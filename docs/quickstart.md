@@ -50,6 +50,8 @@ rdx daemon status
 - `session_id`
 - `active_event_id`
 
+其中 `active_event_id` 只会写成可被 `rd.event.get_action_details` round-trip 的 action event。若 `rd.event.set_active` 收到不可解析的 `event_id`，调用会失败，且不会污染当前 context。
+
 如果后续要把同一条链路交给上层 Agent 继续使用，建议额外查看：
 
 ```bat
@@ -126,6 +128,11 @@ python mcp/run_mcp.py --transport streamable-http --host 127.0.0.1 --port 8765 -
 - `rd.remote.connect` 会负责 Android `adb` bootstrap：选择设备、选择仓库内 APK、启动 `RenderDocCmd`、push `renderdoc.conf`、建立 `adb forward`。
 - 如果 `rd.remote.connect` 失败，不应继续盲跑依赖 `remote_id` 的后续链路。
 - 如果 `rd.capture.open_replay(options.remote_id=...)` 成功，原 `remote_id` 会被消费；如需新的 live handle，必须重新 `rd.remote.connect`。
+
+如果后续要把资源追踪结果再喂回事件链路，请额外注意：
+
+- `rd.resource.get_usage` / `rd.resource.get_history` 中只有 canonical `event_id` 可以直接用于 `rd.event.*`。
+- `raw_event_id` 仅用于诊断底层记录；当 `event_resolvable=false` 时，不应把它直接传给 `rd.event.set_active`。
 
 ## 5. 进一步阅读
 
