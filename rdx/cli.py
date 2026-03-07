@@ -30,6 +30,7 @@ from rdx.daemon.client import (
 )
 from rdx.server import dispatch_operation, runtime_shutdown, runtime_startup
 from rdx.runtime_paths import artifacts_dir
+from rdx.timeout_policy import daemon_exec_timeout_s
 
 EXIT_OK = 0
 EXIT_ASSERT_FAIL = 1
@@ -72,6 +73,7 @@ def _daemon_exec(
     resp = daemon_request(
         "exec",
         params={"operation": operation, "args": args, "transport": "daemon", "remote": remote},
+        timeout=daemon_exec_timeout_s(operation, args),
         context=context,
     )
     if not bool(resp.get("ok")):

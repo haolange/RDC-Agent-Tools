@@ -1,4 +1,4 @@
-﻿"""
+"""
 RDX-MCP server with registry-driven tool registration.
 
 - Registers all 196 doc-defined tools from `rdx/spec/tool_catalog_196.json`
@@ -38,6 +38,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from rdx.config import RdxConfig
 from rdx.core.artifact_publisher import ArtifactPublisher
 from rdx.core.contracts import canonical_error, env_bool
+from rdx.timeout_policy import daemon_exec_timeout_s, remote_connect_timeout_ms
 from rdx.core.engine import CoreEngine, ExecutionContext
 from rdx.core.event_graph import EventGraphService
 from rdx.core.operation_registry import OperationRegistry
@@ -1368,15 +1369,17 @@ async def dispatch_operation(
 
 async def _dispatch_tool(tool_name: str, args: Dict[str, Any]) -> str:
     if _mcp_uses_daemon():
+        daemon_args = dict(args or {})
         try:
             response = daemon_request(
                 "exec",
                 params={
                     "operation": tool_name,
-                    "args": dict(args or {}),
+                    "args": daemon_args,
                     "transport": "mcp",
                     "remote": tool_name.startswith("rd.remote."),
                 },
+                timeout=daemon_exec_timeout_s(tool_name, daemon_args),
                 context=_mcp_daemon_context(),
             )
             payload = response.get("result")
@@ -4411,7 +4414,7 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
         _require(args, "host")
         host = str(args["host"] or "").strip()
         port = _as_int(args.get("port"), 38920)
-        timeout_ms = max(_as_int(args.get("timeout_ms"), 5000), 1)
+        timeout_ms = remote_connect_timeout_ms(args)
         options = _as_dict(args.get("options"), default={})
         transport = str(options.get("transport") or "renderdoc").strip().lower() or "renderdoc"
         if not _runtime.enable_remote:
@@ -4700,7 +4703,3 @@ def main_streamable_http() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
