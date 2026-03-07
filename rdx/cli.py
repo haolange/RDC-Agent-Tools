@@ -424,15 +424,22 @@ async def _main_async(args: argparse.Namespace) -> int:
             _print_json(canonical_success(result_kind="rdx.daemon.stop", data={"message": message}, transport="cli") if ok else canonical_error(result_kind="rdx.daemon.stop", code="runtime_error", category="runtime", message=message, transport="cli"))
             return EXIT_OK if ok else EXIT_RUNTIME_ERR
         if args.daemon_cmd == "status":
-            cleanup_stale_daemon_states(context=ctx)
             st = load_daemon_state(context=ctx)
+            if not st:
+                cleanup_stale_daemon_states(context=ctx)
+                st = load_daemon_state(context=ctx)
             if not st:
                 _print_json(canonical_error(result_kind="rdx.daemon.status", code="not_found", category="not_found", message="no active daemon", transport="cli"))
                 return EXIT_RUNTIME_ERR
             try:
-                resp = daemon_request("status", params={}, context=ctx)
+                resp = daemon_request("status", params={}, context=ctx, state=st)
             except Exception as exc:  # noqa: BLE001
-                _print_json(canonical_error(result_kind="rdx.daemon.status", code="runtime_error", category="runtime", message=str(exc), details={"state": st}, transport="cli"))
+                cleaned = cleanup_stale_daemon_states(context=ctx)
+                refreshed = load_daemon_state(context=ctx)
+                if not refreshed:
+                    _print_json(canonical_error(result_kind="rdx.daemon.status", code="not_found", category="not_found", message="no active daemon", details={"state": st, "cleaned": cleaned}, transport="cli"))
+                    return EXIT_RUNTIME_ERR
+                _print_json(canonical_error(result_kind="rdx.daemon.status", code="runtime_error", category="runtime", message=str(exc), details={"state": refreshed, "cleaned": cleaned}, transport="cli"))
                 return EXIT_RUNTIME_ERR
             if bool(resp.get("ok")):
                 result = resp.get("result", {})
@@ -476,7 +483,6 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     if args.command == "context":
         if args.context_cmd == "clear":
-            cleanup_stale_daemon_states(context=ctx)
             ok, message, details = clear_context(context=ctx)
             if not ok:
                 _print_json(

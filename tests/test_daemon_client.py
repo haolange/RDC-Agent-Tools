@@ -73,3 +73,60 @@ def test_clear_context_without_daemon_clears_session(monkeypatch, tmp_path: Path
     assert "context cleared" in message
     assert details["state"] == {}
     assert not daemon_client.session_state_path("ctx-x").exists()
+
+
+
+def test_cleanup_stale_daemon_state_skips_invalid_json(monkeypatch, tmp_path: Path) -> None:
+    _configure_runtime_dir(monkeypatch, tmp_path)
+
+    state_path = daemon_client.STATE_DIR / "daemon_state_busy.json"
+    state_path.write_text('{"context_id":', encoding="utf-8")
+
+    cleaned = daemon_client.cleanup_stale_daemon_states()
+
+    assert cleaned["state_files"] == []
+    assert cleaned["session_files"] == []
+    assert state_path.exists()
+
+
+def test_save_daemon_state_uses_atomic_replace(monkeypatch, tmp_path: Path) -> None:
+    _configure_runtime_dir(monkeypatch, tmp_path)
+
+    calls: list[tuple[str, str]] = []
+    real_replace = daemon_client.os.replace
+
+    def _spy_replace(src: str | Path, dst: str | Path) -> None:
+        calls.append((Path(src).name, Path(dst).name))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(daemon_client.os, "replace", _spy_replace)
+
+    daemon_client.save_daemon_state({"pid": 42, "token": "tok", "pipe_name": "pipe", "context_id": "ctx"}, context="ctx")
+
+    state = daemon_client.load_daemon_state(context="ctx")
+    assert state["pid"] == 42
+    assert calls
+    assert not list(daemon_client.STATE_DIR.glob("*.tmp"))
+
+
+def test_stop_daemon_uses_loaded_state_before_cleanup(monkeypatch, tmp_path: Path) -> None:
+    _configure_runtime_dir(monkeypatch, tmp_path)
+
+    calls: list[tuple[int, str]] = []
+    cleared: list[str] = []
+    state = {"pid": 321, "context_id": "ctx-live", "token": "tok", "pipe_name": "pipe-live"}
+
+    monkeypatch.setattr(daemon_client, "load_daemon_state", lambda context="default": dict(state) if context == "ctx-live" else {})
+    monkeypatch.setattr(daemon_client, "cleanup_stale_daemon_states", lambda context=None: (_ for _ in ()).throw(AssertionError("cleanup should not run before stop uses loaded state")))
+    monkeypatch.setattr(daemon_client, "_shutdown_stateful_daemon", lambda pid, loaded, context: calls.append((pid, context)))
+    monkeypatch.setattr(daemon_client, "_is_process_running", lambda pid: False)
+    monkeypatch.setattr(daemon_client, "clear_daemon_state", lambda context="default": cleared.append(f"daemon:{context}"))
+    monkeypatch.setattr(daemon_client, "clear_session_state", lambda context="default": cleared.append(f"session:{context}"))
+    monkeypatch.setattr(daemon_client, "clear_context_snapshot", lambda context="default": cleared.append(f"snapshot:{context}"))
+
+    ok, message = daemon_client.stop_daemon("ctx-live")
+
+    assert ok is True
+    assert message == "daemon stopped"
+    assert calls == [(321, "ctx-live")]
+    assert cleared == ["daemon:ctx-live", "session:ctx-live", "snapshot:ctx-live"]

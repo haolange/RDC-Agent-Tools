@@ -112,18 +112,34 @@ def _ensure_state_dir() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _load_json(path: Path) -> Dict[str, Any]:
+def _load_json_with_status(path: Path) -> Tuple[str, Dict[str, Any]]:
     if not path.is_file():
-        return {}
+        return "missing", {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return {}
+        return "invalid", {}
+    if not isinstance(payload, dict):
+        return "invalid", {}
+    return "ok", payload
+
+
+def _load_json(path: Path) -> Dict[str, Any]:
+    status, payload = _load_json_with_status(path)
+    return payload if status == "ok" else {}
 
 
 def _save_json(path: Path, payload: Dict[str, Any]) -> None:
     _ensure_state_dir()
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _normalize_attached_clients(value: Any) -> list[Dict[str, Any]]:
@@ -395,17 +411,14 @@ def _shutdown_stateful_daemon(pid: int | None, state: Dict[str, Any], context: s
 def cleanup_stale_daemon_states(context: Optional[str] = None) -> Dict[str, list[str]]:
     cleaned = {"state_files": [], "session_files": [], "killed_pids": []}
     for path in _state_paths(context):
-        raw = _load_json(path)
+        status, raw = _load_json_with_status(path)
         ctx = _context_from_state_path(path)
+        if status == "missing":
+            continue
+        if status == "invalid":
+            continue
         state = _normalize_daemon_state_payload(raw, ctx) if raw else {}
         pid = int(state.get("pid") or 0)
-        if not raw:
-            try:
-                path.unlink(missing_ok=True)
-                cleaned["state_files"].append(path.name)
-            except Exception:
-                pass
-            continue
 
         if _state_should_reap(state):
             if pid > 0 and _is_process_running(pid):
@@ -640,11 +653,21 @@ def clear_context(context: Optional[str] = "default") -> Tuple[bool, str, Dict[s
     chosen_ctx = _normalize_context(context)
     state = load_daemon_state(context=chosen_ctx)
     if not state:
+        cleanup_stale_daemon_states(context=chosen_ctx)
         clear_session_state(context=chosen_ctx)
         clear_context_snapshot(context=chosen_ctx)
         return True, "context cleared (no active daemon)", {"released": {}, "state": {}}
 
-    response = daemon_request("clear_context", params={}, context=chosen_ctx, state=state)
+    try:
+        response = daemon_request("clear_context", params={}, context=chosen_ctx, state=state)
+    except Exception:
+        cleanup_stale_daemon_states(context=chosen_ctx)
+        refreshed = load_daemon_state(context=chosen_ctx)
+        if refreshed:
+            return False, "context clear failed", {"state": refreshed}
+        clear_session_state(context=chosen_ctx)
+        clear_context_snapshot(context=chosen_ctx)
+        return True, "context cleared (no active daemon)", {"released": {}, "state": {}}
     if not bool(response.get("ok")):
         err = response.get("error") if isinstance(response.get("error"), dict) else {}
         return False, str(err.get("message") or "context clear failed"), {}
@@ -660,8 +683,10 @@ def clear_context(context: Optional[str] = "default") -> Tuple[bool, str, Dict[s
 
 def stop_daemon(context: Optional[str] = "default") -> Tuple[bool, str]:
     chosen_ctx = _normalize_context(context)
-    cleanup_stale_daemon_states(context=chosen_ctx)
     st = load_daemon_state(context=chosen_ctx)
+    if not st:
+        cleanup_stale_daemon_states(context=chosen_ctx)
+        st = load_daemon_state(context=chosen_ctx)
     if not st:
         clear_daemon_state(context=chosen_ctx)
         clear_session_state(context=chosen_ctx)
