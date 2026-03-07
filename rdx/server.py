@@ -1,4 +1,4 @@
-"""
+﻿"""
 RDX-MCP server with registry-driven tool registration.
 
 - Registers all catalog-defined tools from `rdx/spec/tool_catalog.json`
@@ -1245,6 +1245,17 @@ def _store_active_event(session_id: str, event_id: int, *, context_id: Optional[
     _set_context_active_event(session_id, resolved, context_id=context_id)
 
 
+def _capture_dependent_session_ids(capture_file_id: str) -> List[str]:
+    wanted = str(capture_file_id or "")
+    dependent = [
+        str(session_id)
+        for session_id, handle in _runtime.replays.items()
+        if str(handle.capture_file_id or "") == wanted
+    ]
+    dependent.sort()
+    return dependent
+
+
 async def _ensure_event(session_id: str, event_id: Optional[int]) -> int:
     controller = await _get_controller(session_id)
     roots, _, by_event = await _load_action_index(session_id, controller=controller)
@@ -2126,9 +2137,22 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
     if action == "close_file":
         _require(args, "capture_file_id")
         capture_file_id = str(args["capture_file_id"])
+        if capture_file_id not in _runtime.captures:
+            return _err(f"Unknown capture_file_id: {capture_file_id}")
+        dependent_session_ids = _capture_dependent_session_ids(capture_file_id)
+        if dependent_session_ids:
+            return _err(
+                f"Capture file still in use: {capture_file_id}",
+                code="capture_file_in_use",
+                category="runtime",
+                details={
+                    "capture_file_id": capture_file_id,
+                    "dependent_session_ids": dependent_session_ids,
+                    "dependent_session_count": len(dependent_session_ids),
+                },
+            )
         _runtime.captures.pop(capture_file_id, None)
-        if not any(handle.capture_file_id == capture_file_id for handle in _runtime.replays.values()):
-            _clear_context_capture_file(capture_file_id)
+        _clear_context_capture_file(capture_file_id)
         return _ok()
 
     if action == "get_info":
@@ -5271,3 +5295,4 @@ def main_streamable_http() -> None:
 
 if __name__ == "__main__":
     main()
+

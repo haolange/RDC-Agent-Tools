@@ -52,6 +52,8 @@ rdx daemon status
 
 其中 `active_event_id` 只会写成可被 `rd.event.get_action_details` round-trip 的 action event。若 `rd.event.set_active` 收到不可解析的 `event_id`，调用会失败，且不会污染当前 context。
 
+若后续要做清理，推荐顺序是先 `rd.capture.close_replay`，再 `rd.capture.close_file`。当 capture 仍被 live replay 持有时，`rd.capture.close_file` 会返回失败而不是静默移除 handle。
+
 如果后续要把同一条链路交给上层 Agent 继续使用，建议额外查看：
 
 ```bat

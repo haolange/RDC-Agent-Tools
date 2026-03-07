@@ -28,6 +28,7 @@
 - remote 路径还存在 `remote_id` consumed 生命周期，不能把它当作可无限复用的句柄。
 - 长链任务如果没有 context snapshot，模型很容易忘记上一轮 focus 与 artifact 路径。
 - 不是所有底层 RenderDoc `eventId` 都能回灌到 `rd.event.*`；上层必须区分 canonical `event_id` 与 `raw_event_id`。
+- 不要在 replay 仍存活时提前调用 `rd.capture.close_file`；推荐清理顺序是先 `rd.capture.close_replay`，再关闭对应 capture handle。
 - 失败恢复依赖共享契约，调用端需要明确检查 `ok`、`error_message` 与 `error.details`。
 
 因此，Agent 需要的不只是 catalog，还需要平台使用模型。

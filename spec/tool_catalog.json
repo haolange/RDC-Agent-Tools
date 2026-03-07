@@ -125,9 +125,9 @@
     {
       "name": "rd.capture.close_file",
       "group": "3.2，捕获文件与 Replay Session (Capture & Replay)",
-      "description": "关闭捕获文件句柄。",
+      "description": "??????????? capture ???? live replay ????????? `rd.capture.close_replay` ? `rd.capture.close_file`?",
       "parameter_raw": "capture_file_id (str)",
-      "returns_raw": "success (bool)<br>error_message (str, 可选)",
+      "returns_raw": "success (bool)<br>error_message (str, ??)<br>error.details?(dict): {capture_file_id, dependent_session_ids, dependent_session_count}",
       "param_names": [
         "capture_file_id"
       ]

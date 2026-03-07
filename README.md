@@ -27,7 +27,7 @@
 - tool 能力面与参数语义，以 catalog 和共享契约为准。
 - runtime 行为是平台真相的运行时体现。
 - `CLI` 只是 convenience wrapper，不是完整能力面的等价镜像，也不是规范源。
-- ?? canonical catalog ??? `spec/tool_catalog.json`?
+- 规范定义以 `spec/tool_catalog.json` 为准。
 
 ## 入口概览
 
@@ -101,6 +101,7 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - 运行时响应遵循共享契约；调试时优先检查 `ok`、`error_message`，必要时继续看 `error.details`。
 - 默认参考根目录由 `rdx.bat` 或脚本自身位置推导；`RDX_TOOLS_ROOT` 仅用于覆盖默认值。
 - `rd.event.set_active` 若收到不可解析的 `event_id`，必须失败且保持现有 runtime / context 状态不变。
+- `rd.capture.close_file` 若目标 `capture_file_id` 仍被 live replay 持有，必须失败；推荐顺序是 `rd.capture.close_replay -> rd.capture.close_file`。
 
 ## 验证
 

@@ -31,6 +31,7 @@ remote endpoint
   - 原始 capture 文件。
 - `capture_file_id`
   - `rd.capture.open_file` 返回的运行时文件句柄。
+  - 当某个 replay 仍引用它时，平台不会允许 `rd.capture.close_file` 提前释放该 handle。
   - 表示 capture 文件已被 runtime 接管，但还未形成 replay session。
   - 它是运行时句柄，不是永久 ID，也不应默认作为跨重启、跨进程、跨环境、跨机器的长期缓存键。
 - `session_id`
@@ -111,6 +112,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 
 - runtime / context 中保存的 `active_event_id` 是 canonical action event。
 - `rd.resource.get_usage` / `rd.resource.get_history` 里的 `raw_event_id` 只是底层记录值，不保证能被 `rd.event.*` 直接 round-trip。
+- cleanup 顺序按 `rd.capture.close_replay -> rd.capture.close_file` 理解；若 replay 仍活着，`rd.capture.close_file` 会拒绝关闭对应 `capture_file_id`。
 
 理解状态时应按这个顺序思考：
 

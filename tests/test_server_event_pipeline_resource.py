@@ -165,6 +165,14 @@ class _FakePipelineService:
         ]
 
 
+class _FakeSessionManager:
+    def __init__(self) -> None:
+        self.closed_sessions: list[str] = []
+
+    async def close_session(self, session_id: str) -> None:
+        self.closed_sessions.append(str(session_id))
+
+
 def _install_common_env(monkeypatch: pytest.MonkeyPatch, controller: _FakeController) -> None:
     async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
         return fn(*args, **kwargs)
@@ -181,18 +189,28 @@ def _install_common_env(monkeypatch: pytest.MonkeyPatch, controller: _FakeContro
     monkeypatch.setattr(server, "_get_rd", lambda: fake_rd)
 
 
-def _seed_session(active_event_id: int) -> None:
+def _seed_capture(capture_file_id: str = "capf_demo") -> None:
+    server._runtime.captures = {
+        capture_file_id: server.CaptureFileHandle(
+            capture_file_id=capture_file_id,
+            file_path="capture.rdc",
+            read_only=True,
+        )
+    }
+
+
+def _seed_session(active_event_id: int, *, session_id: str = "sess_demo", capture_file_id: str = "capf_demo") -> None:
     server._runtime.replays = {
-        "sess_demo": server.ReplayHandle(
-            session_id="sess_demo",
-            capture_file_id="capf_demo",
+        session_id: server.ReplayHandle(
+            session_id=session_id,
+            capture_file_id=capture_file_id,
             frame_index=0,
             active_event_id=active_event_id,
         )
     }
     server._set_context_runtime_session(
-        "sess_demo",
-        capture_file_id="capf_demo",
+        session_id,
+        capture_file_id=capture_file_id,
         backend_type="local",
         frame_index=0,
         active_event_id=active_event_id,
@@ -206,6 +224,7 @@ def _poison_active_event(event_id: int) -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_server_state() -> None:
+    original_captures = dict(server._runtime.captures)
     original_replays = dict(server._runtime.replays)
     original_contexts = dict(server._runtime.context_snapshots)
     original_pipeline_service = server._pipeline_service
@@ -217,6 +236,7 @@ def _reset_server_state() -> None:
     finally:
         clear_context_snapshot()
         server._runtime.context_snapshots.clear()
+        server._runtime.captures = original_captures
         server._runtime.replays = original_replays
         server._runtime.context_snapshots.update(original_contexts)
         server._pipeline_service = original_pipeline_service
@@ -231,6 +251,7 @@ def test_event_set_active_validates_before_mutating_state(monkeypatch: pytest.Mo
         ]
     )
     _install_common_env(monkeypatch, controller)
+    _seed_capture()
     _seed_session(202)
 
     invalid = json.loads(asyncio.run(server._dispatch_tool_legacy("rd.event.set_active", {"session_id": "sess_demo", "event_id": 53})))
@@ -258,6 +279,7 @@ def test_ensure_event_repairs_polluted_active_event(monkeypatch: pytest.MonkeyPa
         ]
     )
     _install_common_env(monkeypatch, controller)
+    _seed_capture()
     _seed_session(53)
 
     resolved = asyncio.run(server._ensure_event("sess_demo", None))
@@ -278,6 +300,7 @@ def test_pipeline_dispatch_uses_one_resolved_event_context(monkeypatch: pytest.M
     _install_common_env(monkeypatch, controller)
     server._pipeline_service = pipeline_service
     server._session_manager = SimpleNamespace()
+    _seed_capture()
     _seed_session(53)
 
     summary = json.loads(asyncio.run(server._dispatch_pipeline("get_state_summary", {"session_id": "sess_demo"})))
@@ -335,6 +358,7 @@ def test_resource_usage_and_history_expose_canonical_and_raw_event_ids(monkeypat
         ],
     )
     _install_common_env(monkeypatch, controller)
+    _seed_capture()
     _seed_session(101)
 
     usage = json.loads(
@@ -366,3 +390,72 @@ def test_resource_usage_and_history_expose_canonical_and_raw_event_ids(monkeypat
         {"event_id": None, "raw_event_id": 53, "event_resolvable": False, "usage": "Write", "is_write": True},
         {"event_id": None, "raw_event_id": 1042, "event_resolvable": False, "usage": "Read", "is_write": False},
     ]
+
+
+
+def test_capture_close_file_rejects_unknown_handle() -> None:
+    payload = json.loads(asyncio.run(server._dispatch_capture("close_file", {"capture_file_id": "capf_missing"})))
+    assert payload["success"] is False
+    assert payload["error_message"] == "Unknown capture_file_id: capf_missing"
+
+
+
+def test_capture_close_file_rejects_when_replay_depends_on_capture() -> None:
+    _seed_capture()
+    _seed_session(101)
+
+    payload = json.loads(asyncio.run(server._dispatch_capture("close_file", {"capture_file_id": "capf_demo"})))
+    assert payload["success"] is False
+    assert payload["code"] == "capture_file_in_use"
+    assert payload["category"] == "runtime"
+    assert payload["details"] == {
+        "capture_file_id": "capf_demo",
+        "dependent_session_ids": ["sess_demo"],
+        "dependent_session_count": 1,
+    }
+    assert "capf_demo" in server._runtime.captures
+    assert server._runtime.replays["sess_demo"].capture_file_id == "capf_demo"
+    assert server._context_snapshot()["runtime"]["capture_file_id"] == "capf_demo"
+
+
+
+def test_capture_close_file_reports_all_dependent_sessions() -> None:
+    _seed_capture()
+    server._runtime.replays = {
+        "sess_b": server.ReplayHandle(session_id="sess_b", capture_file_id="capf_demo", frame_index=0, active_event_id=0),
+        "sess_a": server.ReplayHandle(session_id="sess_a", capture_file_id="capf_demo", frame_index=0, active_event_id=0),
+    }
+    server._set_context_runtime_session(
+        "sess_a",
+        capture_file_id="capf_demo",
+        backend_type="local",
+        frame_index=0,
+        active_event_id=0,
+    )
+
+    payload = json.loads(asyncio.run(server._dispatch_capture("close_file", {"capture_file_id": "capf_demo"})))
+    assert payload["success"] is False
+    assert payload["details"]["dependent_session_ids"] == ["sess_a", "sess_b"]
+    assert payload["details"]["dependent_session_count"] == 2
+    assert "capf_demo" in server._runtime.captures
+
+
+
+def test_capture_close_file_succeeds_after_close_replay() -> None:
+    manager = _FakeSessionManager()
+    server._session_manager = manager
+    _seed_capture()
+    _seed_session(101)
+
+    close_replay = json.loads(asyncio.run(server._dispatch_capture("close_replay", {"session_id": "sess_demo"})))
+    assert close_replay["success"] is True
+    assert manager.closed_sessions == ["sess_demo"]
+    assert server._runtime.replays == {}
+    assert "capf_demo" in server._runtime.captures
+
+    close_file = json.loads(asyncio.run(server._dispatch_capture("close_file", {"capture_file_id": "capf_demo"})))
+    assert close_file["success"] is True
+    assert server._runtime.captures == {}
+    context = server._context_snapshot()
+    assert context["runtime"]["session_id"] == ""
+    assert context["runtime"]["capture_file_id"] == ""

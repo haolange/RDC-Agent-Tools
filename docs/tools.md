@@ -15,7 +15,7 @@
 - `spec/tool_catalog.json` 与共享响应契约是 tool 能力面与参数语义的规范源。
 - runtime 行为是平台真相的运行时体现。
 - `CLI` 只是部分平台动作的 convenience wrapper，不是完整能力面的等价镜像，也不是规范源。
-- ?? canonical catalog ??? `spec/tool_catalog.json`?
+- 规范定义以 `spec/tool_catalog.json` 为准。
 
 ## 当前新增入口
 
