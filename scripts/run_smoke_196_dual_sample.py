@@ -430,10 +430,10 @@ def _print_steps(steps: list[StepResult]) -> None:
     for item in steps:
         mark = "PASS" if item.success else "FAIL"
         if item.stderr:
-            _safe_print_text(f"[smoke-196] {mark} {item.name}: {item.command} | {item.detail}")
+            _safe_print_text(f"[smoke-catalog] {mark} {item.name}: {item.command} | {item.detail}")
             _safe_print_text(item.stderr[:400], prefix="")
         else:
-            _safe_print_text(f"[smoke-196] {mark} {item.name}: {item.command} | {item.detail}")
+            _safe_print_text(f"[smoke-catalog] {mark} {item.name}: {item.command} | {item.detail}")
 
 
 def _write_precheck_block_report(
@@ -472,7 +472,7 @@ def _write_precheck_block_report(
     lines.extend(["", "## Cleanup status", "- blocked: precheck not passed"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"[smoke-196] precheck blocked report: {out_path}")
+    print(f"[smoke-catalog] precheck blocked report: {out_path}")
 
 
 
@@ -500,39 +500,39 @@ def main() -> int:
     _print_steps(steps)
     if not precheck_ok:
         _write_precheck_block_report(args.out_desktop, steps, local_rdc, remote_rdc)
-        print("[smoke-196] FAIL: precheck not passed.")
+        print("[smoke-catalog] FAIL: precheck not passed.")
         return 2
 
     command_step = _run_command_smoke(root, local_rdc, remote_rdc, args.command_json, args.command_md, args.usability_json, args.usability_md)
     _record_step(steps, command_step)
     if not command_step.success and command_step.return_code > 1:
-        print("[smoke-196] command smoke failed unexpectedly")
+        print("[smoke-catalog] command smoke failed unexpectedly")
         return 2
 
     tool_step = _run_tool_contract(root, local_rdc, remote_rdc, args.tool_json, args.tool_md)
     _record_step(steps, tool_step)
     if not tool_step.success and tool_step.return_code > 1:
-        print("[smoke-196] tool contract failed")
+        print("[smoke-catalog] tool contract failed")
         return 2
 
     aggregate_step = _run_aggregate(root, args.command_json, args.tool_json, args.usability_json, args.out_desktop)
     _record_step(steps, aggregate_step)
     if not aggregate_step.success and aggregate_step.return_code > 1:
-        print("[smoke-196] aggregate failed")
+        print("[smoke-catalog] aggregate failed")
         return 2
 
     command_payload = _load_payload(root, args.command_json)
     tool_payload = _load_payload(root, args.tool_json)
     if not command_payload or not tool_payload:
-        print("[smoke-196] FAIL: missing command/tool payload after run")
+        print("[smoke-catalog] FAIL: missing command/tool payload after run")
         return 2
 
     cleanup_log = _append_cleanup_section(steps, command_payload, tool_payload, bat, root)
 
     cleanup_ok = all("failed" not in line.lower() for line in cleanup_log)
-    print(f"[smoke-196] cleanup_status: {'已清理' if cleanup_ok else '未完全清理（含残留项与手动清理命令）'}")
+    print(f"[smoke-catalog] cleanup_status: {'已清理' if cleanup_ok else '未完全清理（含残留项与手动清理命令）'}")
     for line in cleanup_log:
-        print(f"[smoke-196] cleanup: {line}")
+        print(f"[smoke-catalog] cleanup: {line}")
 
     _print_steps(steps)
 
@@ -541,10 +541,10 @@ def main() -> int:
     command_blockers = int(command_summary.get("blocker", 0))
 
     if command_blockers > 0 or tool_blockers > 0 or tool_payload.get("transports", {}).get("mcp", {}).get("fatal_error"):
-        print(f"[smoke-196] done: FAIL with blockers. desktop report={args.out_desktop}")
+        print(f"[smoke-catalog] done: FAIL with blockers. desktop report={args.out_desktop}")
         return 1
 
-    print(f"[smoke-196] done: PASS. desktop report={args.out_desktop}")
+    print(f"[smoke-catalog] done: PASS. desktop report={args.out_desktop}")
     return 0
 
 

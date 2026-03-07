@@ -13,6 +13,7 @@ from multiprocessing.connection import Client
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+from rdx.context_snapshot import clear_context_snapshot
 from rdx.runtime_paths import cli_runtime_dir
 
 STATE_DIR = cli_runtime_dir()
@@ -640,6 +641,7 @@ def clear_context(context: Optional[str] = "default") -> Tuple[bool, str, Dict[s
     state = load_daemon_state(context=chosen_ctx)
     if not state:
         clear_session_state(context=chosen_ctx)
+        clear_context_snapshot(context=chosen_ctx)
         return True, "context cleared (no active daemon)", {"released": {}, "state": {}}
 
     response = daemon_request("clear_context", params={}, context=chosen_ctx, state=state)
@@ -647,6 +649,7 @@ def clear_context(context: Optional[str] = "default") -> Tuple[bool, str, Dict[s
         err = response.get("error") if isinstance(response.get("error"), dict) else {}
         return False, str(err.get("message") or "context clear failed"), {}
     clear_session_state(context=chosen_ctx)
+    clear_context_snapshot(context=chosen_ctx)
     updated = _update_saved_state_from_response(response, chosen_ctx)
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     details = dict(result)
@@ -662,6 +665,7 @@ def stop_daemon(context: Optional[str] = "default") -> Tuple[bool, str]:
     if not st:
         clear_daemon_state(context=chosen_ctx)
         clear_session_state(context=chosen_ctx)
+        clear_context_snapshot(context=chosen_ctx)
         return False, "no active daemon"
 
     pid = int(st.get("pid") or 0)
@@ -672,4 +676,5 @@ def stop_daemon(context: Optional[str] = "default") -> Tuple[bool, str]:
 
     clear_daemon_state(context=chosen_ctx)
     clear_session_state(context=chosen_ctx)
+    clear_context_snapshot(context=chosen_ctx)
     return True, "daemon stopped"

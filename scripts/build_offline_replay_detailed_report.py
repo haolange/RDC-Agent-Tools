@@ -207,6 +207,7 @@ def main() -> int:
     out_md = Path(args.out)
 
     catalog = json.loads((ROOT / "spec" / "tool_catalog_196.json").read_text(encoding="utf-8-sig"))
+    catalog_count = int(catalog.get("tool_count") or len(catalog.get("tools", [])))
     params_map = {tool["name"]: tool.get("param_names", []) for tool in catalog["tools"]}
     replay_bound = {
         name
@@ -295,7 +296,7 @@ def main() -> int:
     lines.append("## 环境与运行问题")
     lines.append("- 必跑命令 1-6 已全部真实执行。")
     lines.append("- 本轮发现并修复了 `scripts/rdx_bat_command_smoke.py` / `scripts/smoke_report_aggregator.py` 的 Windows 绝对路径输出链问题，并已用当前仓库版本复跑验证。")
-    lines.append("- `python spec/validate_catalog.py`: 通过，catalog 仍为 196 个唯一 `rd.*` tools。")
+    lines.append(f"- `python spec/validate_catalog.py`: ???catalog ??? {catalog_count} ??? `rd.*` tools?")
     lines.append("- `python cli/run_cli.py --help`: 通过。")
     lines.append("- `python mcp/run_mcp.py --help`: 通过。")
     lines.append("- `python scripts/rdx_bat_command_smoke.py ...`: 通过，4 个桌面产物已稳定生成。")

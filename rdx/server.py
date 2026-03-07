@@ -1,7 +1,7 @@
 """
 RDX-MCP server with registry-driven tool registration.
 
-- Registers all 196 doc-defined tools from `rdx/spec/tool_catalog_196.json`
+- Registers all catalog-defined tools from `rdx/spec/tool_catalog_196.json`
 - Normalizes all tool responses to:
   - success: bool
   - error_message?: str
@@ -36,10 +36,27 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from rdx.config import RdxConfig
+from rdx.context_snapshot import (
+    clear_context_snapshot,
+    default_context_snapshot,
+    load_context_snapshot,
+    merge_recent_artifacts,
+    normalize_context_id,
+    normalize_context_snapshot,
+    normalize_pixel,
+    save_context_snapshot,
+    update_user_context,
+)
 from rdx.core.artifact_publisher import ArtifactPublisher
 from rdx.core.contracts import canonical_error, env_bool
-from rdx.timeout_policy import daemon_exec_timeout_s, remote_connect_timeout_ms
+from rdx.core.errors import CoreError, RuntimeToolError
 from rdx.core.engine import CoreEngine, ExecutionContext
+from rdx.core.renderdoc_status import (
+    build_renderdoc_error_details,
+    status_ok as _rd_status_ok,
+    status_text as _rd_status_text,
+)
+from rdx.timeout_policy import daemon_exec_timeout_s, remote_connect_timeout_ms
 from rdx.core.event_graph import EventGraphService
 from rdx.core.operation_registry import OperationRegistry
 from rdx.core.perf_service import PerfService
@@ -66,9 +83,12 @@ def _mcp_uses_daemon() -> bool:
     return env_bool("RDX_MCP_USE_DAEMON", False)
 
 
+def _runtime_context_id() -> str:
+    return normalize_context_id(os.environ.get("RDX_CONTEXT_ID") or "default")
+
+
 def _mcp_daemon_context() -> str:
-    value = str(os.environ.get("RDX_CONTEXT_ID") or "default").strip()
-    return value or "default"
+    return _runtime_context_id()
 
 
 @dataclass
@@ -104,6 +124,16 @@ class RemoteHandle:
 
 
 @dataclass
+class ConsumedRemoteHandle:
+    remote_id: str
+    endpoint: str
+    transport: str = "renderdoc"
+    consumed_by_session_id: str = ""
+    consumed_at_ms: int = field(default_factory=lambda: int(datetime.now(timezone.utc).timestamp() * 1000))
+    server_info: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ShaderDebugHandle:
     shader_debug_id: str
     session_id: str
@@ -130,6 +160,9 @@ class RuntimeState:
     replays: Dict[str, ReplayHandle] = field(default_factory=dict)
     aliases: Dict[str, str] = field(default_factory=dict)
     remotes: Dict[str, RemoteHandle] = field(default_factory=dict)
+    session_owned_remotes: Dict[str, RemoteHandle] = field(default_factory=dict)
+    consumed_remotes: Dict[str, ConsumedRemoteHandle] = field(default_factory=dict)
+    context_snapshots: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     app_capture_options: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     shader_debugs: Dict[str, ShaderDebugHandle] = field(default_factory=dict)
     shader_replacements: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
@@ -166,6 +199,280 @@ def _record_log(level: str, message: str, context: Optional[Dict[str, Any]] = No
     )
     if len(_runtime.logs) > 5000:
         _runtime.logs = _runtime.logs[-5000:]
+
+
+def _context_snapshot(context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    snapshot = _runtime.context_snapshots.get(ctx)
+    if not isinstance(snapshot, dict):
+        snapshot = load_context_snapshot(ctx)
+    snapshot = normalize_context_snapshot(snapshot, ctx)
+
+    runtime_payload = snapshot.get("runtime", {})
+    session_id = str(runtime_payload.get("session_id") or "").strip()
+    capture_file_id = str(runtime_payload.get("capture_file_id") or "").strip()
+    if session_id and session_id not in _runtime.replays:
+        runtime_payload["session_id"] = ""
+        runtime_payload["frame_index"] = 0
+        runtime_payload["active_event_id"] = 0
+        runtime_payload["backend_type"] = "none"
+    if capture_file_id and capture_file_id not in _runtime.captures:
+        runtime_payload["capture_file_id"] = ""
+
+    remote_payload = snapshot.get("remote", {})
+    remote_state = str(remote_payload.get("state") or "none")
+    remote_id = str(remote_payload.get("remote_id") or "")
+    owned_session_id = str(remote_payload.get("consumed_by_session_id") or "")
+    if remote_state == "live_handle" and (not remote_id or remote_id not in _runtime.remotes):
+        snapshot["remote"] = default_context_snapshot(ctx).get("remote", {})
+    elif remote_state == "session_owned" and owned_session_id not in _runtime.session_owned_remotes:
+        origin_remote_id = str(remote_payload.get("origin_remote_id") or "")
+        if origin_remote_id and origin_remote_id in _runtime.consumed_remotes:
+            tombstone = _runtime.consumed_remotes[origin_remote_id]
+            snapshot["remote"] = {
+                "state": "consumed",
+                "remote_id": "",
+                "origin_remote_id": tombstone.remote_id,
+                "endpoint": tombstone.endpoint,
+                "consumed_by_session_id": tombstone.consumed_by_session_id,
+            }
+        else:
+            snapshot["remote"] = default_context_snapshot(ctx).get("remote", {})
+
+    _runtime.context_snapshots[ctx] = snapshot
+    return snapshot
+
+
+
+def _store_context_snapshot(snapshot: Dict[str, Any], context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    normalized = save_context_snapshot(snapshot, ctx)
+    _runtime.context_snapshots[ctx] = normalized
+    return normalized
+
+
+
+def _set_context_capture_file(capture_file_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    snapshot["runtime"].update(
+        {
+            "session_id": "",
+            "capture_file_id": str(capture_file_id or ""),
+            "frame_index": 0,
+            "active_event_id": 0,
+            "backend_type": "none",
+        }
+    )
+    snapshot["focus"]["pixel"] = None
+    snapshot["focus"]["resource_id"] = ""
+    snapshot["focus"]["shader_id"] = ""
+    return _store_context_snapshot(snapshot, context_id)
+
+
+
+def _clear_context_capture_file(capture_file_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    if snapshot["runtime"].get("capture_file_id") == str(capture_file_id or ""):
+        snapshot["runtime"]["capture_file_id"] = ""
+        if not snapshot["runtime"].get("session_id"):
+            snapshot["runtime"]["backend_type"] = "none"
+        return _store_context_snapshot(snapshot, context_id)
+    return snapshot
+
+
+
+def _set_context_runtime_session(
+    session_id: str,
+    *,
+    capture_file_id: str,
+    backend_type: str,
+    frame_index: int,
+    active_event_id: int,
+    context_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    snapshot["runtime"].update(
+        {
+            "session_id": str(session_id or ""),
+            "capture_file_id": str(capture_file_id or ""),
+            "frame_index": int(frame_index or 0),
+            "active_event_id": int(active_event_id or 0),
+            "backend_type": str(backend_type or "none"),
+        }
+    )
+    return _store_context_snapshot(snapshot, context_id)
+
+
+
+def _set_context_active_event(session_id: str, event_id: int, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    if snapshot["runtime"].get("session_id") == str(session_id or ""):
+        snapshot["runtime"]["active_event_id"] = int(event_id or 0)
+        return _store_context_snapshot(snapshot, context_id)
+    return snapshot
+
+
+
+def _set_context_frame(session_id: str, frame_index: int, active_event_id: int, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    if snapshot["runtime"].get("session_id") == str(session_id or ""):
+        snapshot["runtime"]["frame_index"] = int(frame_index or 0)
+        snapshot["runtime"]["active_event_id"] = int(active_event_id or 0)
+        return _store_context_snapshot(snapshot, context_id)
+    return snapshot
+
+
+
+def _set_context_remote_live(remote_id: str, endpoint: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    snapshot["remote"] = {
+        "state": "live_handle",
+        "remote_id": str(remote_id or ""),
+        "origin_remote_id": str(remote_id or ""),
+        "endpoint": str(endpoint or ""),
+        "consumed_by_session_id": "",
+    }
+    return _store_context_snapshot(snapshot, context_id)
+
+
+
+def _set_context_remote_session_owned(
+    remote_id: str,
+    session_id: str,
+    endpoint: str,
+    *,
+    context_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    snapshot["remote"] = {
+        "state": "session_owned",
+        "remote_id": "",
+        "origin_remote_id": str(remote_id or ""),
+        "endpoint": str(endpoint or ""),
+        "consumed_by_session_id": str(session_id or ""),
+    }
+    return _store_context_snapshot(snapshot, context_id)
+
+
+
+def _set_context_remote_consumed(
+    remote_id: str,
+    session_id: str,
+    endpoint: str,
+    *,
+    context_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    snapshot["remote"] = {
+        "state": "consumed",
+        "remote_id": "",
+        "origin_remote_id": str(remote_id or ""),
+        "endpoint": str(endpoint or ""),
+        "consumed_by_session_id": str(session_id or ""),
+    }
+    return _store_context_snapshot(snapshot, context_id)
+
+
+
+def _clear_context_remote_live(remote_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    remote = snapshot.get("remote", {})
+    if remote.get("state") == "live_handle" and remote.get("remote_id") == str(remote_id or ""):
+        snapshot["remote"] = default_context_snapshot(context_id).get("remote", {})
+        return _store_context_snapshot(snapshot, context_id)
+    return snapshot
+
+
+
+def _clear_context_runtime(session_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    if snapshot["runtime"].get("session_id") == str(session_id or ""):
+        remote = snapshot.get("remote", {})
+        if remote.get("state") == "session_owned" and remote.get("consumed_by_session_id") == str(session_id or ""):
+            snapshot["remote"]["state"] = "consumed"
+        snapshot["runtime"] = default_context_snapshot(context_id).get("runtime", {})
+        snapshot["focus"]["pixel"] = None
+        snapshot["focus"]["resource_id"] = ""
+        snapshot["focus"]["shader_id"] = ""
+        return _store_context_snapshot(snapshot, context_id)
+    return snapshot
+
+
+
+def _reset_context_snapshot(context_id: Optional[str] = None) -> Dict[str, Any]:
+    snapshot = default_context_snapshot(context_id)
+    return _store_context_snapshot(snapshot, context_id)
+
+
+
+def _append_context_artifacts(artifacts: Sequence[Dict[str, Any]], source_tool: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    if not artifacts:
+        return _context_snapshot(context_id)
+    snapshot = _context_snapshot(context_id)
+    snapshot = merge_recent_artifacts(snapshot, artifacts, source_tool=source_tool)
+    return _store_context_snapshot(snapshot, context_id)
+
+
+
+def _sync_focus_from_args(operation: str, args: Dict[str, Any], *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    snapshot = _context_snapshot(context_id)
+    changed = False
+    if operation in {"rd.macro.locate_draw_affecting_pixel", "rd.macro.explain_pixel", "rd.debug.pixel_history"}:
+        if args.get("x") is not None and args.get("y") is not None:
+            pixel = {"x": int(args.get("x") or 0), "y": int(args.get("y") or 0)}
+            target = args.get("target")
+            if isinstance(target, dict):
+                pixel["target"] = dict(target)
+            snapshot["focus"]["pixel"] = pixel
+            changed = True
+    for key in ("resource_id", "texture_id"):
+        if args.get(key):
+            snapshot["focus"]["resource_id"] = str(args.get(key) or "")
+            changed = True
+            break
+    if args.get("shader_id"):
+        snapshot["focus"]["shader_id"] = str(args.get("shader_id") or "")
+        changed = True
+    if changed:
+        return _store_context_snapshot(snapshot, context_id)
+    return snapshot
+
+
+
+def _remote_consumed_payload(remote_id: str) -> str | None:
+    tombstone = _runtime.consumed_remotes.get(str(remote_id or ""))
+    if tombstone is None:
+        return None
+    details = {
+        "remote_id": tombstone.remote_id,
+        "endpoint": tombstone.endpoint,
+        "consumed_by_session_id": tombstone.consumed_by_session_id,
+        "consumed_at_ms": tombstone.consumed_at_ms,
+        "source_layer": "runtime",
+        "operation": "remote_handle_lifecycle",
+        "backend_type": "remote",
+        "capture_context": {
+            "remote_id": tombstone.remote_id,
+            "session_id": tombstone.consumed_by_session_id,
+        },
+        "classification": "tool_usage_conflict",
+        "fix_hint": "Reconnect with rd.remote.connect to obtain a new live remote_id.",
+    }
+    return _err(
+        f"Remote handle {tombstone.remote_id} has been consumed by session {tombstone.consumed_by_session_id}",
+        code="remote_handle_consumed",
+        category="runtime",
+        details=details,
+    )
+
+
+
+def _postprocess_context_snapshot(operation: str, args: Dict[str, Any], payload: Dict[str, Any], ctx: ExecutionContext) -> None:
+    context_id = normalize_context_id((ctx.metadata or {}).get("context_id") or _runtime_context_id())
+    artifacts = payload.get("artifacts") if isinstance(payload, dict) else []
+    if isinstance(artifacts, list) and artifacts:
+        _append_context_artifacts(artifacts, operation, context_id=context_id)
+    _sync_focus_from_args(operation, args, context_id=context_id)
 
 
 def _json_default(value: Any) -> Any:
@@ -331,31 +638,36 @@ def _get_rd() -> Any:
 
 
 def _status_ok(status: Any) -> bool:
-    try:
-        ok = getattr(status, "OK", None)
-        if callable(ok):
-            return bool(ok())
-    except Exception:
-        pass
-    rd = _get_rd()
-    return status == rd.ResultCode.Succeeded
+    return _rd_status_ok(status, _get_rd())
 
 
 def _status_text(status: Any) -> str:
-    try:
-        message = getattr(status, "Message", None)
-        if callable(message):
-            text = str(message() or "").strip()
-            if text:
-                return text
-    except Exception:
-        pass
-    return str(status)
+    return _rd_status_text(status)
 
 
-def _check_status(status: Any, operation: str) -> None:
+def _check_status(
+    status: Any,
+    operation: str,
+    *,
+    backend_type: str = "local",
+    capture_context: Optional[Dict[str, Any]] = None,
+    classification: str = "renderdoc_status",
+    fix_hint: str = "Inspect the RenderDoc status and capture context before retrying.",
+) -> None:
     if not _status_ok(status):
-        raise RuntimeError(f"{operation} failed with status: {_status_text(status)}")
+        details = build_renderdoc_error_details(
+            status,
+            operation=operation,
+            source_layer="renderdoc_status",
+            backend_type=backend_type,
+            capture_context=capture_context,
+            classification=classification,
+            fix_hint=fix_hint,
+        )
+        raise RuntimeToolError(
+            f"{operation} failed with status: {details['renderdoc_status']['status_text']}",
+            details=details,
+        )
 
 
 def _renderdoc_version_value() -> str:
@@ -376,14 +688,26 @@ def _wait_for_remote_endpoint(url: str, timeout_ms: int) -> None:
     rd = _get_rd()
     timeout_s = max(int(timeout_ms or 0), 1) / 1000.0
     deadline = time.perf_counter() + timeout_s
-    last_detail = "unknown remote error"
+    last_status: Any = None
     while True:
         status = rd.CheckRemoteServerConnection(url)
         if _status_ok(status):
             return
-        last_detail = _status_text(status)
+        last_status = status
         if time.perf_counter() >= deadline:
-            raise RuntimeError(f"CheckRemoteServerConnection({url}) failed: {last_detail}")
+            details = build_renderdoc_error_details(
+                status if last_status is None else last_status,
+                operation=f"CheckRemoteServerConnection({url})",
+                source_layer="renderdoc_status",
+                backend_type="remote",
+                capture_context={"endpoint": url},
+                classification="remote_endpoint",
+                fix_hint="Verify the remote endpoint is reachable before opening a remote replay session.",
+            )
+            raise RuntimeToolError(
+                f"CheckRemoteServerConnection({url}) failed: {details['renderdoc_status']['status_text']}",
+                details=details,
+            )
         time.sleep(min(0.25, max(deadline - time.perf_counter(), 0.05)))
 
 
@@ -391,7 +715,19 @@ def _create_remote_server_connection(url: str) -> Any:
     rd = _get_rd()
     status, remote = rd.CreateRemoteServerConnection(url)
     if not _status_ok(status) or remote is None:
-        raise RuntimeError(f"CreateRemoteServerConnection({url}) failed: {_status_text(status)}")
+        details = build_renderdoc_error_details(
+            status,
+            operation=f"CreateRemoteServerConnection({url})",
+            source_layer="renderdoc_status",
+            backend_type="remote",
+            capture_context={"endpoint": url},
+            classification="remote_endpoint",
+            fix_hint="Reconnect to the remote endpoint and confirm it still exposes a RenderDoc server.",
+        )
+        raise RuntimeToolError(
+            f"CreateRemoteServerConnection({url}) failed: {details['renderdoc_status']['status_text']}",
+            details=details,
+        )
     return remote
 
 
@@ -465,11 +801,14 @@ def _load_tool_catalog() -> List[Dict[str, Any]]:
     path = _tool_catalog_path()
     data = json.loads(path.read_text(encoding="utf-8"))
     tools = list(data.get("tools", []))
-    if len(tools) != 196:
-        raise RuntimeError(f"Catalog must contain 196 tools, got {len(tools)}")
+    declared_count = int(data.get("tool_count") or len(tools))
+    if len(tools) != declared_count:
+        raise RuntimeError(f"Catalog tool_count mismatch: declared {declared_count}, got {len(tools)} entries")
     names = [str(t.get("name", "")).strip() for t in tools]
-    if len(set(names)) != 196:
+    if len(set(names)) != len(names):
         raise RuntimeError("Catalog contains duplicate tool names")
+    if any(not name.startswith("rd.") for name in names):
+        raise RuntimeError("Catalog contains invalid tool name prefixes")
     return tools
 
 
@@ -1270,6 +1609,17 @@ async def runtime_shutdown() -> None:
                 await _offload(_disconnect_remote_handle_sync, handle)
             except Exception:
                 pass
+    for sid in list(_runtime.session_owned_remotes.keys()):
+        handle = _runtime.session_owned_remotes.pop(sid, None)
+        if handle is not None:
+            handle.remote_server = None
+            try:
+                await _offload(_disconnect_remote_handle_sync, handle)
+            except Exception:
+                pass
+    _runtime.consumed_remotes.clear()
+    _runtime.context_snapshots.clear()
+    clear_context_snapshot(_runtime_context_id())
     _runtime_bootstrapped = False
     _record_log("info", "RDX runtime shutdown complete")
 
@@ -1293,7 +1643,7 @@ def get_core_engine() -> CoreEngine:
 
 def _create_mcp() -> FastMCP:
     kwargs: Dict[str, Any] = {}
-    description = "RenderDoc MCP tools (196 doc tools)"
+    description = f"RenderDoc MCP tools ({len(_load_tool_catalog())} doc tools)"
     try:
         params = set(inspect.signature(FastMCP.__init__).parameters)
         if "description" in params:
@@ -1344,7 +1694,7 @@ async def dispatch_operation(
     await runtime_startup()
     engine = _ensure_core_engine()
     call_args = dict(args or {})
-    ctx = ExecutionContext(transport=transport, remote=remote)
+    ctx = ExecutionContext(transport=transport, remote=remote, metadata={"context_id": _runtime_context_id()})
     arg_keys = ",".join(sorted(call_args.keys())) if call_args else "-"
     logger.info(
         "op.start transport=%s remote=%s op=%s trace_id=%s arg_keys=%s",
@@ -1355,6 +1705,8 @@ async def dispatch_operation(
         arg_keys,
     )
     payload = await engine.execute(operation, call_args, context=ctx)
+    if isinstance(payload, dict):
+        _postprocess_context_snapshot(operation, call_args, payload, ctx)
     meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
     logger.info(
         "op.done transport=%s op=%s trace_id=%s ok=%s duration_ms=%s",
@@ -1427,6 +1779,7 @@ async def _dispatch_tool_legacy(tool_name: str, args: Dict[str, Any]) -> str:
             "macro": _dispatch_macro,
             "analysis": _dispatch_analysis,
             "util": _dispatch_util,
+            "session": _dispatch_session,
             "remote": _dispatch_remote,
             "app": _dispatch_app,
         }.get(domain)
@@ -1436,6 +1789,8 @@ async def _dispatch_tool_legacy(tool_name: str, args: Dict[str, Any]) -> str:
         return await dispatcher(action, args)
     except SessionError as exc:
         return _err(exc.detail.message, code=exc.detail.code, details=exc.detail.details)
+    except CoreError as exc:
+        return _err(exc.message, code=exc.code, category=exc.category, details=exc.details)
     except (ValueError, TypeError, KeyError, OSError) as exc:
         _record_log(
             "debug",
@@ -1463,7 +1818,7 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
         released = {
             "sessions": len(_runtime.replays),
             "capture_files": len(_runtime.captures),
-            "remote_connections": len(_runtime.remotes),
+            "remote_connections": len(_runtime.remotes) + len(_runtime.session_owned_remotes),
             "shader_debugs": len(_runtime.shader_debugs),
         }
         for sid in list(_runtime.replays.keys()):
@@ -1481,6 +1836,17 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
                     await _offload(_disconnect_remote_handle_sync, handle)
                 except Exception:
                     pass
+        for sid in list(_runtime.session_owned_remotes.keys()):
+            handle = _runtime.session_owned_remotes.pop(sid, None)
+            if handle is not None:
+                handle.remote_server = None
+                try:
+                    await _offload(_disconnect_remote_handle_sync, handle)
+                except Exception:
+                    pass
+        _runtime.consumed_remotes.clear()
+        _runtime.context_snapshots.clear()
+        _reset_context_snapshot()
         _runtime.initialized = False
         return _ok(released=released)
 
@@ -1639,6 +2005,26 @@ async def _core_capabilities(*, detail: str) -> Dict[str, Any]:
     return summary
 
 
+async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
+    context_id = _runtime_context_id()
+
+    if action == "get_context":
+        snapshot = _context_snapshot(context_id)
+        return _ok(**snapshot)
+
+    if action == "update_context":
+        _require(args, "key")
+        key = str(args["key"] or "").strip()
+        try:
+            snapshot = update_user_context(_context_snapshot(context_id), key, args.get("value"))
+        except ValueError as exc:
+            return _err(str(exc), code="validation_error", category="validation")
+        snapshot = _store_context_snapshot(snapshot, context_id)
+        return _ok(**snapshot)
+
+    return _err(f"Unsupported session action: {action}")
+
+
 async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
     if action == "open_file":
         _require(args, "file_path")
@@ -1674,11 +2060,15 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
             read_only=read_only,
             driver=driver,
         )
+        _set_context_capture_file(capture_file_id)
         return _ok(capture_file_id=capture_file_id, driver=driver)
 
     if action == "close_file":
         _require(args, "capture_file_id")
-        _runtime.captures.pop(str(args["capture_file_id"]), None)
+        capture_file_id = str(args["capture_file_id"])
+        _runtime.captures.pop(capture_file_id, None)
+        if not any(handle.capture_file_id == capture_file_id for handle in _runtime.replays.values()):
+            _clear_context_capture_file(capture_file_id)
         return _ok()
 
     if action == "get_info":
@@ -1719,9 +2109,14 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
             return _err(f"Unknown capture_file_id: {capture_file_id}")
         options = _as_dict(args.get("options"), default={})
         remote_id = str(options.get("remote_id") or "").strip()
+        backend_type = "local"
         backend_config: Dict[str, Any] = {"type": "local"}
         remote_handle_for_session: RemoteHandle | None = None
+        remote_endpoint = ""
         if remote_id:
+            consumed = _remote_consumed_payload(remote_id)
+            if consumed is not None:
+                return consumed
             remote_handle = _runtime.remotes.get(remote_id)
             if remote_handle is None:
                 return _err(
@@ -1729,13 +2124,6 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                     code="remote_not_found",
                     category="runtime",
                     details={"remote_id": remote_id},
-                )
-            if remote_handle.leased_session_id:
-                return _err(
-                    f"Remote handle {remote_id} is already leased to session {remote_handle.leased_session_id}",
-                    code="remote_in_use",
-                    category="runtime",
-                    details={"remote_id": remote_id, "session_id": remote_handle.leased_session_id},
                 )
             if not remote_handle.connected or remote_handle.remote_server is None:
                 return _err(
@@ -1745,6 +2133,8 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                     details={"remote_id": remote_id, "endpoint": _remote_url(remote_handle.host, remote_handle.port)},
                 )
             remote_handle_for_session = remote_handle
+            remote_endpoint = _remote_url(remote_handle.host, remote_handle.port)
+            backend_type = "remote"
             backend_config = {
                 "type": "remote",
                 "host": remote_handle.host,
@@ -1757,12 +2147,6 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
             backend_config=backend_config,
             replay_config={},
         )
-        if remote_handle_for_session is not None:
-            remote_handle_for_session.remote_server = None
-            remote_handle_for_session.connected = False
-            remote_handle_for_session.leased_session_id = session_info.session_id
-            remote_handle_for_session.detail["connected"] = False
-            remote_handle_for_session.detail["leased_session_id"] = session_info.session_id
         try:
             cap_info = await _session_manager.open_capture(session_info.session_id, handle.file_path)
             controller = await _get_controller(session_info.session_id)
@@ -1771,6 +2155,24 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
             _runtime.replays[session_info.session_id] = ReplayHandle(
                 session_id=session_info.session_id,
                 capture_file_id=capture_file_id,
+                frame_index=0,
+                active_event_id=active_event_id,
+            )
+            if remote_handle_for_session is not None:
+                _runtime.remotes.pop(remote_id, None)
+                _runtime.session_owned_remotes[session_info.session_id] = remote_handle_for_session
+                _runtime.consumed_remotes[remote_id] = ConsumedRemoteHandle(
+                    remote_id=remote_id,
+                    endpoint=remote_endpoint,
+                    transport=remote_handle_for_session.transport,
+                    consumed_by_session_id=session_info.session_id,
+                    server_info=dict(remote_handle_for_session.server_info),
+                )
+                _set_context_remote_session_owned(remote_id, session_info.session_id, remote_endpoint)
+            _set_context_runtime_session(
+                session_info.session_id,
+                capture_file_id=capture_file_id,
+                backend_type=backend_type,
                 frame_index=0,
                 active_event_id=active_event_id,
             )
@@ -1790,12 +2192,32 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                 await _session_manager.close_session(session_info.session_id)
             except Exception:
                 pass
+            _runtime.replays.pop(session_info.session_id, None)
+            if remote_handle_for_session is not None:
+                handle_for_cleanup = _runtime.remotes.pop(remote_id, None) or remote_handle_for_session
+                handle_for_cleanup.connected = False
+                handle_for_cleanup.remote_server = None
+                try:
+                    await _offload(_disconnect_remote_handle_sync, handle_for_cleanup)
+                except Exception:
+                    pass
+                _clear_context_remote_live(remote_id)
             raise
     if action == "close_replay":
         _require(args, "session_id")
         session_id = str(args["session_id"])
+        owned_remote = _runtime.session_owned_remotes.pop(session_id, None)
         _runtime.replays.pop(session_id, None)
         await _session_manager.close_session(session_id)
+        if owned_remote is not None:
+            owned_remote.remote_server = None
+            errors = await _offload(_disconnect_remote_handle_sync, owned_remote)
+            if errors:
+                _record_log("warning", "session_remote_cleanup", {"session_id": session_id, "errors": errors})
+        tombstone = next((item for item in _runtime.consumed_remotes.values() if item.consumed_by_session_id == session_id), None)
+        if tombstone is not None:
+            _set_context_remote_consumed(tombstone.remote_id, session_id, tombstone.endpoint)
+        _clear_context_runtime(session_id)
         return _ok()
 
     return _err(f"Unsupported capture action: {action}")
@@ -1814,6 +2236,7 @@ async def _dispatch_replay(action: str, args: Dict[str, Any]) -> str:
         if active_event_id > 0:
             await _offload(controller.SetFrameEvent, active_event_id, True)
         replay.active_event_id = active_event_id
+        _set_context_frame(session_id, replay.frame_index, active_event_id)
         return _ok(active_event_id=active_event_id)
 
     if action == "get_frame_info":
@@ -1894,6 +2317,7 @@ async def _dispatch_event(action: str, args: Dict[str, Any]) -> str:
         await _offload(controller.SetFrameEvent, event_id, True)
         if session_id in _runtime.replays:
             _runtime.replays[session_id].active_event_id = event_id
+        _set_context_active_event(session_id, event_id)
         return _ok(active_event_id=event_id)
 
     if action == "get_active":
@@ -4055,6 +4479,23 @@ async def _dispatch_diag(action: str, args: Dict[str, Any]) -> str:
 async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
     _require(args, "session_id")
     session_id = str(args["session_id"])
+    snapshot = _context_snapshot()
+
+    def _resolve_macro_pixel() -> Tuple[int, int, Any]:
+        x_value = args.get("x")
+        y_value = args.get("y")
+        target_value = args.get("target")
+        focus_pixel = snapshot.get("focus", {}).get("pixel")
+        if isinstance(focus_pixel, dict):
+            if x_value is None:
+                x_value = focus_pixel.get("x")
+            if y_value is None:
+                y_value = focus_pixel.get("y")
+            if target_value is None and isinstance(focus_pixel.get("target"), dict):
+                target_value = dict(focus_pixel.get("target") or {})
+        if x_value is None or y_value is None:
+            raise ValueError("Missing required parameter(s): x, y")
+        return int(x_value), int(y_value), target_value
 
     if action == "summarize_frame":
         event_resp = await _dispatch_event("get_actions", {"session_id": session_id, "include_markers": True, "include_drawcalls": True})
@@ -4138,8 +4579,8 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
         return _ok(matches=matches)
 
     if action == "locate_draw_affecting_pixel":
-        _require(args, "x", "y")
-        history_resp = await _dispatch_debug("pixel_history", {"session_id": session_id, "x": args["x"], "y": args["y"], "target": args.get("target")})
+        x_value, y_value, target_value = _resolve_macro_pixel()
+        history_resp = await _dispatch_debug("pixel_history", {"session_id": session_id, "x": x_value, "y": y_value, "target": target_value})
         payload = json.loads(history_resp)
         if not payload.get("success"):
             return history_resp
@@ -4147,13 +4588,13 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
         return _ok(candidates=candidates)
 
     if action == "explain_pixel":
-        _require(args, "x", "y")
-        history_resp = await _dispatch_debug("pixel_history", {"session_id": session_id, "x": args["x"], "y": args["y"], "target": args.get("target")})
+        x_value, y_value, target_value = _resolve_macro_pixel()
+        history_resp = await _dispatch_debug("pixel_history", {"session_id": session_id, "x": x_value, "y": y_value, "target": target_value})
         payload = json.loads(history_resp)
         if not payload.get("success"):
             return history_resp
         history = payload.get("history", [])
-        explanation = f"Pixel({args['x']},{args['y']}) has {len(history)} recorded modifications in pixel history."
+        explanation = f"Pixel({x_value},{y_value}) has {len(history)} recorded modifications in pixel history."
         return _ok(explanation=explanation, history=history[:20])
 
     if action == "trace_resource_lifetime":
@@ -4235,6 +4676,10 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
     if action == "find_nan_inf_in_targets":
         texture_id = args.get("texture_id")
         if texture_id is None:
+            focus_resource_id = str(snapshot.get("focus", {}).get("resource_id") or "").strip()
+            if focus_resource_id:
+                texture_id = focus_resource_id
+        if texture_id is None:
             texture_id = await _resolve_texture_id(session_id, None, event_id=_active_event(session_id))
         stats_resp = await _dispatch_texture("compute_stats", {"session_id": session_id, "texture_id": str(texture_id)})
         payload = json.loads(stats_resp)
@@ -4245,7 +4690,12 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
     if action == "quick_triage_missing_draw":
         summary_resp = await _dispatch_macro("summarize_frame", {"session_id": session_id})
         diag_resp = await _dispatch_diag("scan_common_issues", {"session_id": session_id, "include_suggestions": True})
-        return _ok(summary=json.loads(summary_resp), diagnostics=json.loads(diag_resp))
+        return _ok(
+            summary=json.loads(summary_resp),
+            diagnostics=json.loads(diag_resp),
+            context_snapshot=snapshot,
+            recent_artifacts=list(snapshot.get("last_artifacts") or []),
+        )
 
     if action == "build_bug_report_pack":
         _require(args, "output_path")
@@ -4255,7 +4705,8 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
         summary_payload = json.loads(summary_resp)
         with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("report/summary.json", json.dumps(summary_payload, ensure_ascii=False, indent=2))
-        return _ok(saved_path=str(output_path))
+            zf.writestr("report/context_snapshot.json", json.dumps(snapshot, ensure_ascii=False, indent=2))
+        return _ok(saved_path=str(output_path), context_snapshot=snapshot, recent_artifacts=list(snapshot.get("last_artifacts") or []))
 
     if action == "shader_hotfix_validate":
         _require(args, "replacement")
@@ -4478,6 +4929,19 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
             )
         except AndroidRemoteBootstrapError as exc:
             return _err(exc.message, code=exc.code, category="runtime", details=exc.details)
+        except CoreError as exc:
+            if bootstrap_result is not None:
+                try:
+                    await _offload(cleanup_android_remote, bootstrap_result)
+                except Exception:
+                    pass
+            details = dict(exc.details)
+            details.setdefault("transport", transport)
+            details.setdefault("host", endpoint_host)
+            details.setdefault("port", endpoint_port)
+            details.setdefault("requested_host", host)
+            details.setdefault("requested_port", port)
+            return _err(exc.message, code=exc.code, category=exc.category, details=details)
         except Exception as exc:
             if bootstrap_result is not None:
                 try:
@@ -4494,6 +4958,15 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
                     "port": endpoint_port,
                     "requested_host": host,
                     "requested_port": port,
+                    "source_layer": "runtime",
+                    "operation": "rd.remote.connect",
+                    "backend_type": "remote",
+                    "capture_context": {
+                        "endpoint": _remote_url(endpoint_host, endpoint_port),
+                        "remote_id": "",
+                    },
+                    "classification": "remote_endpoint",
+                    "fix_hint": "Repair the remote endpoint or Android bootstrap path before retrying rd.remote.connect.",
                 },
             )
 
@@ -4518,24 +4991,22 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
             bootstrap_result=bootstrap_result,
             detail=detail,
         )
+        _set_context_remote_live(remote_id, detail["endpoint"])
         return _ok(remote_id=remote_id, server_info=server_info, detail=detail)
 
     if action == "disconnect":
         _require(args, "remote_id")
         remote_id = str(args["remote_id"])
+        consumed = _remote_consumed_payload(remote_id)
+        if consumed is not None:
+            return consumed
         handle = _runtime.remotes.get(remote_id)
         if handle is None:
             return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
-        if handle.leased_session_id and handle.leased_session_id in _runtime.replays:
-            return _err(
-                f"Remote handle {remote_id} is currently in use by session {handle.leased_session_id}",
-                code="remote_in_use",
-                category="runtime",
-                details={"remote_id": remote_id, "session_id": handle.leased_session_id},
-            )
         handle = _runtime.remotes.pop(remote_id, None)
         if handle is None:
             return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
+        _clear_context_remote_live(remote_id)
         errors = await _offload(_disconnect_remote_handle_sync, handle)
         if errors:
             return _ok(detail={"connected": False, "cleanup_errors": errors})
@@ -4544,16 +5015,12 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
     if action == "ping":
         _require(args, "remote_id")
         remote_id = str(args["remote_id"])
+        consumed = _remote_consumed_payload(remote_id)
+        if consumed is not None:
+            return consumed
         handle = _runtime.remotes.get(remote_id)
         if handle is None:
             return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
-        if handle.leased_session_id and handle.leased_session_id in _runtime.replays:
-            return _err(
-                f"Remote handle {remote_id} is currently leased to session {handle.leased_session_id}",
-                code="remote_in_use",
-                category="runtime",
-                details={"remote_id": remote_id, "session_id": handle.leased_session_id},
-            )
         if not handle.connected or handle.remote_server is None:
             return _err(
                 f"Remote handle {remote_id} is not connected",
@@ -4570,16 +5037,33 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
                 f"RemoteServer.Ping({_remote_url(handle.host, handle.port)}) failed: {exc}",
                 code="remote_ping_failed",
                 category="runtime",
-                details={"remote_id": remote_id},
+                details={
+                    "remote_id": remote_id,
+                    "source_layer": "runtime",
+                    "operation": "rd.remote.ping",
+                    "backend_type": "remote",
+                    "capture_context": {"remote_id": remote_id, "endpoint": _remote_url(handle.host, handle.port)},
+                    "classification": "remote_endpoint",
+                    "fix_hint": "Reconnect to the remote endpoint before issuing more remote tools.",
+                },
             )
         latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
         if not _status_ok(status):
             handle.connected = False
+            details = build_renderdoc_error_details(
+                status,
+                operation=f"RemoteServer.Ping({_remote_url(handle.host, handle.port)})",
+                source_layer="renderdoc_status",
+                backend_type="remote",
+                capture_context={"remote_id": remote_id, "endpoint": _remote_url(handle.host, handle.port), "latency_ms": latency_ms},
+                classification="remote_endpoint",
+                fix_hint="Reconnect to the remote endpoint before issuing more remote tools.",
+            )
             return _err(
-                f"RemoteServer.Ping({_remote_url(handle.host, handle.port)}) failed: {_status_text(status)}",
+                f"RemoteServer.Ping({_remote_url(handle.host, handle.port)}) failed: {details['renderdoc_status']['status_text']}",
                 code="remote_ping_failed",
                 category="runtime",
-                details={"remote_id": remote_id, "latency_ms": latency_ms},
+                details=details,
             )
         handle.detail["connected"] = True
         return _ok(
@@ -4601,6 +5085,9 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
     }:
         _require(args, "remote_id")
         remote_id = str(args["remote_id"])
+        consumed = _remote_consumed_payload(remote_id)
+        if consumed is not None:
+            return consumed
         if remote_id not in _runtime.remotes:
             return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
         return _capability_error(

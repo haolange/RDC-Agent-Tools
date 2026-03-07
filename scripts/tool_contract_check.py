@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run dual-sample contract checks for all 196 rd.* tools via MCP and daemon CLI."""
+"""Run dual-sample contract checks for all catalog-defined rd.* tools via MCP and daemon CLI."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from rdx.runtime_paths import ensure_tools_root_env, ensure_runtime_dirs, artifacts_dir, binaries_root, pymodules_dir
+from rdx.timeout_policy import HARNESS_DEFAULT_TIMEOUT_S, REMOTE_CONNECT_DEFAULT_TIMEOUT_MS, harness_timeout_s
 
 CANONICAL_KEYS = {"schema_version", "tool_version", "result_kind", "ok", "data", "artifacts", "error"}
 DESTRUCTIVE_TAIL = ("rd.capture.close_replay", "rd.capture.close_file", "rd.core.shutdown")
@@ -71,6 +72,13 @@ def _catalog_path() -> Path:
 
 def _default_desktop_rdc(name: str) -> Path:
     return Path.home() / "Desktop" / name
+
+
+def _effective_timeout_s(tool_name: str, args: dict[str, Any], requested: float | None = None) -> float:
+    policy_timeout = harness_timeout_s(tool_name, args)
+    if requested is None or requested <= 0:
+        return policy_timeout
+    return max(float(requested), policy_timeout)
 
 
 def _now_iso() -> str:
@@ -517,10 +525,11 @@ class DaemonExecutor:
         name: str,
         args: dict[str, Any],
         *,
-        timeout_s: float = 25.0,
+        timeout_s: float | None = None,
     ) -> tuple[dict[str, Any] | None, str, str]:
         def _call() -> tuple[dict[str, Any] | None, str, str]:
             try:
+                effective_timeout_s = _effective_timeout_s(name, args, timeout_s)
                 code, out, err = self._run_cli(
                     [
                         "call",
@@ -530,7 +539,7 @@ class DaemonExecutor:
                         "--json",
                         "--connect",
                     ],
-                    timeout_s=timeout_s,
+                    timeout_s=effective_timeout_s,
                 )
             except subprocess.TimeoutExpired as exc:
                 return None, "", f"call timeout: {exc}"
@@ -548,7 +557,7 @@ def _remote_connect_args() -> dict[str, Any]:
     args: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 38920,
-        "timeout_ms": 2000,
+        "timeout_ms": REMOTE_CONNECT_DEFAULT_TIMEOUT_MS,
     }
     transport = str(os.environ.get("RDX_REMOTE_CONNECT_TRANSPORT", "renderdoc") or "renderdoc").strip().lower()
     options: dict[str, Any] = {}
@@ -1692,10 +1701,11 @@ async def _run_transport_mcp(
                     name: str,
                     args: dict[str, Any],
                     *,
-                    timeout_s: float = 25.0,
+                    timeout_s: float | None = None,
                 ) -> tuple[dict[str, Any] | None, str, str]:
+                    effective_timeout_s = _effective_timeout_s(name, args, timeout_s)
                     try:
-                        result = await asyncio.wait_for(session.call_tool(name, args), timeout=timeout_s)
+                        result = await asyncio.wait_for(session.call_tool(name, args), timeout=effective_timeout_s)
                     except Exception as exc:  # noqa: BLE001
                         return None, "", f"call exception: {exc}"
                     text = ""
@@ -1905,7 +1915,7 @@ async def _run_transport_mcp(
                 "status": "blocker",
                 "reason": "not registered in MCP list_tools",
                 "issue_type": "structural",
-                "fix_hint": "Sync tool_catalog_196 against MCP exports and ensure all listed tools are available",
+                "fix_hint": f"Sync {_catalog_path().name} against MCP exports and ensure all listed tools are available",
                 "impact_scope": "full flow",
                 "ok": False,
                 "callable": False,
@@ -2238,16 +2248,17 @@ def _load_catalog() -> tuple[list[str], dict[str, list[str]]]:
     data = json.loads(_catalog_path().read_text(encoding="utf-8"))
     tools = list(data.get("tools", []))
     names = [str(item.get("name", "")).strip() for item in tools]
-    if len(names) != 196:
-        raise RuntimeError(f"Catalog must contain 196 tools, got {len(names)}")
-    if len(set(names)) != 196:
+    declared_count = int(data.get("tool_count") or len(names))
+    if len(names) != declared_count:
+        raise RuntimeError(f"Catalog tool_count mismatch: declared {declared_count}, got {len(names)}")
+    if len(set(names)) != len(names):
         raise RuntimeError("Catalog contains duplicate tool names")
     params_map = {str(item.get("name", "")).strip(): list(item.get("param_names", [])) for item in tools}
     return names, params_map
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dual-sample tool contract checker (196 tools)")
+    parser = argparse.ArgumentParser(description="Dual-sample tool contract checker (catalog-defined tools)")
     parser.add_argument("--local-rdc", default=str(_default_desktop_rdc("03.rdc")))
     parser.add_argument("--remote-rdc", default=str(_default_desktop_rdc("03.rdc")))
     parser.add_argument("--transport", choices=["mcp", "daemon", "both"], default="both")

@@ -1,6 +1,6 @@
 ﻿# 桌面与 Android 通用的分层 Smoke / Contract 测试 Prompt
 
-本文提供一份可直接复用的执行 prompt，用于让人工或 Agent 对 `rdx-tools` 做分层测试：先做最小可运行链路，再逐步扩到本地 / remote / `MCP` / daemon / 全量 196 tools contract，并在每次执行后产出可直接指导后续修复的书面问题报告。
+?????????????? prompt??????? Agent ? `rdx-tools` ??????????????????????? / remote / `MCP` / daemon / ?? catalog tools contract???????????????????????????
 
 注意：
 
@@ -11,7 +11,7 @@
 ## 适用场景
 
 - 目标是验证 `rdx-tools` 在桌面环境与 Android remote 环境下的真实可用性。
-- 目标是不只测 remote，也覆盖本地 session、remote session、`CLI`、`MCP`、daemon、以及全量 196 个 `rd.*` tools。
+- ?????? remote?????? session?remote session?`CLI`?`MCP`?daemon??? catalog ???? `rd.*` tools?
 - 目标是每次测试后都留下“问题报告 + 证据 + 分层归因 + 后续修复建议”，方便下一个 Agent 接力修复，直到结果收敛到理想状态。
 
 ## 可复用 Prompt
@@ -24,7 +24,7 @@
 本次测试不要只依赖现有脚本。应采用“分层主判据”策略：
 - 第一主判据：`CLI` 直接调用的最小链路是否可运行。
 - 第二主判据：local session、remote session、daemon / `MCP` transport 是否分别可运行。
-- 第三主判据：全量 196 tools contract 的覆盖情况、失败分布和问题清单。
+- ???????? catalog tools contract ????????????????
 - 现有大脚本可以作为补充证据，但不能覆盖前面已经得到的更直接、更短链路的事实结论。
 
 执行要求如下：
@@ -123,8 +123,8 @@
   - remote only 问题
   - harness / 脚本执行问题
 
-### Level 4: 全量 196 tools contract 层
-- 目标：对 `spec/tool_catalog_196.json` 中全部 196 个 `rd.*` tools 做覆盖检查，不能只停留在最短链路。
+### Level 4: ?? catalog tools contract ?
+- ???? `spec/tool_catalog_196.json` ??? catalog `rd.*` tools ?????????????????
 - 可以运行补充脚本，例如：
   - `python scripts/tool_contract_check.py --local-rdc "<local_sample>" --remote-rdc "<remote_sample_or_same_file>" --transport <mcp|daemon|both> --artifact-dir "<artifact_dir>" --out-json "<out_json>" --out-md "<out_md>" --daemon-context-prefix "<context_prefix>"`
 - 不要优先使用 `scripts/run_smoke_196_dual_sample.py`，除非本轮任务明确要求。
@@ -132,7 +132,7 @@
   - `RDX_REMOTE_CONNECT_TRANSPORT=<remote_transport>`
   - `RDX_REMOTE_DEVICE_SERIAL=<target_serial>`
 - 如当前只有一个 `.rdc`，则允许 `--local-rdc` 与 `--remote-rdc` 指向同一文件，仅用于满足脚本接口；但报告中必须写明这是因为用户或本轮任务只提供了一个样本。
-- 这一层的目标不是“只跑完命令”，而是必须把 196 个 tools 的结果分清楚：
+- ????????????????????? catalog ?? tools ???????
   - `pass`
   - `issue`
   - `blocker`
@@ -172,7 +172,7 @@
   - remote endpoint 是否成功建立
   - `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay -> rd.replay.set_frame` 是否成功
   - `MCP` 与 daemon 两条 transport 的 summary
-  - 196 tools 的总体 summary
+- catalog tools ??? summary
   - 所有 `rd.remote.*` 工具的结果摘要
   - blocker / issue / scope_skip 数量
   - 如果失败，失败更像哪一层，以及哪些层已经被排除
@@ -186,13 +186,13 @@
 - 若某个残留在第一次清理后仍存在，要再做一次终态确认，并在交付里说明是否最终清干净。
 - 在最终说明最后单独写一句：`已清理` 或 `未完全清理（含原因）`。
 
-执行过程中如果遇到 blocker，不要转入修代码流程；先完成证据收集、状态确认、分层报告、清理，再交付结果。后续 Agent 应基于该问题报告继续修复并复测，直到所有关键层级和 196 tools contract 都收敛到理想状态。
+????????? blocker???????????????????????????????????????? Agent ????????????????????????? catalog tools contract ?????????
 ```
 
 ## 使用说明
 
 - 推荐把本文作为“执行模板”直接交给人工或 Agent。
-- 真正的通过 / 失败判定，仍应回到 `CLI` 原始输出、共享契约字段、runtime 实际行为、以及 196 tools 的真实 contract 结果。
+- ????? / ????????? `CLI` ????????????runtime ??????? catalog tools ??? contract ???
 - 这份 prompt 的重点不是一次性跑出一个大报告，而是把测试分层、把问题写清楚、让后续修复有可执行入口。
 - 如果用户没有给出样本文件、目标 transport、输出路径、context 命名规则等输入，应先向用户确认，不要擅自硬编码。
 - 如果后续仓库对 bootstrap、`remote_id`、`options.remote_id`、transport、tool 覆盖面、或清理语义有变更，应同步检查本文是否仍然匹配。

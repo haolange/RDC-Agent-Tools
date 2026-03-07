@@ -1,6 +1,6 @@
 ﻿# Tool Catalog
 
-`rdx-tools` 暴露 196 个规范的 `rd.*` tools。
+`rdx-tools` ???? 198 ???? `rd.*` tools?
 
 本文只承担 catalog 入口职责，不承担使用教程。如何建立 session、如何理解 `context` 与 daemon、如何给 Agent 写平台说明，请分别参考：
 

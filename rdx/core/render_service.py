@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 import numpy as np
 
+from rdx.core.errors import RuntimeToolError
+from rdx.core.renderdoc_status import status_code_name, status_code_raw
 from rdx.models import ArtifactRef
 
 logger = logging.getLogger(__name__)
@@ -156,10 +158,14 @@ def _resolve_file_type(file_format: str) -> Tuple[str, Any]:
     return fmt, file_type
 
 
-def _save_texture_result(result: Any) -> Tuple[bool, str]:
+def _save_texture_result(result: Any) -> Tuple[bool, Dict[str, str]]:
     rd = _get_rd()
     if isinstance(result, bool):
-        return result, ""
+        return result, {
+            "result_code_raw": str(result),
+            "result_code_name": "bool",
+            "status_text": "",
+        }
 
     detail = str(getattr(result, "message", "") or getattr(result, "details", ""))
 
@@ -168,14 +174,24 @@ def _save_texture_result(result: Any) -> Tuple[bool, str]:
         if code is None:
             continue
         try:
-            return code == rd.ResultCode.Succeeded, detail or str(code)
+            ok = code == rd.ResultCode.Succeeded
         except Exception:
-            return "Succeeded" in str(code), detail or str(code)
+            ok = "Succeeded" in str(code)
+        return ok, {
+            "result_code_raw": status_code_raw(code),
+            "result_code_name": status_code_name(code),
+            "status_text": detail or str(code),
+        }
 
     try:
-        return bool(result), detail or str(result)
+        ok = bool(result)
     except Exception:
-        return False, detail or str(result)
+        ok = False
+    return ok, {
+        "result_code_raw": str(result),
+        "result_code_name": type(result).__name__,
+        "status_text": detail or str(result),
+    }
 
 
 def _normalize_rgba8_bytes(rgba_bytes: bytes, width: int, height: int) -> bytes:
@@ -392,6 +408,14 @@ class RenderService:
 
         controller = session_manager.get_controller(session_id)
         output = session_manager.get_output(session_id)
+        backend_type = "unknown"
+        get_state = getattr(session_manager, "get_state", None)
+        if callable(get_state):
+            try:
+                state = get_state(session_id)
+                backend_type = str(getattr(state, "backend_type", "unknown")).lower()
+            except Exception:
+                backend_type = "unknown"
 
         # 导航到指定 event。
         await asyncio.to_thread(controller.SetFrameEvent, event_id, True)
@@ -494,6 +518,14 @@ class RenderService:
     ) -> Tuple[ArtifactRef, Dict[str, Any], Optional[str]]:
         rd = _get_rd()
         controller = session_manager.get_controller(session_id)
+        backend_type = "unknown"
+        get_state = getattr(session_manager, "get_state", None)
+        if callable(get_state):
+            try:
+                state = get_state(session_id)
+                backend_type = str(getattr(state, "backend_type", "unknown")).lower()
+            except Exception:
+                backend_type = "unknown"
 
         await asyncio.to_thread(controller.SetFrameEvent, event_id, True)
         resolved_id = await self._resolve_texture_id(controller, texture_id)
@@ -544,10 +576,28 @@ class RenderService:
                     save_data,
                     str(target_path),
                 )
-                ok, detail = _save_texture_result(save_result)
+                ok, status_payload = _save_texture_result(save_result)
                 if not ok:
-                    msg = detail or "unknown error"
-                    raise ValueError(f"SaveTexture failed: {msg}")
+                    details = {
+                        "source_layer": "renderdoc_status",
+                        "operation": "SaveTexture",
+                        "backend_type": backend_type,
+                        "capture_context": {
+                            "session_id": session_id,
+                            "event_id": event_id,
+                            "texture_id": str(resolved_id),
+                            "subresource": dict(subresource or {}),
+                            "file_format": fmt,
+                        },
+                        "renderdoc_status": status_payload,
+                        "classification": "renderdoc_status",
+                        "fix_hint": "Inspect the RenderDoc status and texture export inputs before retrying SaveTexture.",
+                        "failure_stage": "controller.SaveTexture",
+                    }
+                    raise RuntimeToolError(
+                        f"SaveTexture failed: {status_payload['status_text'] or 'unknown error'}",
+                        details=details,
+                    )
             if not target_path.is_file():
                 raise ValueError(
                     f"SaveTexture succeeded but file was not created: {target_path}"

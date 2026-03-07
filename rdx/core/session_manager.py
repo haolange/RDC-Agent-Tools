@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from rdx.core.renderdoc_status import build_renderdoc_error_details, status_ok as _rd_status_ok, status_text as _rd_status_text
 from rdx.models import (
     BackendType,
     CaptureInfo,
@@ -57,35 +58,37 @@ def _count_actions(actions: Any) -> int:
 
 
 def _status_ok(status: Any) -> bool:
-    try:
-        ok = getattr(status, "OK", None)
-        if callable(ok):
-            return bool(ok())
-    except Exception:
-        pass
-    rd = _get_rd()
-    return status == rd.ResultCode.Succeeded
+    return _rd_status_ok(status, _get_rd())
 
 
 def _status_text(status: Any) -> str:
-    try:
-        message = getattr(status, "Message", None)
-        if callable(message):
-            text = str(message() or "").strip()
-            if text:
-                return text
-    except Exception:
-        pass
-    return str(status)
+    return _rd_status_text(status)
 
 
-def _check_status(status: Any, operation: str) -> None:
+def _check_status(
+    status: Any,
+    operation: str,
+    *,
+    backend_type: str = "local",
+    capture_context: Optional[Dict[str, Any]] = None,
+    source_layer: str = "renderdoc_status",
+    classification: str = "renderdoc_status",
+    fix_hint: str = "Inspect the RenderDoc status and capture context before retrying.",
+) -> None:
     if not _status_ok(status):
-        detail = _status_text(status)
+        details = build_renderdoc_error_details(
+            status,
+            operation=operation,
+            source_layer=source_layer,
+            backend_type=backend_type,
+            capture_context=capture_context,
+            classification=classification,
+            fix_hint=fix_hint,
+        )
         raise SessionError(
             code="renderdoc_error",
-            message=f"{operation} failed with status: {detail}",
-            details={"status": detail, "operation": operation},
+            message=f"{operation} failed with status: {details['renderdoc_status']['status_text']}",
+            details=details,
         )
 
 
@@ -269,7 +272,14 @@ class SessionManager:
             return
 
         status, remote = await self._offload(rd.CreateRemoteServerConnection, url)
-        _check_status(status, f"CreateRemoteServerConnection({url})")
+        _check_status(
+            status,
+            f"CreateRemoteServerConnection({url})",
+            backend_type="remote",
+            capture_context={"session_id": state.session_id, "endpoint": url},
+            classification="remote_replay_runtime",
+            fix_hint="Confirm the remote endpoint is reachable and still owns a valid replay runtime.",
+        )
         state.remote_server = remote
         logger.debug("Connected to remote RenderDoc server at %s", url)
 
@@ -277,11 +287,25 @@ class SessionManager:
         rd = _get_rd()
         cap = await self._offload(rd.OpenCaptureFile)
         status = await self._offload(cap.OpenFile, rdc_path, "", None)
-        _check_status(status, f"OpenFile({rdc_path})")
+        _check_status(
+            status,
+            f"OpenFile({rdc_path})",
+            backend_type="local",
+            capture_context={"session_id": state.session_id, "capture_path": str(rdc_path)},
+            classification="rdc_invalid_or_unsupported",
+            fix_hint="Verify that the .rdc file is valid and supported by this RenderDoc runtime.",
+        )
         state.capture_file = cap
 
         status, controller = await self._offload(cap.OpenCapture, rd.ReplayOptions(), None)
-        _check_status(status, "OpenCapture")
+        _check_status(
+            status,
+            "OpenCapture",
+            backend_type="local",
+            capture_context={"session_id": state.session_id, "capture_path": str(rdc_path)},
+            classification="rdc_invalid_or_unsupported",
+            fix_hint="Verify the capture can be replayed locally with the current RenderDoc runtime.",
+        )
         state.controller = controller
         await self._create_headless_output(state, controller)
 
@@ -297,7 +321,18 @@ class SessionManager:
             rd.ReplayOptions(),
             None,
         )
-        _check_status(status, f"remote.OpenCapture({remote_rdc_path})")
+        _check_status(
+            status,
+            f"remote.OpenCapture({remote_rdc_path})",
+            backend_type="remote",
+            capture_context={
+                "session_id": state.session_id,
+                "capture_path": str(rdc_path),
+                "remote_capture_path": str(remote_rdc_path),
+            },
+            classification="remote_replay_runtime",
+            fix_hint="Verify the remote endpoint can open the copied capture and has a compatible replay environment.",
+        )
         state.controller = controller
         await self._create_headless_output(state, controller)
 

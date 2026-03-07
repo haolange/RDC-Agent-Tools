@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 from rdx import server
+from rdx.context_snapshot import clear_context_snapshot
 
 
 class DummyRemoteServer:
@@ -61,6 +62,8 @@ def test_dispatch_remote_connect_returns_live_handle_and_server_info(monkeypatch
 
     server._runtime.remotes.clear()
     server._runtime.enable_remote = True
+    clear_context_snapshot()
+    server._runtime.context_snapshots.clear()
     try:
         payload = json.loads(
             asyncio.run(server._dispatch_remote("connect", {"host": "127.0.0.1", "port": 38920, "timeout_ms": 1000}))
@@ -71,6 +74,8 @@ def test_dispatch_remote_connect_returns_live_handle_and_server_info(monkeypatch
         remote_id = payload["remote_id"]
         assert server._runtime.remotes[remote_id].connected is True
     finally:
+        clear_context_snapshot()
+        server._runtime.context_snapshots.clear()
         server._runtime.remotes.clear()
         server._runtime.remotes.update(original_remotes)
         server._runtime.enable_remote = original_enable_remote
@@ -106,11 +111,13 @@ def test_dispatch_remote_connect_failure_does_not_allocate_remote_id(monkeypatch
         server._runtime.enable_remote = original_enable_remote
 
 
-def test_dispatch_capture_open_replay_passes_remote_endpoint(monkeypatch) -> None:
+def test_dispatch_capture_open_replay_consumes_remote_handle(monkeypatch) -> None:
     original_session_manager = server._session_manager
     original_captures = dict(server._runtime.captures)
     original_replays = dict(server._runtime.replays)
     original_remotes = dict(server._runtime.remotes)
+    original_session_owned = dict(server._runtime.session_owned_remotes)
+    original_consumed = dict(server._runtime.consumed_remotes)
     fake_manager = FakeSessionManager()
 
     async def _inline_offload(fn, *args, **kwargs):
@@ -137,6 +144,10 @@ def test_dispatch_capture_open_replay_passes_remote_endpoint(monkeypatch) -> Non
             remote_server=DummyRemoteServer(),
         )
     }
+    server._runtime.session_owned_remotes = {}
+    server._runtime.consumed_remotes = {}
+    clear_context_snapshot()
+    server._runtime.context_snapshots.clear()
 
     try:
         payload = json.loads(
@@ -154,12 +165,39 @@ def test_dispatch_capture_open_replay_passes_remote_endpoint(monkeypatch) -> Non
         assert fake_manager.backend_config["port"] == 38960
         assert fake_manager.backend_config["remote_id"] == "remote_demo"
         assert isinstance(fake_manager.backend_config["remote_server"], DummyRemoteServer)
-        remote_handle = server._runtime.remotes["remote_demo"]
-        assert remote_handle.connected is False
-        assert remote_handle.remote_server is None
-        assert remote_handle.leased_session_id == "sess_demo"
+        assert "remote_demo" not in server._runtime.remotes
+        assert server._runtime.session_owned_remotes["sess_demo"].transport == "adb_android"
+        assert server._runtime.consumed_remotes["remote_demo"].consumed_by_session_id == "sess_demo"
+
+        context_payload = json.loads(asyncio.run(server._dispatch_session("get_context", {})))
+        assert context_payload["success"] is True
+        assert context_payload["runtime"]["session_id"] == "sess_demo"
+        assert context_payload["remote"]["state"] == "session_owned"
+        assert context_payload["remote"]["origin_remote_id"] == "remote_demo"
     finally:
+        clear_context_snapshot()
+        server._runtime.context_snapshots.clear()
         server._session_manager = original_session_manager
         server._runtime.captures = original_captures
         server._runtime.replays = original_replays
         server._runtime.remotes = original_remotes
+        server._runtime.session_owned_remotes = original_session_owned
+        server._runtime.consumed_remotes = original_consumed
+
+
+def test_consumed_remote_handle_reports_lifecycle_error() -> None:
+    original_consumed = dict(server._runtime.consumed_remotes)
+    server._runtime.consumed_remotes = {
+        "remote_demo": server.ConsumedRemoteHandle(
+            remote_id="remote_demo",
+            endpoint="127.0.0.1:38960",
+            consumed_by_session_id="sess_demo",
+        )
+    }
+    try:
+        payload = json.loads(asyncio.run(server._dispatch_remote("ping", {"remote_id": "remote_demo"})))
+        assert payload["success"] is False
+        assert payload["code"] == "remote_handle_consumed"
+        assert payload["details"]["consumed_by_session_id"] == "sess_demo"
+    finally:
+        server._runtime.consumed_remotes = original_consumed

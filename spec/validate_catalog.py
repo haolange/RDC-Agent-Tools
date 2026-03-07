@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import sys
@@ -16,11 +16,12 @@ def main() -> int:
     tools = data.get("tools", [])
     names = [str(item.get("name", "")).strip() for item in tools]
     unique = set(names)
+    declared_count = int(data.get("tool_count") or len(tools))
 
-    if len(tools) != 196:
-        print(f"[spec] Expected 196 tools, got {len(tools)}")
+    if len(tools) != declared_count:
+        print(f"[spec] Catalog tool_count mismatch: declared {declared_count}, got {len(tools)}")
         return 2
-    if len(unique) != 196:
+    if len(unique) != len(names):
         print(
             f"[spec] Tool names must be unique: {len(unique)} unique / {len(names)} total",
         )
@@ -29,7 +30,7 @@ def main() -> int:
         print("[spec] Invalid tool name prefix found (must start with rd.)")
         return 4
 
-    print("[spec] Catalog validation passed (196 unique rd.* tools)")
+    print(f"[spec] Catalog validation passed ({len(unique)} unique rd.* tools)")
     return 0
 
 

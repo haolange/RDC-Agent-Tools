@@ -338,7 +338,7 @@ def _write_report(
     lines.extend(
         [
             "",
-            "## 三、196 工具健康评级",
+            "## ??Catalog ??????",
             f"- MCP target: 172（{_safe(transport_summaries['mcp']['total'])}）",
             f"- Daemon target: 172（{_safe(transport_summaries['daemon']['total'])}）",
             f"- MCP 本地有效: pass={transport_summaries['mcp']['pass']} scope_skip={transport_summaries['mcp']['scope_skip']} (effective={max(0, transport_summaries['mcp']['total'] - transport_summaries['mcp']['scope_skip'])})",

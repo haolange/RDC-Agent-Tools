@@ -1,6 +1,6 @@
 {
   "source_docx": "D:\\Projects\\Native\\RDC-Agent Tools\\spec\\doc_extracted.txt",
-  "tool_count": 196,
+  "tool_count": 198,
   "generated_at": "2026-03-06T15:49:23.761181Z",
   "groups": {
     "3.1，核心与环境管理 (Core & Environment)": 9,
@@ -18,7 +18,8 @@
     "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)": 9,
     "3.14，诊断工具 (Diagnostics, Heuristic Checks)": 11,
     "3.15，专家级宏工作流 (Expert Macro Workflows)": 14,
-    "3.16，通用辅助工具 (Utilities, Optional)": 6
+    "3.16，通用辅助工具 (Utilities, Optional)": 6,
+    "3.16???????? (Context Snapshot Tools)": 2
   },
   "tools": [
     {
@@ -2378,6 +2379,25 @@
         "older_than_ms",
         "prefix",
         "max_total_bytes"
+      ]
+    },
+    {
+      "name": "rd.session.get_context",
+      "group": "3.16???????? (Context Snapshot Tools)",
+      "description": "???? context ???????? runtime?remote?focus ? recent artifacts?",
+      "parameter_raw": "",
+      "returns_raw": "success (bool)<br>context_id (str)<br>runtime (dict): {session_id, capture_file_id, frame_index, active_event_id, backend_type}<br>remote (dict): {state, remote_id, origin_remote_id, endpoint, consumed_by_session_id}<br>focus (dict): {pixel?, resource_id?, shader_id?}<br>last_artifacts (list)<br>updated_at_ms (int)<br>error_message (str, ??)",
+      "param_names": []
+    },
+    {
+      "name": "rd.session.update_context",
+      "group": "3.16???????? (Context Snapshot Tools)",
+      "description": "???? context ? user-owned ????? focus_pixel?focus_resource_id?focus_shader_id?notes?",
+      "parameter_raw": "key (str)<br>value (json, ??): null ????",
+      "returns_raw": "success (bool)<br>context_id (str)<br>runtime (dict): {session_id, capture_file_id, frame_index, active_event_id, backend_type}<br>remote (dict): {state, remote_id, origin_remote_id, endpoint, consumed_by_session_id}<br>focus (dict): {pixel?, resource_id?, shader_id?}<br>notes (str)<br>last_artifacts (list)<br>updated_at_ms (int)<br>error_message (str, ??)",
+      "param_names": [
+        "key",
+        "value"
       ]
     }
   ]
