@@ -14,9 +14,9 @@ python spec/validate_catalog.py
 
 如果以上命令都可运行，再继续下面的 `CLI` 或 `MCP` 路径。
 
-## 2. 人工使用 `CLI`
+## 2. local-first 使用 `CLI`
 
-最方便的人工入口是：
+可直接访问本地环境时，最方便的入口是：
 
 ```bat
 rdx.bat
@@ -71,7 +71,12 @@ rdx context clear
 
 ## 3. 对接 `MCP` client
 
-`MCP` 入口适合被外部 `MCP` client 或 Agent 接入。你可以通过 launcher 启动，也可以直接用脚本启动。
+`MCP` 入口适合无法直接进入本地环境的外部 `MCP` client / Agent，或用户明确要求按 `MCP` 接入的场景。你可以通过 launcher 启动，也可以直接用脚本启动。
+
+在进入任一路径前，建议先明确两件事：
+
+- 当前任务采用 `CLI` 还是 `MCP`
+- 如果采用 `MCP`，宿主是否已经配置对应 MCP server；未配置时必须先阻断并提示配置
 
 ### 先做环境检查
 

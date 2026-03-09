@@ -93,7 +93,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 5. 保存本地 session state
 6. 如果带 `--connect`，再把状态同步到当前 context 的 daemon
 
-因此，`CLI` 适合人工快速上手；`MCP` 则把同样的底层动作显式暴露给 client / Agent 自行编排。`CLI` 不是规范源，而是平台动作的 convenience wrapper。
+因此，`CLI` 是本地直接执行入口，可供人工、脚本、CI 与本地 Agent 复用；`MCP` 则把同样的底层动作以协议桥接的方式暴露给外部宿主。`CLI` 不是规范源，而是平台动作的 convenience wrapper。
 
 ## 4. 状态面与来源优先级
 
@@ -140,6 +140,14 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 - `CLI` 与 `MCP` 可以共用同一套 daemon 机制。
 - capture、session、active event、focus、recent artifacts 都按 context 隔离。
 - 上层 Agent 如果要跨多轮任务持续工作，优先复用同一 context，而不是把 handle 当作永久主键缓存。
+
+补充一条入口选择原则：
+
+- 能直接访问本地进程、文件系统与 daemon 的宿主，默认 local-first，优先使用 `CLI` 或直接本地 runtime。
+- 是否启用 daemon，取决于是否需要长期供应 live runtime / context，而不是取决于是否使用 `MCP`。
+- 只有宿主不能直达本地环境，或用户明确要求按 `MCP` 接入时，才应切换到 `MCP`。
+- 不论走 `CLI` 还是 `MCP`，上层 Agent 都应先向用户说明当前采用的入口模式。
+- 如果选择 `MCP`，但宿主没有配置对应 MCP server，必须显式阻断并提示配置。
 
 ## 6. `--connect` 的含义
 

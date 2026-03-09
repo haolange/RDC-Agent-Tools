@@ -1,6 +1,6 @@
 ﻿# `rdx-tools`
 
-`rdx-tools` 是面向 `RenderDoc` 的本地 `MCP` + `CLI` 工具集，用于暴露稳定的 `rd.*` tool 能力、管理 `.rdc` 到 replay session 的运行时链路，并为人工与自动化调用提供统一入口。
+`rdx-tools` 是面向 `RenderDoc` 的本地工具集，用于暴露稳定的 `rd.*` tool 能力、管理 `.rdc` 到 replay session 的运行时链路，并为本地直接执行与协议桥接提供统一入口。
 
 本仓库关注“平台层使用模型”：
 
@@ -33,7 +33,7 @@
 
 ### `rdx.bat`
 
-统一 launcher，适合人工使用。
+统一 launcher，用于启动本地入口或协议桥接入口。
 
 - 默认模式：交互式入口，提供 `Start CLI`、`Start MCP`、`Help`。
 - `--non-interactive`：脚本与自动化入口。
@@ -45,18 +45,34 @@ rdx.bat --non-interactive mcp --ensure-env
 
 ### `cli/run_cli.py`
 
-命令行入口，适合人工调试、脚本回归、最小链路验证。
+本地直接执行入口，适合人工、脚本、CI 和可直接访问本地环境的 Agent。
 
 - 面向“命令”而不是 tool schema。
 - 负责把常见平台动作封装成 `capture open`、`capture status`、`daemon status` 等命令。
+- 可直接在当前进程执行，也可通过 `--connect` 复用 daemon / context。
 
 ### `mcp/run_mcp.py`
 
-`MCP` server 入口，适合被外部 `MCP` client / Agent 接入。
+`MCP` server 入口，适合无法直接进入本地环境的外部宿主，或用户明确要求按 `MCP` 接入的场景。
 
 - 暴露 catalog 当前定义的全部 `rd.*` tools；当前 `tool_count` 为 `198`。
 - 已公开包含 `rd.session.get_context` 与 `rd.session.update_context`。
 - 由上层 client 进行 tool discovery、参数组织与调用编排。
+
+## 入口选择原则
+
+选择入口时，按以下顺序判断：
+
+1. 调用方能否直接访问本地进程、文件系统与 daemon。
+2. 如果能，默认 local-first，优先使用 `CLI` 或直接本地 runtime。
+3. 如果任务需要跨多轮保活 live runtime / context，再显式依赖 daemon。
+4. 只有调用方不能直达本地环境，或用户明确要求按 `MCP` 接入时，才使用 `MCP`。
+
+补充约束：
+
+- `daemon` 是长生命周期 runtime / context 持有层，不是 `MCP` 的附属概念。
+- 不论走 `CLI` 还是 `MCP`，上层 Agent 都应先向用户说明当前采用的入口模式。
+- 如果选择 `MCP`，但宿主没有配置对应 MCP server，必须显式报错或阻断，而不是假设平台能力已经存在。
 
 ## 最小示例
 

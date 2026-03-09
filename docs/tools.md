@@ -17,6 +17,13 @@
 - `CLI` 只是部分平台动作的 convenience wrapper，不是完整能力面的等价镜像，也不是规范源。
 - 规范定义以 `spec/tool_catalog.json` 为准。
 
+补充一条入口边界：
+
+- `CLI` 是本地直接执行入口。
+- daemon 是长生命周期 runtime / context 持有层。
+- `MCP` 是把 catalog 能力桥接给外部宿主的协议入口。
+- catalog 本身不偏向 `CLI` 或 `MCP`；入口选择取决于宿主是否能直接进入本地环境，以及任务是否需要长期供应 live runtime / context。
+
 ## 当前新增入口
 
 当前公开 catalog 已包含：

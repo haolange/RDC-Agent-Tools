@@ -52,8 +52,13 @@
 
 上层 Agent / framework 应遵循这些平台级原则：
 
-- 先发现 tools，再执行任务。
-  - `MCP` client 应先完成 tool discovery，再决定调用顺序。
+- 先根据宿主条件选择入口，再决定具体 tool 序列。
+  - 可直接访问本地进程、文件系统与 daemon 的宿主，默认 local-first，优先使用 `CLI` 或直接本地 runtime。
+  - 需要跨多轮保活 live runtime / context 时，再显式依赖 daemon。
+  - 只有宿主不能直达本地环境，或用户明确要求按 `MCP` 接入时，才走 `MCP`。
+- 不论走 `CLI` 还是 `MCP`，任务开始时都应向用户说明当前采用的入口模式。
+- 选择 `MCP` 前，先确认宿主已经配置对应 MCP server。
+  - 如果未配置，必须显式阻断并提示配置，而不是假设工具可用。
 - 先建立 session，再做 inspection。
   - 对 `.rdc` 的平台最小链路是 `rd.core.init -> rd.capture.open_file -> rd.capture.open_replay -> rd.replay.set_frame`。
 - 对 remote 路径，先拿到 live `remote_id`。
@@ -87,29 +92,35 @@
 
 仓库不承诺自动恢复策略，也不提供任务级恢复 playbook。
 
-## 6. `CLI` 与 `MCP` 的角色区别
+## 6. `CLI`、daemon 与 `MCP` 的职责
 
-`CLI` 更适合：
+这三者不是同一层概念：
 
-- 人工调试
-- 回归验证
-- 快速确认 `.rdc` 能否打开
-- 最小链路 smoke
+- `CLI`
+  - 本地直接执行入口。
+  - 适用于人工、脚本、CI、本地 Agent。
+  - 可以直接执行，也可以通过 `--connect` 复用 daemon。
+- daemon
+  - 长生命周期 runtime / context 持有层。
+  - 用于跨命令、跨轮次复用 live session、focus、recent artifacts 与 runtime owner。
+  - 不是 `MCP` 的附属概念；`CLI` 与 `MCP` 都可以依赖同一套 daemon / context 机制。
+- `MCP`
+  - 协议桥接入口。
+  - 适用于无法直接进入本地环境的外部宿主，或用户明确要求按 `MCP` 接入的场景。
+  - 提供 tool discovery、schema 化调用与外部 host 集成。
 
-`MCP` 更适合：
+因此，不应把“是否是 Agent”当成 `CLI` 与 `MCP` 的分界线。真正的分界线是：
 
-- 上层 Agent / framework 接入
-- 工具发现
-- 多步编排
-- 按任务动态决定后续 tool 序列
-
-因此，对 Agent 来说，`MCP` 是主接口；`CLI` 更像是人工与自动化验证入口。
+- 调用方能否直接进入本地环境。
+- 任务是否需要长期供应 live runtime / context。
 
 ## 7. 建议上层文档说明到什么程度
 
 上层框架文档建议描述：
 
-- 如何发现 tools
+- 宿主如何选择 `CLI`、daemon 与 `MCP`
+- 任务开始时如何声明当前入口模式
+- 选择 `MCP` 时如何校验 MCP server 已配置
 - 如何建立与复用 session
 - 如何保存关键状态
 - 如何通过 `rd.session.get_context` / `rd.session.update_context` 维护长链状态
