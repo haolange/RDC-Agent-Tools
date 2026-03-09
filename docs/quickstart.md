@@ -60,6 +60,16 @@ rdx daemon status
 rdx call rd.session.get_context --json --connect
 ```
 
+如果想用只读路径式方式快速探索当前 frame，也可以直接查看：
+
+```bat
+rdx vfs ls --path / --connect --json
+rdx vfs tree --path /draws --depth 2 --connect --json
+rdx vfs cat --path /pipeline --connect --json
+```
+
+`rd.vfs.*` / `rdx vfs *` 只负责导航与读取；真正的修改、导出、切换与 context 更新仍继续走原有 `rd.*` tools。
+
 ### 结束与清理
 
 ```bat

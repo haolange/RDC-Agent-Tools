@@ -129,6 +129,22 @@ async def _cmd_call(args: argparse.Namespace) -> int:
     return EXIT_OK if bool(payload.get("ok")) else EXIT_RUNTIME_ERR
 
 
+async def _cmd_vfs(args: argparse.Namespace) -> int:
+    op = f"rd.vfs.{args.vfs_cmd}"
+    call_args: Dict[str, Any] = {"path": str(args.path or "/")}
+    if getattr(args, "session_id", None):
+        call_args["session_id"] = str(args.session_id)
+    if args.vfs_cmd == "tree":
+        call_args["depth"] = int(args.depth)
+
+    if args.connect:
+        payload = _daemon_exec(op, call_args, context=str(args.daemon_context))
+    else:
+        payload = await _direct_exec(op, call_args)
+    _render_result(payload, as_json=bool(args.json))
+    return EXIT_OK if bool(payload.get("ok")) else EXIT_RUNTIME_ERR
+
+
 async def _cmd_capture_open(args: argparse.Namespace) -> int:
     file_path = str(Path(args.file).resolve())
 
@@ -372,6 +388,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p_capture_open.add_argument("--connect", action="store_true", help="Open capture in daemon session for cross-command reuse")
     s_capture.add_parser("status")
 
+    p_vfs = sub.add_parser("vfs", help="Read-only VFS navigation helpers")
+    s_vfs = p_vfs.add_subparsers(dest="vfs_cmd", required=True)
+    for name in ("ls", "cat", "resolve"):
+        p_vfs_cmd = s_vfs.add_parser(name)
+        p_vfs_cmd.add_argument("--path", default="/")
+        p_vfs_cmd.add_argument("--session-id", default=None)
+        p_vfs_cmd.add_argument("--json", action="store_true")
+        p_vfs_cmd.add_argument("--connect", action="store_true")
+    p_vfs_tree = s_vfs.add_parser("tree")
+    p_vfs_tree.add_argument("--path", default="/")
+    p_vfs_tree.add_argument("--session-id", default=None)
+    p_vfs_tree.add_argument("--depth", type=int, default=2)
+    p_vfs_tree.add_argument("--json", action="store_true")
+    p_vfs_tree.add_argument("--connect", action="store_true")
+
     p_diff = sub.add_parser("diff", help="Diff commands")
     s_diff = p_diff.add_subparsers(dest="diff_cmd", required=True)
     p_diff_pipeline = s_diff.add_parser("pipeline")
@@ -508,6 +539,9 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     if args.command == "call":
         return await _cmd_call(args)
+
+    if args.command == "vfs":
+        return await _cmd_vfs(args)
 
     if args.command == "capture":
         if args.capture_cmd == "open":

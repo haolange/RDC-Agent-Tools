@@ -15,6 +15,9 @@
   - 文档编码、互链与治理基线检查。
 - `release_gate.py`
   - 发布前结构、入口、报告与 manifest 门禁检查。
+  - 默认用于 clean checkout 结构门禁；若传入 `--require-smoke-reports`，或仓库内已有 first-party `.rdc` fixture，则 smoke 报告变为必需项。
+- `generate_release_checksums.py`
+  - 为源码 release 资产生成 `sha256` 校验文件。
 
 ### Smoke / Contract 检查
 

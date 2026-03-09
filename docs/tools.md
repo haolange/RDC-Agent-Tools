@@ -1,6 +1,6 @@
 ﻿# tool catalog 入口
 
-`rdx-tools` 当前暴露 catalog 定义的 `198` 个规范 `rd.*` tools。
+`rdx-tools` 当前暴露 catalog 定义的 `202` 个规范 `rd.*` tools。
 
 本文只承担 catalog 入口职责，不承担使用教程。如何建立 session、如何理解 `context` 与 daemon、如何给 Agent 写平台说明，请分别参考：
 
@@ -28,10 +28,21 @@
 
 当前公开 catalog 已包含：
 
+- `rd.vfs.ls`
+- `rd.vfs.cat`
+- `rd.vfs.tree`
+- `rd.vfs.resolve`
 - `rd.session.get_context`
 - `rd.session.update_context`
 
-它们用于暴露 context snapshot：
+其中 `rd.vfs.*` 的定位是：
+
+- 只读探索层，主要服务人类与 Agent 的路径式浏览。
+- 输出仍然是结构化 JSON，不再引入第二套 TSV/文本真相。
+- `rd.vfs.*` 只负责导航、解析和读取，不负责修改 runtime、切换 event、导出资源或更新 context。
+- 真正的 canonical tools 仍然是原有 `rd.*` 结构化接口；`rd.vfs.*` 会把这些 canonical tools 作为节点元数据暴露出来。
+
+其中 `rd.session.*` 用于暴露 context snapshot：
 
 - 读取当前 context 的 runtime / remote / focus / recent artifacts 状态。
 - 让上层 Agent 只补充 user-owned 字段，例如 `focus_pixel`、`focus_resource_id`、`focus_shader_id`、`notes`。

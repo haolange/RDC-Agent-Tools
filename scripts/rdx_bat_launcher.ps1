@@ -51,20 +51,83 @@ function Ensure-ToolsRootEnv {
     $env:RDX_TOOLS_ROOT = $ToolsRoot
 }
 
+function Test-PythonCandidate {
+    param([object]$PythonSpec)
+
+    $candidate = @(Normalize-PythonCommand -PythonSpec $PythonSpec)
+    if ($candidate.Count -eq 0) {
+        return $false
+    }
+
+    $exe = [string]$candidate[0]
+    if ([string]::IsNullOrWhiteSpace($exe)) {
+        return $false
+    }
+
+    $exeLower = $exe.ToLowerInvariant()
+    if ($exeLower.Contains('\windowsapps\')) {
+        return $false
+    }
+
+    $probeArgs = @()
+    if ($candidate.Count -gt 1) {
+        $probeArgs += @($candidate[1..($candidate.Count - 1)])
+    }
+    $probeArgs += @('-c', 'import sys; print(sys.executable)')
+
+    try {
+        $probeOutput = @(& $exe @probeArgs 2>&1)
+        $probeExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    }
+    catch {
+        return $false
+    }
+
+    if ($probeExitCode -ne 0) {
+        return $false
+    }
+
+    $joined = (($probeOutput | ForEach-Object { [string]$_ }) -join "`n").Trim()
+    if ([string]::IsNullOrWhiteSpace($joined)) {
+        return $false
+    }
+
+    $joinedLower = $joined.ToLowerInvariant()
+    if ($joinedLower.Contains('microsoft store') -or $joinedLower.Contains('app execution aliases')) {
+        return $false
+    }
+
+    return $true
+}
+
 function Resolve-Python {
     $envPython = [string]$env:RDX_PYTHON
-    if ($envPython -and (Test-Path -LiteralPath $envPython)) {
+    if ($envPython -and (Test-Path -LiteralPath $envPython) -and (Test-PythonCandidate -PythonSpec @([string]$envPython))) {
         return @([string]$envPython)
     }
 
-    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($pythonCmd) {
-        return @([string]$pythonCmd.Source)
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher -and (Test-PythonCandidate -PythonSpec @([string]$pyLauncher.Source, '-3'))) {
+        return @([string]$pyLauncher.Source, '-3')
     }
 
-    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
-    if ($pyLauncher) {
-        return @([string]$pyLauncher.Source, '-3')
+    $commonCandidates = @(
+        (Join-Path ([string]$env:LOCALAPPDATA) 'Python\bin\python.exe'),
+        (Join-Path ([string]$env:LOCALAPPDATA) 'Programs\Python\Python314\python.exe'),
+        (Join-Path ([string]$env:LOCALAPPDATA) 'Programs\Python\Python313\python.exe'),
+        (Join-Path ([string]$env:LOCALAPPDATA) 'Programs\Python\Python312\python.exe'),
+        (Join-Path ([string]$env:LOCALAPPDATA) 'Programs\Python\Python311\python.exe')
+    )
+    foreach ($candidate in $commonCandidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        if ((Test-Path -LiteralPath $candidate) -and (Test-PythonCandidate -PythonSpec @([string]$candidate))) {
+            return @([string]$candidate)
+        }
+    }
+
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCmd -and (Test-PythonCandidate -PythonSpec @([string]$pythonCmd.Source))) {
+        return @([string]$pythonCmd.Source)
     }
 
     throw 'python 3.x not found; set RDX_PYTHON or ensure python is installed.'

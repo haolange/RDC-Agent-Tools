@@ -20,7 +20,13 @@
    查阅 tool catalog 的权威入口与校验命令。
 8. [android-remote-cli-smoke-prompt.md](android-remote-cli-smoke-prompt.md)
    复用桌面 / Android 通用的分层 smoke / contract 执行 prompt。
-9. [../scripts/README.md](../scripts/README.md)
+9. [fixture-strategy.md](fixture-strategy.md)
+   查看 first-party `.rdc` fixture 与测试分层策略。
+10. [release-baseline.md](release-baseline.md)
+   查看当前发布基线、已校正口径与已知发布阻塞。
+11. [compatibility-notes.md](compatibility-notes.md)
+   查看当前兼容边界、分发定位与上层接线约束。
+12. [../scripts/README.md](../scripts/README.md)
    查看正式 `scripts/` 主链与治理规则。
 
 ## 文档边界

@@ -129,3 +129,22 @@ def test_parse_args_requires_remote_rdc_for_both_transport(monkeypatch, tmp_path
         tool_contract_check._parse_args()
 
     assert exc.value.code == 2
+
+
+def test_build_args_for_vfs_tools_use_vfs_paths(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="local", rdc_path=tmp_path / "sample.rdc", session_id="sess_demo")
+    files = {
+        "artifacts": tmp_path / "artifacts",
+        "sample": tmp_path / "sample.bin",
+        "text_a": tmp_path / "a.txt",
+        "text_b": tmp_path / "b.txt",
+        "png_a": tmp_path / "a.png",
+        "png_b": tmp_path / "b.png",
+        "zip_out": tmp_path / "bundle.zip",
+    }
+
+    tree_args = tool_contract_check._build_args("rd.vfs.tree", ["path", "session_id", "depth"], state, files)
+    resolve_args = tool_contract_check._build_args("rd.vfs.resolve", ["path", "session_id"], state, files)
+
+    assert tree_args == {"path": "/draws", "session_id": "sess_demo", "depth": 2}
+    assert resolve_args == {"path": "/pipeline", "session_id": "sess_demo"}

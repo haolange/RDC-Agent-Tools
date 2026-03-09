@@ -324,12 +324,13 @@ def _write_report(
     if not env_issues:
         lines.append("  - (none)")
 
+    catalog_target = int(tool_payload.get("catalog_count", 0) or 0)
     lines.extend(
         [
             "",
-            "## ??Catalog ??????",
-            f"- MCP target: 172（{_safe(transport_summaries['mcp']['total'])}）",
-            f"- Daemon target: 172（{_safe(transport_summaries['daemon']['total'])}）",
+            "## 三、Catalog 覆盖统计",
+            f"- MCP target: {catalog_target}（{_safe(transport_summaries['mcp']['total'])}）",
+            f"- Daemon target: {catalog_target}（{_safe(transport_summaries['daemon']['total'])}）",
             f"- MCP 本地有效: pass={transport_summaries['mcp']['pass']} scope_skip={transport_summaries['mcp']['scope_skip']} (effective={max(0, transport_summaries['mcp']['total'] - transport_summaries['mcp']['scope_skip'])})",
             f"- Daemon 本地有效: pass={transport_summaries['daemon']['pass']} scope_skip={transport_summaries['daemon']['scope_skip']} (effective={max(0, transport_summaries['daemon']['total'] - transport_summaries['daemon']['scope_skip'])})",
             "- rating:",

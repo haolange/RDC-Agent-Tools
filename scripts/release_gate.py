@@ -9,6 +9,7 @@ import json
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 SCRIPT_ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,14 @@ REQUIRED_DIRS = [
     "intermediate/pytest",
     "intermediate/logs",
 ]
+
+REQUIRED_FILES = [
+    "pyproject.toml",
+    "CHANGELOG.md",
+]
+
+FIXTURE_DIR = Path("tests/fixtures")
+FIXTURE_SUFFIXES = {".rdc"}
 
 CURRENT_REPORTS = [
     "intermediate/logs/rdx_bat_command_smoke.md",
@@ -57,7 +66,14 @@ TEXT_SCAN_SUFFIXES = {
 SCAN_SKIP_PREFIXES = {
     ".git/",
     "intermediate/",
+    "tests/",
 }
+
+
+@dataclass(frozen=True)
+class ScanRule:
+    pattern: str
+    literal: bool = False
 
 
 def _tools_root() -> Path:
@@ -82,15 +98,22 @@ def _run(cmd: list[str], cwd: Path) -> tuple[bool, str]:
     return ok, detail.strip()
 
 
-def _python_no_match(pattern: str, cwd: Path) -> tuple[bool, str]:
-    compiled = re.compile(pattern)
+def _match_line(text: str, rule: ScanRule, *, compiled: re.Pattern[str] | None = None) -> bool:
+    if rule.literal:
+        return rule.pattern in text
+    assert compiled is not None
+    return bool(compiled.search(text))
+
+
+def _python_no_match(rule: ScanRule, cwd: Path) -> tuple[bool, str]:
+    compiled = None if rule.literal else re.compile(rule.pattern)
     for path in cwd.rglob("*"):
         if path.is_dir():
             continue
         rel = str(path.relative_to(cwd)).replace("\\", "/")
         if any(rel.startswith(prefix) for prefix in SCAN_SKIP_PREFIXES):
             continue
-        if compiled.search(rel):
+        if _match_line(rel, rule, compiled=compiled):
             return False, rel
         if path.suffix.lower() not in TEXT_SCAN_SUFFIXES:
             continue
@@ -99,24 +122,26 @@ def _python_no_match(pattern: str, cwd: Path) -> tuple[bool, str]:
         except OSError:
             continue
         for lineno, line in enumerate(text.splitlines(), start=1):
-            if compiled.search(line):
+            if _match_line(line, rule, compiled=compiled):
                 return False, f"{rel}:{lineno}: {line.strip()}"
     return True, ""
 
 
-def _rg_no_match(pattern: str, cwd: Path) -> tuple[bool, str]:
+def _rg_no_match(rule: ScanRule, cwd: Path) -> tuple[bool, str]:
+    rg_args = [
+        "rg",
+        "-n",
+        "--glob",
+        "!.git/**",
+        "--glob",
+        "!intermediate/**",
+    ]
+    if rule.literal:
+        rg_args.append("-F")
+    rg_args.extend([rule.pattern, "."])
     try:
         proc = subprocess.run(
-            [
-                "rg",
-                "-n",
-                "--glob",
-                "!.git/**",
-                "--glob",
-                "!intermediate/**",
-                pattern,
-                ".",
-            ],
+            rg_args,
             cwd=str(cwd),
             capture_output=True,
             text=True,
@@ -125,7 +150,7 @@ def _rg_no_match(pattern: str, cwd: Path) -> tuple[bool, str]:
             check=False,
         )
     except OSError as exc:
-        ok, detail = _python_no_match(pattern, cwd)
+        ok, detail = _python_no_match(rule, cwd)
         if ok:
             return True, ""
         return False, f"(python fallback after {exc.__class__.__name__}) {detail}"
@@ -133,7 +158,7 @@ def _rg_no_match(pattern: str, cwd: Path) -> tuple[bool, str]:
         return True, ""
     if proc.returncode == 0:
         return False, (proc.stdout or "").strip()
-    ok, detail = _python_no_match(pattern, cwd)
+    ok, detail = _python_no_match(rule, cwd)
     if ok:
         return True, ""
     rg_detail = ((proc.stdout or "") + (proc.stderr or "")).strip()
@@ -173,16 +198,42 @@ def _check_manifest(root: Path) -> tuple[bool, str]:
     return True, f"validated {len(files)} runtime files"
 
 
-def _check_reports(root: Path) -> tuple[bool, str]:
+def _has_bundled_fixture(root: Path) -> bool:
+    fixture_root = root / FIXTURE_DIR
+    if not fixture_root.is_dir():
+        return False
+    for path in fixture_root.rglob("*"):
+        if path.is_file() and path.suffix.lower() in FIXTURE_SUFFIXES:
+            return True
+    return False
+
+
+def _check_reports(root: Path, *, require_smoke_reports: bool) -> tuple[bool, str]:
     missing = [rel for rel in CURRENT_REPORTS if not (root / rel).is_file()]
     if not missing:
         return True, "using current smoke reports"
-    return False, f"missing current reports: {', '.join(missing)}"
+
+    present = [rel for rel in CURRENT_REPORTS if rel not in missing]
+    if present:
+        return False, f"incomplete smoke reports: missing {', '.join(missing)}"
+
+    if require_smoke_reports or _has_bundled_fixture(root):
+        return False, f"missing current reports: {', '.join(missing)}"
+
+    return True, (
+        "smoke reports optional in clean checkout: no bundled first-party .rdc fixture; "
+        "run release smoke with explicit sample inputs before tagging a release"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run release gate checks")
     parser.add_argument("--report", default="intermediate/logs/release_gate_report.md")
+    parser.add_argument(
+        "--require-smoke-reports",
+        action="store_true",
+        help="Fail unless the current smoke reports are present.",
+    )
     args = parser.parse_args(argv)
 
     root = _tools_root()
@@ -191,12 +242,15 @@ def main(argv: list[str] | None = None) -> int:
     for rel in REQUIRED_DIRS:
         p = root / rel
         results.append((f"structure:{rel}", p.is_dir(), "" if p.is_dir() else f"missing {p}"))
+    for rel in REQUIRED_FILES:
+        p = root / rel
+        results.append((f"structure:{rel}", p.is_file(), "" if p.is_file() else f"missing {p}"))
 
-    ext_pattern = "extens" + r"ions[/\]"
-    dbg_pattern = "debug" + "-agent|frame" + "works"
-    ok_ext, out_ext = _rg_no_match(ext_pattern, cwd=root)
+    ext_rule = ScanRule(pattern="extensions" + "/", literal=True)
+    dbg_rule = ScanRule(pattern="debug" + "-agent|RDC-Agent-" + "Frameworks")
+    ok_ext, out_ext = _rg_no_match(ext_rule, cwd=root)
     results.append(("refs:no_extensions_path", ok_ext, out_ext))
-    ok_fw, out_fw = _rg_no_match(dbg_pattern, cwd=root)
+    ok_fw, out_fw = _rg_no_match(dbg_rule, cwd=root)
     results.append(("refs:no_debug_fw_terms", ok_fw, out_fw))
 
     ok_manifest, msg_manifest = _check_manifest(root)
@@ -211,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     ok_md_health, md_health = _run([sys.executable, "scripts/check_markdown_health.py"], cwd=root)
     results.append(("docs:markdown-health", ok_md_health, md_health))
 
-    ok_reports, report_detail = _check_reports(root)
+    ok_reports, report_detail = _check_reports(root, require_smoke_reports=bool(args.require_smoke_reports))
     results.append(("reports:smoke-suite", ok_reports, report_detail))
 
     ok_all = all(item[1] for item in results)

@@ -1149,6 +1149,15 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
                 args[param] = str(files["artifacts"] / f"{state.matrix}_{tool.replace('.', '_')}.out")
         elif param == "paths":
             args[param] = [str(files["sample"]), str(files["png_a"])]
+        elif param == "path" and tool.startswith("rd.vfs."):
+            if tool == "rd.vfs.ls":
+                args[param] = "/"
+            elif tool == "rd.vfs.tree":
+                args[param] = "/draws"
+            elif tool == "rd.vfs.resolve":
+                args[param] = "/pipeline"
+            else:
+                args[param] = "/context"
         elif param == "path":
             args[param] = str(files["sample"])
         elif param in {"image_a_path", "image_b_path"}:
@@ -1189,12 +1198,13 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
             "rt_index",
             "array_index",
             "slot",
+            "depth",
             "expand_depth",
             "max_variables",
             "older_than_ms",
             "max_total_bytes",
         }:
-            args[param] = 0
+            args[param] = 2 if tool == "rd.vfs.tree" and param == "depth" else 0
         elif param == "timeout_ms":
             args[param] = 50 if tool == "rd.debug.run_to" else 0
         elif param in {"view", "instance", "view_index"}:

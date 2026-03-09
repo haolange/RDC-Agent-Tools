@@ -55,7 +55,8 @@ rdx.bat --non-interactive mcp --ensure-env
 
 `MCP` server 入口，适合无法直接进入本地环境的外部宿主，或用户明确要求按 `MCP` 接入的场景。
 
-- 暴露 catalog 当前定义的全部 `rd.*` tools；当前 `tool_count` 为 `198`。
+- 暴露 catalog 当前定义的全部 `rd.*` tools；当前 `tool_count` 为 `202`。
+- 新增只读 `rd.vfs.*` 入口，用于以 JSON-first 方式探索 draw/pass/resource/pipeline/context 结构。
 - 已公开包含 `rd.session.get_context` 与 `rd.session.update_context`。
 - 由上层 client 进行 tool discovery、参数组织与调用编排。
 
@@ -109,7 +110,11 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - [docs/troubleshooting.md](docs/troubleshooting.md)：常见故障与恢复
 - [docs/tools.md](docs/tools.md)：tool catalog 入口与校验方式
 - [docs/android-remote-cli-smoke-prompt.md](docs/android-remote-cli-smoke-prompt.md)：桌面 / Android 分层 smoke 与 contract 测试模板
+- [docs/fixture-strategy.md](docs/fixture-strategy.md)：first-party `.rdc` fixture 与测试分层策略
+- [docs/release-baseline.md](docs/release-baseline.md)：当前发布基线与已校正口径
+- [docs/compatibility-notes.md](docs/compatibility-notes.md)：当前兼容边界与分发定位
 - [scripts/README.md](scripts/README.md)：正式 `scripts/` 主链与治理规则
+- [CHANGELOG.md](CHANGELOG.md)：最近一轮发布级变更摘要
 
 ## `scripts/` 说明
 
@@ -119,11 +124,12 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 ## 关键约束
 
 - tool catalog 的权威来源是 `spec/tool_catalog.json`。
-- catalog 当前数量以 `tool_count` 字段为准；当前为 `198`，后续变更必须同步更新 validator、help 输出与文档口径。
+- catalog 当前数量以 `tool_count` 字段为准；当前为 `202`，后续变更必须同步更新 validator、help 输出与文档口径。
 - 运行时响应遵循共享契约；调试时优先检查 `ok`、`error_message`，必要时继续看 `error.details`。
 - 默认参考根目录由 `rdx.bat` 或脚本自身位置推导；`RDX_TOOLS_ROOT` 仅用于覆盖默认值。
 - `rd.event.set_active` 若收到不可解析的 `event_id`，必须失败且保持现有 runtime / context 状态不变。
 - `rd.capture.close_file` 若目标 `capture_file_id` 仍被 live replay 持有，必须失败；推荐顺序是 `rd.capture.close_replay -> rd.capture.close_file`。
+- `rd.vfs.*` 是只读探索层，不替代结构化 `rd.*` canonical tools；所有修改、切换、导出与 context 更新仍继续通过原有 `rd.*` API 完成。
 
 ## 验证
 

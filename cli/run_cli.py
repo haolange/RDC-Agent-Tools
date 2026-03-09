@@ -92,6 +92,7 @@ def _print_launcher_help() -> None:
     print("  context clear")
     print("  call <operation> [--args-json ...] [--json] [--remote] [--connect]")
     print("  capture open|status")
+    print("  vfs ls|cat|tree|resolve")
     print("  diff pipeline|image")
     print("  assert pipeline|image")
     print("")
@@ -99,6 +100,7 @@ def _print_launcher_help() -> None:
     print("  python cli/run_cli.py daemon start --daemon-context local")
     print("  python cli/run_cli.py context clear --daemon-context local")
     print("  python cli/run_cli.py capture open --file D:\\path\\capture.rdc --frame-index 0 --connect")
+    print("  python cli/run_cli.py vfs tree --path /draws --depth 2 --connect")
 
 
 def main(argv: list[str] | None = None) -> int:

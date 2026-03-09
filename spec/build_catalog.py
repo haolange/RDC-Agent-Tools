@@ -17,7 +17,8 @@ _PARAM_NAME_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _SECTION_HEADING_RE = re.compile(r"^[\u4e00-\u9fff]+[\u3001\uff0c]")
 _WORD_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 _CONTEXT_GROUP = "3.17\uff0c\u4e0a\u4e0b\u6587\u5feb\u7167\u5de5\u5177 (Context Snapshot Tools)"
-_CONTEXT_TOOLS = [
+_VFS_GROUP = "3.18\uff0cVFS \u5bfc\u822a\u5de5\u5177 (VFS Navigation Tools)"
+_MANUAL_TOOLS = [
     {
         "name": "rd.session.get_context",
         "group": _CONTEXT_GROUP,
@@ -31,6 +32,34 @@ _CONTEXT_TOOLS = [
         "description": "\u66f4\u65b0\u5f53\u524d context \u7684 user-owned \u5b57\u6bb5\uff0c\u4f8b\u5982 focus_pixel\u3001focus_resource_id\u3001focus_shader_id \u4e0e notes\u3002",
         "parameter_raw": "key (str)<br>value (json, \u53ef\u9009): \u4f20 null \u8868\u793a\u6e05\u9664\u5bf9\u5e94 user-owned \u5b57\u6bb5",
         "returns_raw": "success (bool)<br>context_id (str)<br>runtime (dict): {session_id, capture_file_id, frame_index, active_event_id, backend_type}<br>remote (dict): {state, remote_id, origin_remote_id, endpoint, consumed_by_session_id}<br>focus (dict): {pixel?, resource_id?, shader_id?}<br>notes (str)<br>last_artifacts (list)<br>updated_at_ms (int)<br>error_message (str, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.vfs.ls",
+        "group": _VFS_GROUP,
+        "description": "\u4ee5 JSON-first \u65b9\u5f0f\u5217\u51fa read-only VFS \u8282\u70b9\uff0c\u7528\u4e8e\u63a2\u7d22 draws/passes/resources/context/artifacts \u7b49\u8def\u5f84\u7a7a\u95f4\u3002",
+        "parameter_raw": "path (str, \u53ef\u9009, \u9ed8\u8ba4 '/'): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
+        "returns_raw": "success (bool)<br>path (str)<br>entries (list[dict]): \u6bcf\u9879\u5305\u542b {name, path, kind, requires_session, summary?}<br>resolved_session_id (str, \u53ef\u9009)<br>context_id (str)<br>error_message (str, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.vfs.cat",
+        "group": _VFS_GROUP,
+        "description": "\u8bfb\u53d6 read-only VFS \u8282\u70b9\u7684 JSON \u8868\u793a\uff0c\u4e0d\u65b0\u589e\u7b2c\u4e8c\u5957\u5e73\u884c\u771f\u76f8\uff0c\u800c\u662f\u5bf9\u5e95\u5c42 rd.* \u80fd\u529b\u7684\u5bfc\u822a\u5c01\u88c5\u3002",
+        "parameter_raw": "path (str): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
+        "returns_raw": "success (bool)<br>path (str)<br>kind (str): \u8282\u70b9\u7c7b\u578b<br>value (json): \u8282\u70b9\u7684 JSON \u503c<br>resolved_session_id (str, \u53ef\u9009)<br>context_id (str)<br>error_message (str, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.vfs.tree",
+        "group": _VFS_GROUP,
+        "description": "\u6309\u7167 VFS \u8def\u5f84\u8fd4\u56de\u6811\u5f62 read-only \u89c6\u56fe\uff0c\u9ed8\u8ba4\u4ee5\u7ed3\u6784\u5316 JSON \u8868\u793a\u8282\u70b9\u4e0e children\u3002",
+        "parameter_raw": "path (str, \u53ef\u9009, \u9ed8\u8ba4 '/'): VFS \u8d77\u70b9\u8def\u5f84<br>depth (int, \u53ef\u9009, \u9ed8\u8ba4 2): \u9012\u5f52\u6df1\u5ea6<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
+        "returns_raw": "success (bool)<br>path (str)<br>depth (int)<br>tree (dict): \u5305\u542b {name, path, kind, children?}<br>resolved_session_id (str, \u53ef\u9009)<br>context_id (str)<br>error_message (str, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.vfs.resolve",
+        "group": _VFS_GROUP,
+        "description": "\u89e3\u6790 VFS \u8def\u5f84\u5230\u5bf9\u5e94\u8282\u70b9\u5143\u6570\u636e\uff0c\u7528\u4e8e\u5224\u65ad path \u662f\u5426\u5b58\u5728\u3001\u662f\u5426\u9700\u8981 session \u4ee5\u53ca\u53ef\u4f7f\u7528\u54ea\u7c7b\u89c6\u56fe\u3002",
+        "parameter_raw": "path (str): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
+        "returns_raw": "success (bool)<br>path (str)<br>node (dict): \u5305\u542b {name, path, kind, exists, requires_session, operations, summary?}<br>resolved_session_id (str, \u53ef\u9009)<br>context_id (str)<br>error_message (str, \u53ef\u9009)",
     },
 ]
 
@@ -184,7 +213,7 @@ def build_catalog(source_path: Path, output_path: Path) -> Dict[str, Any]:
         )
 
     existing = {tool["name"] for tool in tools}
-    for row in _CONTEXT_TOOLS:
+    for row in _MANUAL_TOOLS:
         if row["name"] in existing:
             continue
         parameter_raw = row["parameter_raw"]

@@ -1,7 +1,7 @@
 {
   "source_path": "spec/doc_extracted.txt",
-  "tool_count": 198,
-  "generated_at": "2026-03-07T16:52:34.752055Z",
+  "tool_count": 202,
+  "generated_at": "2026-03-09T18:27:33.487543Z",
   "groups": {
     "3.1，核心与环境管理 (Core & Environment)": 9,
     "3.2，捕获文件与 Replay Session (Capture & Replay)": 13,
@@ -19,7 +19,8 @@
     "3.14，诊断工具 (Diagnostics, Heuristic Checks)": 11,
     "3.15，专家级宏工作流 (Expert Macro Workflows)": 14,
     "3.16，通用辅助工具 (Utilities, Optional)": 6,
-    "3.17，上下文快照工具 (Context Snapshot Tools)": 2
+    "3.17，上下文快照工具 (Context Snapshot Tools)": 2,
+    "3.18，VFS 导航工具 (VFS Navigation Tools)": 4
   },
   "tools": [
     {
@@ -2397,6 +2398,51 @@
       "param_names": [
         "key",
         "value"
+      ]
+    },
+    {
+      "name": "rd.vfs.ls",
+      "group": "3.18，VFS 导航工具 (VFS Navigation Tools)",
+      "description": "以 JSON-first 方式列出 read-only VFS 节点，用于探索 draws/passes/resources/context/artifacts 等路径空间。",
+      "parameter_raw": "path (str, 可选, 默认 '/'): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session",
+      "returns_raw": "success (bool)<br>path (str)<br>entries (list[dict]): 每项包含 {name, path, kind, requires_session, summary?}<br>resolved_session_id (str, 可选)<br>context_id (str)<br>error_message (str, 可选)",
+      "param_names": [
+        "path",
+        "session_id"
+      ]
+    },
+    {
+      "name": "rd.vfs.cat",
+      "group": "3.18，VFS 导航工具 (VFS Navigation Tools)",
+      "description": "读取 read-only VFS 节点的 JSON 表示，不新增第二套平行真相，而是对底层 rd.* 能力的导航封装。",
+      "parameter_raw": "path (str): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session",
+      "returns_raw": "success (bool)<br>path (str)<br>kind (str): 节点类型<br>value (json): 节点的 JSON 值<br>resolved_session_id (str, 可选)<br>context_id (str)<br>error_message (str, 可选)",
+      "param_names": [
+        "path",
+        "session_id"
+      ]
+    },
+    {
+      "name": "rd.vfs.tree",
+      "group": "3.18，VFS 导航工具 (VFS Navigation Tools)",
+      "description": "按照 VFS 路径返回树形 read-only 视图，默认以结构化 JSON 表示节点与 children。",
+      "parameter_raw": "path (str, 可选, 默认 '/'): VFS 起点路径<br>depth (int, 可选, 默认 2): 递归深度<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session",
+      "returns_raw": "success (bool)<br>path (str)<br>depth (int)<br>tree (dict): 包含 {name, path, kind, children?}<br>resolved_session_id (str, 可选)<br>context_id (str)<br>error_message (str, 可选)",
+      "param_names": [
+        "path",
+        "depth",
+        "session_id"
+      ]
+    },
+    {
+      "name": "rd.vfs.resolve",
+      "group": "3.18，VFS 导航工具 (VFS Navigation Tools)",
+      "description": "解析 VFS 路径到对应节点元数据，用于判断 path 是否存在、是否需要 session 以及可使用哪类视图。",
+      "parameter_raw": "path (str): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session",
+      "returns_raw": "success (bool)<br>path (str)<br>node (dict): 包含 {name, path, kind, exists, requires_session, operations, summary?}<br>resolved_session_id (str, 可选)<br>context_id (str)<br>error_message (str, 可选)",
+      "param_names": [
+        "path",
+        "session_id"
       ]
     }
   ]
