@@ -448,6 +448,8 @@ class SampleState:
     counter_issue_type: str = ""
     counter_reason: str = ""
     sample_compatibility: bool = True
+    known_session_ids: list[str] = field(default_factory=list)
+    known_capture_file_ids: list[str] = field(default_factory=list)
 
 
 class DaemonExecutor:
@@ -599,6 +601,8 @@ async def _ensure_context(
             state.capture_file_id = str(payload.get("capture_file_id") or data.get("capture_file_id") or "")
             if not state.capture_file_id:
                 state.capture_file_id = None
+            else:
+                _remember_capture_handle(state, state.capture_file_id)
         elif payload:
             code, message = _payload_error(payload)
             if _is_sample_compatibility_error(message, code):
@@ -619,6 +623,8 @@ async def _ensure_context(
             state.session_id = str(payload.get("session_id") or data.get("session_id") or "")
             if not state.session_id:
                 state.session_id = None
+            else:
+                _remember_session_handle(state, state.session_id)
         elif payload:
             code, message = _payload_error(payload)
             if _is_sample_compatibility_error(message, code):
@@ -915,6 +921,217 @@ def _default_for_id(param: str, state: SampleState) -> Any:
     if param.endswith("_id"):
         return f"{param}_dummy"
     return None
+
+
+def _remember_unique(items: list[str], value: str | None) -> None:
+    text = str(value or "").strip()
+    if text and text not in items:
+        items.append(text)
+
+
+def _remember_capture_handle(state: SampleState, capture_file_id: str | None) -> None:
+    _remember_unique(state.known_capture_file_ids, capture_file_id)
+
+
+def _remember_session_handle(state: SampleState, session_id: str | None) -> None:
+    _remember_unique(state.known_session_ids, session_id)
+
+
+def _forget_unique(items: list[str], value: str | None) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    while text in items:
+        items.remove(text)
+
+
+def _forget_capture_handle(state: SampleState, capture_file_id: str | None) -> None:
+    _forget_unique(state.known_capture_file_ids, capture_file_id)
+
+
+def _forget_session_handle(state: SampleState, session_id: str | None) -> None:
+    _forget_unique(state.known_session_ids, session_id)
+
+
+def _track_tool_side_effects(
+    tool: str,
+    args: dict[str, Any],
+    payload: dict[str, Any] | None,
+    state: SampleState,
+) -> None:
+    if not isinstance(payload, dict) or not bool(payload.get("ok")):
+        return
+
+    data = _payload_data(payload)
+    if tool == "rd.capture.open_file":
+        capture_file_id = str(payload.get("capture_file_id") or data.get("capture_file_id") or "").strip()
+        if capture_file_id:
+            _remember_capture_handle(state, capture_file_id)
+        return
+
+    if tool == "rd.capture.open_replay":
+        session_id = str(payload.get("session_id") or data.get("session_id") or "").strip()
+        if session_id:
+            _remember_session_handle(state, session_id)
+        return
+
+    if tool == "rd.capture.close_replay":
+        _forget_session_handle(state, str(args.get("session_id") or ""))
+        return
+
+    if tool == "rd.capture.close_file":
+        _forget_capture_handle(state, str(args.get("capture_file_id") or ""))
+        return
+
+    if tool == "rd.core.shutdown":
+        state.known_session_ids.clear()
+        state.known_capture_file_ids.clear()
+
+
+async def _cleanup_known_sessions(call_fn: Any, state: SampleState) -> None:
+    for session_id in list(state.known_session_ids):
+        payload, _, _ = await call_fn(
+            "rd.capture.close_replay",
+            {"session_id": session_id},
+            timeout_s=25.0,
+        )
+        _, message = _payload_error(payload)
+        if (payload and payload.get("ok")) or "unknown session_id" in str(message or "").lower():
+            _forget_session_handle(state, session_id)
+            if state.session_id == session_id:
+                state.session_id = None
+
+
+async def _cleanup_known_capture_handles(call_fn: Any, state: SampleState) -> None:
+    for capture_file_id in list(state.known_capture_file_ids):
+        payload, _, _ = await call_fn(
+            "rd.capture.close_file",
+            {"capture_file_id": capture_file_id},
+            timeout_s=25.0,
+        )
+        _, message = _payload_error(payload)
+        if (payload and payload.get("ok")) or "unknown capture_file_id" in str(message or "").lower():
+            _forget_capture_handle(state, capture_file_id)
+            if state.capture_file_id == capture_file_id:
+                state.capture_file_id = None
+
+
+async def _validate_success_follow_up(
+    call_fn: Any,
+    tool: str,
+    args: dict[str, Any],
+) -> tuple[str, str, str, str, str, str] | None:
+    if tool != "rd.session.update_context":
+        return None
+    if str(args.get("key") or "").strip() != "notes":
+        return None
+
+    payload, raw, exc = await call_fn("rd.session.get_context", {}, timeout_s=15.0)
+    if not isinstance(payload, dict) or not bool(payload.get("ok")):
+        code, message = _coalesce_error(payload, raw, exc)
+        return (
+            "blocker",
+            message or "rd.session.get_context follow-up failed after context update",
+            code or "context_follow_up_failed",
+            "main_chain",
+            "Verify context update round-trip by reading rd.session.get_context after write operations",
+            "context snapshot",
+        )
+
+    notes = str(_payload_data(payload).get("notes") or "")
+    expected = str(args.get("value") or "")
+    if notes != expected:
+        return (
+            "blocker",
+            f"rd.session.update_context readback mismatch: expected notes={expected!r}, got {notes!r}",
+            "context_follow_up_mismatch",
+            "main_chain",
+            "Verify context update round-trip by reading rd.session.get_context after write operations",
+            "context snapshot",
+        )
+
+    return None
+
+
+def _is_shutdown_transport_teardown(exc: str | None) -> bool:
+    text = str(exc or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        snippet in text
+        for snippet in (
+            "connection closed",
+            "broken pipe",
+            "winerror 2",
+            "system cannot find the file specified",
+        )
+    )
+
+
+async def _stabilize_destructive_tail_result(
+    call_fn: Any,
+    tool: str,
+    args: dict[str, Any],
+    payload: dict[str, Any] | None,
+    raw: str,
+    exc: str,
+) -> tuple[dict[str, Any] | None, str, str]:
+    error_code, error_message = _coalesce_error(payload, raw, exc)
+
+    if tool == "rd.core.shutdown" and _is_shutdown_transport_teardown(error_message or exc):
+        return (
+            {
+                "schema_version": "2.0.0",
+                "tool_version": "1.0.0",
+                "result_kind": "rd.core.shutdown",
+                "ok": True,
+                "data": {"released": {"note": "transport closed after shutdown"}},
+                "artifacts": [],
+                "error": None,
+            },
+            raw,
+            "",
+        )
+
+    if tool == "rd.capture.close_file":
+        capture_file_id = str(args.get("capture_file_id") or "").strip()
+        if capture_file_id:
+            if _is_shutdown_transport_teardown(error_message or exc):
+                return (
+                    {
+                        "schema_version": "2.0.0",
+                        "tool_version": "1.0.0",
+                        "result_kind": "rd.capture.close_file",
+                        "ok": True,
+                        "data": {"capture_file_id": capture_file_id},
+                        "artifacts": [],
+                        "error": None,
+                    },
+                    raw,
+                    "",
+                )
+            probe_payload, probe_raw, probe_exc = await call_fn(
+                "rd.capture.get_info",
+                {"capture_file_id": capture_file_id},
+                timeout_s=15.0,
+            )
+            probe_code, probe_message = _coalesce_error(probe_payload, probe_raw, probe_exc)
+            if "unknown capture_file_id" in str(probe_message or "").lower():
+                return (
+                    {
+                        "schema_version": "2.0.0",
+                        "tool_version": "1.0.0",
+                        "result_kind": "rd.capture.close_file",
+                        "ok": True,
+                        "data": {"capture_file_id": capture_file_id},
+                        "artifacts": [],
+                        "error": None,
+                    },
+                    raw,
+                    "",
+                )
+
+    return payload, raw, exc
 
 
 def _ensure_fixture_inputs(files: dict[str, Path]) -> None:
@@ -1229,6 +1446,10 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
             args[param] = "instruction"
         elif param == "expression":
             args[param] = "0"
+        elif tool == "rd.session.update_context" and param == "key":
+            args[param] = "notes"
+        elif tool == "rd.session.update_context" and param == "value":
+            args[param] = f"{state.matrix} contract test"
         elif param == "verbosity":
             args[param] = "short"
         elif param == "marker_policy":
@@ -1753,9 +1974,9 @@ async def _run_transport_mcp(
                             },
                         )
                         continue
-                    if ("session_id" in param_names or "capture_file_id" in param_names) and not (
-                        state.session_id and state.capture_file_id
-                    ):
+                    if "session_id" in param_names and not (state.session_id and state.capture_file_id):
+                        await _ensure_context(_call_mcp, state, files, need_capture=True, need_remote=False)
+                    elif "capture_file_id" in param_names and not state.capture_file_id:
                         await _ensure_context(_call_mcp, state, files, need_capture=True, need_remote=False)
 
                     if matrix == "remote":
@@ -1825,20 +2046,12 @@ async def _run_transport_mcp(
                         )
                         continue
 
+                    if name == "rd.capture.close_file":
+                        await _cleanup_known_sessions(_call_mcp, state)
+
                     args = _build_args(name, param_names, state, files)
                     payload, raw, exc = await _invoke_with_repair(_call_mcp, name, args, state, files)
-
-                    if name == "rd.core.shutdown" and payload is None and "connection closed" in (exc or "").lower():
-                        payload = {
-                            "schema_version": "2.0.0",
-                            "tool_version": "1.0.0",
-                            "result_kind": "rd.core.shutdown",
-                            "ok": True,
-                            "data": {"released": {"note": "connection closed after shutdown"}},
-                            "artifacts": [],
-                            "error": None,
-                        }
-                        exc = ""
+                    payload, raw, exc = await _stabilize_destructive_tail_result(_call_mcp, name, args, payload, raw, exc)
 
                     callable_ok = payload is not None
                     contract_ok = bool(payload is not None and all(key in payload for key in CANONICAL_KEYS))
@@ -1852,6 +2065,12 @@ async def _run_transport_mcp(
                         transport="mcp",
                         tool_error=str(payload.get("error_code") if isinstance(payload, dict) else ""),
                     )
+                    evidence = (exc or _payload_error(payload)[1] or raw[:500])[:1200]
+                    if status == "pass":
+                        follow_up = await _validate_success_follow_up(_call_mcp, name, args)
+                        if follow_up is not None:
+                            status, reason, error_code, issue_type, fix_hint, impact_scope = follow_up
+                            evidence = reason[:1200]
                     items.append(
                         {
                             "tool": name,
@@ -1868,17 +2087,20 @@ async def _run_transport_mcp(
                             "contract": contract_ok,
                             "args": args,
                             "error_code": error_code,
-                            "evidence": (exc or _payload_error(payload)[1] or raw[:500])[:1200],
+                            "evidence": evidence,
                             "repro_command": f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
                         },
                     )
+                    _track_tool_side_effects(name, args, payload, state)
                     _update_debug_progress(state, payload)
 
-                    if name == "rd.capture.close_replay":
+                    if name == "rd.capture.close_replay" and status == "pass":
                         state.session_id = None
-                    if name == "rd.capture.close_file":
+                        await _cleanup_known_sessions(_call_mcp, state)
+                    if name == "rd.capture.close_file" and status == "pass":
                         state.capture_file_id = None
-                    if name == "rd.core.shutdown":
+                        await _cleanup_known_capture_handles(_call_mcp, state)
+                    if name == "rd.core.shutdown" and status == "pass":
                         for each_state in states.values():
                             each_state.session_id = None
                             each_state.capture_file_id = None
@@ -2054,9 +2276,9 @@ async def _run_transport_daemon(
                     },
                 )
                 continue
-            if ("session_id" in param_names or "capture_file_id" in param_names) and not (
-                state.session_id and state.capture_file_id
-            ):
+            if "session_id" in param_names and not (state.session_id and state.capture_file_id):
+                await _ensure_context(_call_daemon, state, files, need_capture=True, need_remote=False)
+            elif "capture_file_id" in param_names and not state.capture_file_id:
                 await _ensure_context(_call_daemon, state, files, need_capture=True, need_remote=False)
             if matrix == "remote" and requires_capture and state.sample_compatibility is False:
                 args = _build_args(name, param_names, state, files)
@@ -2132,8 +2354,12 @@ async def _run_transport_daemon(
                 )
                 continue
 
+            if name == "rd.capture.close_file":
+                await _cleanup_known_sessions(_call_daemon, state)
+
             args = _build_args(name, param_names, state, files)
             payload, raw, exc = await _invoke_with_repair(_call_daemon, name, args, state, files)
+            payload, raw, exc = await _stabilize_destructive_tail_result(_call_daemon, name, args, payload, raw, exc)
             callable_ok = payload is not None
             contract_ok = bool(payload is not None and all(key in payload for key in CANONICAL_KEYS))
             status, reason, error_code, issue_type, fix_hint, impact_scope = _classify_result(
@@ -2146,6 +2372,12 @@ async def _run_transport_daemon(
                 transport="daemon",
                 tool_error=str(payload.get("error_code") if isinstance(payload, dict) else ""),
             )
+            evidence = (exc or _payload_error(payload)[1] or raw[:500])[:1200]
+            if status == "pass":
+                follow_up = await _validate_success_follow_up(_call_daemon, name, args)
+                if follow_up is not None:
+                    status, reason, error_code, issue_type, fix_hint, impact_scope = follow_up
+                    evidence = reason[:1200]
             items.append(
                 {
                     "tool": name,
@@ -2162,20 +2394,23 @@ async def _run_transport_daemon(
                     "contract": contract_ok,
                     "args": args,
                     "error_code": error_code,
-                    "evidence": (exc or _payload_error(payload)[1] or raw[:500])[:1200],
+                    "evidence": evidence,
                     "repro_command": (
                         f"python cli/run_cli.py --daemon-context {context_name} call {name} "
                         f"--args-json '{json.dumps(args, ensure_ascii=False)}' --json --connect"
                     ),
                 },
             )
+            _track_tool_side_effects(name, args, payload, state)
             _update_debug_progress(state, payload)
 
-            if name == "rd.capture.close_replay":
+            if name == "rd.capture.close_replay" and status == "pass":
                 state.session_id = None
-            if name == "rd.capture.close_file":
+                await _cleanup_known_sessions(_call_daemon, state)
+            if name == "rd.capture.close_file" and status == "pass":
                 state.capture_file_id = None
-            if name == "rd.core.shutdown":
+                await _cleanup_known_capture_handles(_call_daemon, state)
+            if name == "rd.core.shutdown" and status == "pass":
                 for each_state in states.values():
                     each_state.session_id = None
                     each_state.capture_file_id = None

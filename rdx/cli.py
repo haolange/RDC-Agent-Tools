@@ -358,7 +358,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s_daemon.add_parser("status")
     p_daemon_attach = s_daemon.add_parser("attach", help=argparse.SUPPRESS)
     p_daemon_attach.add_argument("--client-id", required=True)
-    p_daemon_attach.add_argument("--client-type", default="cli-shell")
+    p_daemon_attach.add_argument("--client-type", default="cli")
     p_daemon_attach.add_argument("--pid", type=int, default=0)
     p_daemon_attach.add_argument("--lease-timeout-seconds", type=int, default=120)
     p_daemon_heartbeat = s_daemon.add_parser("heartbeat", help=argparse.SUPPRESS)

@@ -148,3 +148,25 @@ def test_build_args_for_vfs_tools_use_vfs_paths(tmp_path: Path) -> None:
 
     assert tree_args == {"path": "/draws", "session_id": "sess_demo", "depth": 2}
     assert resolve_args == {"path": "/pipeline", "session_id": "sess_demo"}
+
+
+def test_build_args_for_session_update_context_uses_notes_round_trip_payload(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="local", rdc_path=tmp_path / "sample.rdc")
+    files = {
+        "artifacts": tmp_path / "artifacts",
+        "sample": tmp_path / "sample.bin",
+        "text_a": tmp_path / "a.txt",
+        "text_b": tmp_path / "b.txt",
+        "png_a": tmp_path / "a.png",
+        "png_b": tmp_path / "b.png",
+        "zip_out": tmp_path / "bundle.zip",
+    }
+
+    args = tool_contract_check._build_args(
+        "rd.session.update_context",
+        ["key", "value"],
+        state,
+        files,
+    )
+
+    assert args == {"key": "notes", "value": "local contract test"}

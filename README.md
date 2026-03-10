@@ -40,6 +40,7 @@
 
 ```bat
 rdx.bat
+rdx.bat --non-interactive cli --help
 rdx.bat --non-interactive mcp --ensure-env
 ```
 
@@ -120,6 +121,14 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 
 正式支持的脚本主链见 [scripts/README.md](scripts/README.md)。
 一次性调查脚本不属于受支持的仓库接口。
+
+若需要把真实 local smoke 纳入发布门禁：
+
+- 继续通过显式参数把外部 `.rdc` 样本传给 `tool_contract_check.py`
+- 生成当前 `rdx_bat_command_smoke.*`、`tool_contract_report.*`、`rdx_smoke_issues_blockers.md`、`rdx_smoke_detailed_report.md`
+- 再执行 `python scripts/release_gate.py --require-smoke-reports`
+
+此时 `release_gate.py` 不再只看报告文件是否存在，而会读取当前 smoke truth JSON，确认 command / MCP / daemon 都没有 blocker 或 fatal error。
 
 ## 关键约束
 

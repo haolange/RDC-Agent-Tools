@@ -43,6 +43,7 @@
 - 禁止把个人机器路径、个人 `adb.exe`、设备 serial 或桌面样本路径硬编码到正式脚本默认值中。
 - 一次性调查脚本、单样本探针、参数实验脚本、仅用于复盘的报告生成脚本，不属于主仓库正式接口。
 - 如果正式脚本集合或脚本接口发生变化，必须在同一次交付中同步更新 `scripts/README.md`、相关文档与测试。
+- `python scripts/release_gate.py --require-smoke-reports` 属于真 smoke 门禁：不允许只靠报告文件存在性通过，必须以当前 smoke truth 为准。
 
 ## 必须保留的目录结构
 

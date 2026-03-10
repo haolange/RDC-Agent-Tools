@@ -29,11 +29,13 @@
 
 ## 当前发布阻塞
 
-- 缺少 first-party `.rdc` 正式 fixture，因此 `tool_contract_check.py` 与 release gate 的 smoke 报告仍需要显式输入样本或预生成报告。
+- 缺少 first-party `.rdc` 正式 fixture，因此 local-only smoke 仍需要显式传入外部样本；当前闭环依赖注入式样本，而不是仓库内置 fixture。
 - `release_gate.py` 现在应当做到：
   - 干净 checkout 下可完成结构 / 入口 / 文档 / manifest 门禁；
-  - 若仓库内已经存在 first-party `.rdc` fixture，或显式使用 `--require-smoke-reports`，则必须补齐当前 smoke 报告；
+  - 若仓库内已经存在 first-party `.rdc` fixture，或显式使用 `--require-smoke-reports`，则必须补齐当前 smoke 报告与 truth JSON；
+  - `--require-smoke-reports` 不是“只看文件存在”，而是要读取当前 command / MCP / daemon smoke truth，任一 blocker / fatal error 都必须失败；
   - 已有部分 smoke 报告但未完成整套输出时，必须明确失败而不是静默放过。
+- `tool_contract_check.py --local-rdc <path> --skip-remote --transport both` 必须能在真实 local 样本上跑到 MCP / daemon `blocker = 0`；否则 local-only 发布闭环仍未完成。
 - `rd.vfs.*` 已进入 catalog，但仍需持续通过 contract / transport 验证，防止仅文档公开、运行时漂移。
 
 ## 面向用户的稳定承诺

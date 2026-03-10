@@ -20,6 +20,45 @@ def _write_report(root: Path, rel: str) -> None:
     path.write_text("ok\n", encoding="utf-8")
 
 
+def _write_truth_payloads(root: Path, *, command_blocker: int = 0, mcp_blocker: int = 0, daemon_blocker: int = 0) -> None:
+    command_path = root / release_gate.CURRENT_TRUTH_REPORTS[0]
+    command_path.parent.mkdir(parents=True, exist_ok=True)
+    command_path.write_text(
+        """{
+  "summary": {
+    "blocker": %d
+  }
+}
+"""
+        % command_blocker,
+        encoding="utf-8",
+    )
+
+    tool_path = root / release_gate.CURRENT_TRUTH_REPORTS[1]
+    tool_path.parent.mkdir(parents=True, exist_ok=True)
+    tool_path.write_text(
+        """{
+  "transports": {
+    "mcp": {
+      "fatal_error": "",
+      "summary": {
+        "blocker": %d
+      }
+    },
+    "daemon": {
+      "fatal_error": "",
+      "summary": {
+        "blocker": %d
+      }
+    }
+  }
+}
+"""
+        % (mcp_blocker, daemon_blocker),
+        encoding="utf-8",
+    )
+
+
 def test_rg_no_match_falls_back_when_rg_missing(monkeypatch, tmp_path: Path) -> None:
     sample = tmp_path / "docs" / "sample.md"
     sample.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +114,7 @@ def test_release_gate_accepts_current_reports(monkeypatch, tmp_path: Path) -> No
     _prepare_root(tmp_path)
     for rel in release_gate.CURRENT_REPORTS:
         _write_report(tmp_path, rel)
+    _write_truth_payloads(tmp_path)
 
     monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
     monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
@@ -163,6 +203,7 @@ def test_release_gate_main_survives_rg_permission_error(monkeypatch, tmp_path: P
     _prepare_root(tmp_path)
     for rel in release_gate.CURRENT_REPORTS:
         _write_report(tmp_path, rel)
+    _write_truth_payloads(tmp_path)
     bad_ref = tmp_path / "docs" / "sample.md"
     bad_ref.parent.mkdir(parents=True, exist_ok=True)
     bad_ref.write_text("legacy extensions/path reference\n", encoding="utf-8")
@@ -181,3 +222,41 @@ def test_release_gate_main_survives_rg_permission_error(monkeypatch, tmp_path: P
     report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
     assert "FAIL `refs:no_extensions_path`" in report
     assert "python fallback after PermissionError" in report
+
+
+def test_release_gate_requires_clean_smoke_truth_when_flagged(monkeypatch, tmp_path: Path) -> None:
+    _prepare_root(tmp_path)
+    for rel in release_gate.CURRENT_REPORTS:
+        _write_report(tmp_path, rel)
+    _write_truth_payloads(tmp_path, daemon_blocker=1)
+
+    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
+    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
+    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
+
+    rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md", "--require-smoke-reports"])
+
+    assert rc == 1
+    report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
+    assert "FAIL `reports:smoke-suite`" in report
+    assert "daemon tool contract still reports blocker=1" in report
+
+
+def test_release_gate_accepts_clean_smoke_truth_when_flagged(monkeypatch, tmp_path: Path) -> None:
+    _prepare_root(tmp_path)
+    for rel in release_gate.CURRENT_REPORTS:
+        _write_report(tmp_path, rel)
+    _write_truth_payloads(tmp_path)
+
+    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
+    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
+    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
+
+    rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md", "--require-smoke-reports"])
+
+    assert rc == 0
+    report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
+    assert "PASS `reports:smoke-suite`" in report
+    assert "smoke truth reports are current and clean" in report

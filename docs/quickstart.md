@@ -10,6 +10,7 @@
 python cli/run_cli.py --help
 python mcp/run_mcp.py --help
 python spec/validate_catalog.py
+rdx.bat --non-interactive cli --help
 ```
 
 如果以上命令都可运行，再继续下面的 `CLI` 或 `MCP` 路径。
@@ -113,6 +114,12 @@ rdx.bat
 
 ```bat
 python mcp/run_mcp.py --transport streamable-http --host 127.0.0.1 --port 8765 --daemon-context smoke-test
+```
+
+如需通过 launcher 直接走当前正式非交互 `CLI` passthrough，也可以执行：
+
+```bat
+rdx.bat --non-interactive cli --daemon-context smoke daemon status
 ```
 
 ## 4. `MCP` 最小工具链路

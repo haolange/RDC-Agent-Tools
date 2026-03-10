@@ -100,6 +100,8 @@
 - `scripts/README.md`
 - `AGENTS.md`
 
+如果改动影响 release smoke 门禁、`rdx.bat` 非交互 launcher 入口，或 `tool_contract_check.py` / `smoke_report_aggregator.py` 的当前输出约定，也必须补一轮真实 local-only smoke 检查。
+
 ## 4. 文档口径规则
 
 - 规范源优先级必须一致：catalog / contract 优先，runtime 其次，`CLI` 不是规范源。
@@ -147,7 +149,16 @@ python mcp/run_mcp.py --help
 
 4. 若改动影响 `.rdc` 会话链路，再顺序验证一次最小链路。
 5. 若改动影响 remote / bootstrap / transport，再按需要参考 `docs/android-remote-cli-smoke-prompt.md` 组织更完整的 smoke / contract 流程。
-6. 最后在交付说明中说明更新范围、无需更新项、验证范围与清理结果。
+6. 若改动影响本地 smoke / release gate，再补一轮真实 local-only smoke：
+
+```bat
+python scripts/rdx_bat_command_smoke.py
+python scripts/tool_contract_check.py --local-rdc <external-rdc> --skip-remote --transport both
+python scripts/smoke_report_aggregator.py --command-json intermediate/logs/rdx_bat_command_smoke.json --tool-json intermediate/logs/tool_contract_report.json --out intermediate/logs/rdx_smoke_issues_blockers.md
+python scripts/release_gate.py --require-smoke-reports
+```
+
+7. 最后在交付说明中说明更新范围、无需更新项、验证范围与清理结果。
 
 ## 7. 自动检查与人工审阅的分工
 

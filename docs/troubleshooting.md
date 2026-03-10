@@ -31,6 +31,18 @@ rdx context clear
 优先使用正式支持的脚本主链：`scripts/check_markdown_health.py`、`scripts/release_gate.py`、`scripts/rdx_bat_command_smoke.py`、`scripts/tool_contract_check.py`、`scripts/smoke_report_aggregator.py`、`scripts/package_runtime.py`、`scripts/cleanup_workspace.py`。
 不要把一次性调查脚本或个人调试脚本视为受支持的仓库接口。详见 [../scripts/README.md](../scripts/README.md)。
 
+## `rdx.bat --non-interactive` 现在怎么走
+
+当前正式非交互 launcher 入口是：
+
+```bat
+rdx.bat --non-interactive cli --help
+rdx.bat --non-interactive cli --daemon-context smoke daemon status
+rdx.bat --non-interactive mcp --ensure-env
+```
+
+旧的 `cli-shell` / `daemon-shell` alias 已移除；如需直接执行本地命令，请走 `cli` passthrough，或直接调用 `python cli/run_cli.py ...`。
+
 ## 状态面与来源优先级是什么
 
 排查问题时，请先区分四类状态面：
@@ -117,6 +129,22 @@ python cli/run_cli.py daemon status --daemon-context smoke
 ```
 
 后者会被 argparse 识别为非法参数位置。
+
+## `release_gate.py --require-smoke-reports` 为什么会失败
+
+这条门禁现在不再只看报告文件是否存在，而会读取当前 smoke truth：
+
+- `intermediate/logs/rdx_bat_command_smoke.json`
+- `intermediate/logs/tool_contract_report.json`
+
+常见失败原因：
+
+- 当前 smoke markdown / json 不完整
+- `rdx_bat_command_smoke.py` 仍有 blocker
+- `tool_contract_check.py --local-rdc <path> --skip-remote --transport both` 的 MCP 或 daemon 仍有 blocker
+- transport payload 里仍有 `fatal_error`
+
+如果当前仓库没有 first-party fixture，请先用显式外部样本顺序执行真实 local-only smoke，再重跑 gate。
 
 ## PowerShell 与 `cmd` 下 `--args-json` 写法不同
 

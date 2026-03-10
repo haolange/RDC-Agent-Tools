@@ -146,7 +146,10 @@ def _collect_env_issues(command_payload: dict[str, Any], tool_payload: dict[str,
     for item in command_payload.get("results", []) if isinstance(command_payload.get("results"), list) else []:
         if not isinstance(item, dict):
             continue
-        if str(item.get("id") or "") in {"mcp-ensure-env", "daemon-shell-lifecycle"}:
+        if (
+            str(item.get("id") or "") in {"mcp-ensure-env", "cli-daemon-start", "cli-daemon-status", "cli-daemon-stop"}
+            and str(item.get("status") or "") != "pass"
+        ):
             env_items.append(item)
         if str(item.get("error_code") or "") in {
             "runtime_layout_missing",

@@ -463,8 +463,8 @@ function Write-TerseUsage {
     Write-Output '  rdx.bat'
     Write-Output '  rdx.bat --help'
     Write-Output '  rdx.bat --non-interactive mcp --ensure-env [--daemon-context <ctx>]'
-    Write-Output '  rdx.bat --non-interactive cli-shell [--daemon-context <ctx>] [--help]'
-    Write-Output '  rdx.bat --non-interactive daemon-shell [--daemon-context <ctx>] [start|status|stop]'
+    Write-Output '  rdx.bat --non-interactive cli --help'
+    Write-Output '  rdx.bat --non-interactive cli --daemon-context <ctx> daemon status'
 }
 
 function Write-HelpPage {
@@ -488,6 +488,7 @@ function Write-HelpPage {
     Write-Host '  rdx capture status'
     Write-Host '  rdx call rd.event.get_actions --args-json <json> --json --connect'
     Write-Host '  rdx call rd.shader.debug_start --args-json <json> --json --connect'
+    Write-Host '  rdx.bat --non-interactive cli daemon status'
     Write-Host '  rdx daemon status'
     Write-Host '  rdx daemon stop'
     Write-Host '  rdx context clear'
@@ -782,7 +783,7 @@ function Start-InteractiveCliShell {
     if (Get-TestMode) {
         [void](Invoke-CliInternalClientCommand -ToolsRoot $ToolsRoot -ContextId $resolvedContext -Action 'attach' -Parameters @{
             'client-id' = $clientId
-            'client-type' = 'cli-shell'
+            'client-type' = 'cli'
             'pid' = 0
             'lease-timeout-seconds' = $leaseTimeout
         } -TimeoutMs 20000)
@@ -825,7 +826,7 @@ function Start-InteractiveCliShell {
     }
 
     $proc = Start-Process -FilePath $env:ComSpec -ArgumentList @('/Q', '/K', $cmdLaunch) -WorkingDirectory $ToolsRoot -PassThru
-    Start-ClientHeartbeatHelper -ToolsRoot $ToolsRoot -ContextId $resolvedContext -ClientId $clientId -ClientType 'cli-shell' -WatchPid $proc.Id -LeaseTimeoutSeconds $leaseTimeout
+    Start-ClientHeartbeatHelper -ToolsRoot $ToolsRoot -ContextId $resolvedContext -ClientId $clientId -ClientType 'cli' -WatchPid $proc.Id -LeaseTimeoutSeconds $leaseTimeout
     Write-Host ''
     Write-Host "[RDX] CLI shell started. context=$resolvedContext"
     Write-Host '[RDX] Closing the shell does not stop the daemon. Use stop or rdx daemon stop to stop it explicitly.'
@@ -960,22 +961,6 @@ function Parse-LauncherArgs {
     return [pscustomobject]$result
 }
 
-function Resolve-LegacyCliContext {
-    param(
-        [string]$ContextId,
-        [string[]]$CommandArgs
-    )
-
-    $resolvedContext = $ContextId
-    if ($CommandArgs.Count -gt 0) {
-        $first = [string]$CommandArgs[0]
-        if ($first -and -not $first.StartsWith('-')) {
-            $resolvedContext = $first
-        }
-    }
-    return $resolvedContext
-}
-
 function Parse-InternalArgs {
     param([string[]]$CommandArgs)
 
@@ -1006,7 +991,7 @@ function Run-Mcp {
     return Emit-ChildResult -ExitCode $result.ExitCode -TimedOut $result.TimedOut -Output $result.StdOut -Error $result.StdErr -Command 'mcp' -ContextId $ContextId -AsJson:$NonInteractive
 }
 
-function Run-CliShell {
+function Run-Cli {
     param(
         [string[]]$CommandArgs,
         [string]$ToolsRoot,
@@ -1014,106 +999,9 @@ function Run-CliShell {
         [bool]$NonInteractive
     )
 
-    if ($NonInteractive) {
-        $commandArgsToRun = if ($CommandArgs.Count -eq 0) { @('--help') } else { $CommandArgs }
-        $result = Invoke-CliCommand -ToolsRoot $ToolsRoot -ContextId $ContextId -CommandArgs $commandArgsToRun -TimeoutMs 30000
-        return Emit-ChildResult -ExitCode $result.ExitCode -TimedOut $result.TimedOut -Output $result.StdOut -Error $result.StdErr -Command 'cli-shell' -ContextId $ContextId -AsJson:$true
-    }
-
-    $resolvedContext = Resolve-LegacyCliContext -ContextId $ContextId -CommandArgs $CommandArgs
-    Write-Host '[RDX][compat] cli-shell now maps to the new Start CLI behavior.'
-    Start-InteractiveCliShell -ToolsRoot $ToolsRoot -InitialContextId $resolvedContext
-    return $script:RETURN_OK
-}
-
-function Resolve-DaemonShellContext {
-    param(
-        [string[]]$CommandArgs,
-        [string]$ContextId,
-        [ref]$Steps
-    )
-
-    $resolvedContext = $ContextId
-    $stepsList = [System.Collections.Generic.List[string]]::new()
-    $i = 0
-    while ($i -lt $CommandArgs.Count) {
-        $arg = [string]$CommandArgs[$i]
-        if ($arg -in @('--daemon-context', '--context-id')) {
-            if ($i + 1 -ge $CommandArgs.Count) { throw "missing value for $arg" }
-            $resolvedContext = [string]$CommandArgs[$i + 1]
-            $i += 2
-            continue
-        }
-        $stepsList.Add($arg)
-        $i += 1
-    }
-    if ($stepsList.Count -eq 0) { $stepsList.AddRange([string[]]@('start', 'status', 'stop')) }
-    $Steps.Value = $stepsList
-    return $resolvedContext
-}
-
-function Run-DaemonShell {
-    param(
-        [string[]]$CommandArgs,
-        [string]$ToolsRoot,
-        [string]$ContextId,
-        [bool]$NonInteractive
-    )
-
-    if (-not $NonInteractive) {
-        $resolvedContext = Resolve-LegacyCliContext -ContextId $ContextId -CommandArgs $CommandArgs
-        Write-Host '[RDX][compat] daemon-shell now maps to the new Start CLI behavior.'
-        Start-InteractiveCliShell -ToolsRoot $ToolsRoot -InitialContextId $resolvedContext
-        return $script:RETURN_OK
-    }
-
-    $steps = [System.Collections.Generic.List[string]]::new()
-    try {
-        $resolvedContext = Resolve-DaemonShellContext -CommandArgs $CommandArgs -ContextId $ContextId -Steps ([ref]$steps)
-    }
-    catch {
-        Write-JsonStatus -Ok $false -ErrorCode $script:RETURN_ARGS_ERROR -ErrorMessage $_.Exception.Message -ContextId $ContextId
-        return $script:RETURN_ARGS_ERROR
-    }
-
-    $workflowDetails = @{}
-    $code = $script:RETURN_OK
-    foreach ($step in $steps) {
-        if ($step -in @('start', 'status', 'stop')) {
-            $stepResult = Invoke-CliCommand -ToolsRoot $ToolsRoot -ContextId $resolvedContext -CommandArgs @('daemon', $step) -TimeoutMs 45000
-            $stepCode = if ($stepResult.TimedOut) { $script:RETURN_TIMEOUT } else { [int]$stepResult.ExitCode }
-            $workflowDetails[$step] = $stepCode
-            if (($step -ne 'stop') -and ($stepCode -ne $script:RETURN_OK)) {
-                $code = $script:RETURN_TOOL_ERROR
-                break
-            }
-            continue
-        }
-
-        if ($step -in @('help', '-h', '--help')) {
-            Write-Output 'daemon-shell actions: start | status | stop'
-            continue
-        }
-
-        $code = $script:RETURN_ARGS_ERROR
-        $workflowDetails[$step] = 'unsupported'
-        break
-    }
-
-    if ($code -eq $script:RETURN_OK) {
-        $summaryCode = 0
-        foreach ($value in $workflowDetails.Values) {
-            if ($value -is [int] -and $value -ne $script:RETURN_OK) {
-                $summaryCode = $script:RETURN_TOOL_ERROR
-                break
-            }
-        }
-        Write-JsonStatus -Ok ($summaryCode -eq 0) -ErrorCode $summaryCode -ErrorMessage $(if ($summaryCode -eq 0) { '' } else { 'daemon-shell workflow failed' }) -ContextId $resolvedContext -Details $workflowDetails
-        return $summaryCode
-    }
-
-    Write-JsonStatus -Ok $false -ErrorCode $code -ErrorMessage 'daemon-shell workflow failed' -ContextId $resolvedContext -Details $workflowDetails
-    return $code
+    $commandArgsToRun = if ($CommandArgs.Count -eq 0) { @('--help') } else { $CommandArgs }
+    $result = Invoke-CliCommand -ToolsRoot $ToolsRoot -ContextId $ContextId -CommandArgs $commandArgsToRun -TimeoutMs 45000
+    return Emit-ChildResult -ExitCode $result.ExitCode -TimedOut $result.TimedOut -Output $result.StdOut -Error $result.StdErr -Command 'cli' -ContextId $ContextId -AsJson:$NonInteractive
 }
 
 $toolsRoot = Resolve-ToolsRoot
@@ -1150,7 +1038,7 @@ if ($internalCommand) {
     switch ($internalCommand) {
         'client-heartbeat' {
             $clientId = [string]$internalArgs['client-id']
-            $clientType = if ($internalArgs.ContainsKey('client-type')) { [string]$internalArgs['client-type'] } else { 'cli-shell' }
+            $clientType = if ($internalArgs.ContainsKey('client-type')) { [string]$internalArgs['client-type'] } else { 'cli' }
             $watchPid = if ($internalArgs.ContainsKey('watch-pid')) { [int]$internalArgs['watch-pid'] } else { 0 }
             $leaseTimeout = if ($internalArgs.ContainsKey('lease-timeout-seconds')) { [int]$internalArgs['lease-timeout-seconds'] } else { $script:DEFAULT_LEASE_TIMEOUT_SECONDS }
             if (-not $clientId -or $watchPid -le 0) { exit $script:RETURN_ARGS_ERROR }
@@ -1181,13 +1069,8 @@ switch ($command) {
         $exitCode = $commandResult.ExitCode
         if ($commandResult.Output.Count -gt 0) { Write-Output ($commandResult.Output -join "`n") }
     }
-    'cli-shell' {
-        $commandResult = Invoke-CommandWithOutput -CommandScript { Run-CliShell -CommandArgs $commandArgs -ToolsRoot $toolsRoot -ContextId $contextId -NonInteractive:$nonInteractive }
-        $exitCode = $commandResult.ExitCode
-        if ($commandResult.Output.Count -gt 0) { Write-Output ($commandResult.Output -join "`n") }
-    }
-    'daemon-shell' {
-        $commandResult = Invoke-CommandWithOutput -CommandScript { Run-DaemonShell -CommandArgs $commandArgs -ToolsRoot $toolsRoot -ContextId $contextId -NonInteractive:$nonInteractive }
+    'cli' {
+        $commandResult = Invoke-CommandWithOutput -CommandScript { Run-Cli -CommandArgs $commandArgs -ToolsRoot $toolsRoot -ContextId $contextId -NonInteractive:$nonInteractive }
         $exitCode = $commandResult.ExitCode
         if ($commandResult.Output.Count -gt 0) { Write-Output ($commandResult.Output -join "`n") }
     }

@@ -16,7 +16,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parents[1]
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
-from scripts._shared import run_subprocess, tools_root, write_text
+from scripts._shared import load_json, run_subprocess, tools_root, write_text
 
 
 REQUIRED_DIRS = [
@@ -47,6 +47,10 @@ CURRENT_REPORTS = [
     "intermediate/logs/tool_contract_report.md",
     "intermediate/logs/rdx_smoke_issues_blockers.md",
     "intermediate/logs/rdx_smoke_detailed_report.md",
+]
+CURRENT_TRUTH_REPORTS = [
+    "intermediate/logs/rdx_bat_command_smoke.json",
+    "intermediate/logs/tool_contract_report.json",
 ]
 
 BANNED_SUFFIXES = {".pdb", ".lib", ".exp", ".ilk", ".h"}
@@ -208,12 +212,47 @@ def _has_bundled_fixture(root: Path) -> bool:
     return False
 
 
+def _check_smoke_truth(root: Path) -> tuple[bool, str]:
+    command_payload = load_json(root / CURRENT_TRUTH_REPORTS[0])
+    if not command_payload:
+        return False, f"invalid smoke truth payload: {root / CURRENT_TRUTH_REPORTS[0]}"
+    tool_payload = load_json(root / CURRENT_TRUTH_REPORTS[1])
+    if not tool_payload:
+        return False, f"invalid smoke truth payload: {root / CURRENT_TRUTH_REPORTS[1]}"
+
+    command_summary = command_payload.get("summary")
+    if not isinstance(command_summary, dict):
+        return False, "invalid rdx_bat_command_smoke.json summary"
+    command_blockers = int(command_summary.get("blocker", 0))
+    if command_blockers > 0:
+        return False, f"command smoke still reports blocker={command_blockers}"
+
+    for transport in ("mcp", "daemon"):
+        transport_payload = tool_payload.get("transports", {}).get(transport, {})
+        if not isinstance(transport_payload, dict):
+            return False, f"missing tool contract transport payload: {transport}"
+        fatal_error = str(transport_payload.get("fatal_error") or "").strip()
+        if fatal_error:
+            return False, f"{transport} tool contract fatal_error: {fatal_error}"
+        summary = transport_payload.get("summary")
+        if not isinstance(summary, dict):
+            return False, f"missing tool contract summary: {transport}"
+        blockers = int(summary.get("blocker", 0))
+        if blockers > 0:
+            return False, f"{transport} tool contract still reports blocker={blockers}"
+
+    return True, "smoke truth reports are current and clean"
+
+
 def _check_reports(root: Path, *, require_smoke_reports: bool) -> tuple[bool, str]:
-    missing = [rel for rel in CURRENT_REPORTS if not (root / rel).is_file()]
+    required_artifacts = CURRENT_REPORTS + CURRENT_TRUTH_REPORTS
+    missing = [rel for rel in required_artifacts if not (root / rel).is_file()]
     if not missing:
+        if require_smoke_reports or _has_bundled_fixture(root):
+            return _check_smoke_truth(root)
         return True, "using current smoke reports"
 
-    present = [rel for rel in CURRENT_REPORTS if rel not in missing]
+    present = [rel for rel in required_artifacts if rel not in missing]
     if present:
         return False, f"incomplete smoke reports: missing {', '.join(missing)}"
 

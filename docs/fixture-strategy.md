@@ -42,6 +42,7 @@
 ## 当前状态
 
 - 当前仓库已具备 `contract` / `unit` 层能力。
+- 当前 local-only 真样本闭环继续采用“显式传入外部 `.rdc`”的方式，不把外部绝对路径沉淀进仓库。
 - 下一步应补齐 first-party `.rdc` fixture 或 fixture 生成脚本，并把它接入 `tool_contract_check.py` 与 VFS smoke。
 
 ## 接入要求
@@ -52,4 +53,5 @@
   - `docs/troubleshooting.md`
   - `scripts/tool_contract_check.py`
 - 一旦仓库内引入正式 `.rdc` fixture，`scripts/release_gate.py` 的 smoke 报告检查应自动转为必需门禁；在此之前，clean checkout 只要求结构 / 文档 / 入口门禁通过。
+- 在未引入仓库内 fixture 之前，若显式使用 `python scripts/release_gate.py --require-smoke-reports`，则仍必须提供当前 smoke 报告与 truth JSON，且 blocker / fatal error 不能被文件存在性掩盖。
 - 所有正式 fixture 都必须说明来源、生成方式与适用测试层级。

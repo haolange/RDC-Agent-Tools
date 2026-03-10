@@ -311,40 +311,14 @@ def main() -> int:
         markers=["Start MCP. context=smoke-mcp-http", "URL: http://127.0.0.1:8765"],
     )
 
-    # legacy aliases
-    for test_id, command, context_id in [
-        ("legacy-cli-shell", ["cmd", "/c", "rdx.bat", "cli-shell", "smoke-legacy-cli"], "smoke-legacy-cli"),
-        ("legacy-daemon-shell", ["cmd", "/c", "rdx.bat", "daemon-shell", "smoke-legacy-daemon"], "smoke-legacy-daemon"),
-    ]:
-        code, out, err, timed_out = _run_command(
-            command,
-            cwd=root,
-            timeout_s=45.0,
-            stdin_text="status\nexit\n",
-            env=env,
-        )
-        combined = out + "\n" + err
-        ok, missing = _check_contains(combined, ["compat", "CLI shell ready", "result_kind\": \"rdx.daemon.status\""])
-        _append_result(
-            results,
-            test_id=test_id,
-            command=" ".join(command[2:]),
-            status="pass" if (code == 0 and not timed_out and ok) else "blocker",
-            reason="" if (code == 0 and not timed_out and ok) else (f"missing marker: {missing}" if not ok else f"code={code}"),
-            evidence=combined,
-            context_id=context_id,
-        )
-
-    # non-interactive compatibility
+    # non-interactive launcher entrypoints
     for test_id, command, expect_json in [
         ("help", ["cmd", "/c", "rdx.bat", "--help"], False),
         ("mcp-ensure-env", ["cmd", "/c", "rdx.bat", "--non-interactive", "mcp", "--ensure-env"], True),
-        ("cli-shell-help", ["cmd", "/c", "rdx.bat", "--non-interactive", "cli-shell", "--help"], True),
-        (
-            "daemon-shell-lifecycle",
-            ["cmd", "/c", "rdx.bat", "--non-interactive", "daemon-shell", "--daemon-context", "smoke-test", "start", "status", "stop"],
-            True,
-        ),
+        ("cli-help", ["cmd", "/c", "rdx.bat", "--non-interactive", "cli", "--help"], True),
+        ("cli-daemon-start", ["cmd", "/c", "rdx.bat", "--non-interactive", "cli", "--daemon-context", "smoke-test", "daemon", "start"], True),
+        ("cli-daemon-status", ["cmd", "/c", "rdx.bat", "--non-interactive", "cli", "--daemon-context", "smoke-test", "daemon", "status"], True),
+        ("cli-daemon-stop", ["cmd", "/c", "rdx.bat", "--non-interactive", "cli", "--daemon-context", "smoke-test", "daemon", "stop"], True),
     ]:
         code, out, err, timed_out = _run_command(command, cwd=root, timeout_s=60.0)
         combined = out + "\n" + err
@@ -363,7 +337,7 @@ def main() -> int:
         )
 
     # cleanup
-    for ctx in ["default", custom_ctx, "smoke-mcp-stdio", "smoke-mcp-http", "smoke-legacy-cli", "smoke-legacy-daemon", "smoke-test"]:
+    for ctx in ["default", custom_ctx, "smoke-mcp-stdio", "smoke-mcp-http", "smoke-test"]:
         ok, detail = _cleanup_context(root, ctx)
         cleanup_daemons[ctx] = ok
         cleanup_notes[ctx] = detail

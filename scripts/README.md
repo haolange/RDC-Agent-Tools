@@ -15,7 +15,8 @@
   - 文档编码、互链与治理基线检查。
 - `release_gate.py`
   - 发布前结构、入口、报告与 manifest 门禁检查。
-  - 默认用于 clean checkout 结构门禁；若传入 `--require-smoke-reports`，或仓库内已有 first-party `.rdc` fixture，则 smoke 报告变为必需项。
+  - 默认用于 clean checkout 结构门禁。
+  - 若传入 `--require-smoke-reports`，或仓库内已有 first-party `.rdc` fixture，则 smoke 报告与 truth JSON 都变为必需项，并会对当前 command / MCP / daemon blocker 做真门禁检查。
 - `generate_release_checksums.py`
   - 为源码 release 资产生成 `sha256` 校验文件。
 
@@ -25,8 +26,10 @@
   - `rdx.bat` 入口 smoke。
 - `tool_contract_check.py`
   - catalog 全量 `rd.*` tools contract / transport 检查。
+  - local-only 真实样本验证使用 `--local-rdc <path> --skip-remote --transport both`。
 - `smoke_report_aggregator.py`
   - 聚合 blockers / detailed 汇总报告。
+  - 输入 `rdx_bat_command_smoke.json` 与 `tool_contract_report.json`，输出当前 markdown 汇总报告。
 
 ### 维护脚本
 
