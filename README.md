@@ -59,6 +59,7 @@ rdx.bat --non-interactive mcp --ensure-env
 - 暴露 catalog 当前定义的全部 `rd.*` tools；当前 `tool_count` 为 `202`。
 - 新增只读 `rd.vfs.*` 入口，用于以 JSON-first 方式探索 draw/pass/resource/pipeline/context 结构。
 - 已公开包含 `rd.session.get_context` 与 `rd.session.update_context`。
+- catalog 现已为 tool 提供结构化 `prerequisites`，上层 Agent 应在调用前优先做静态前置检查，而不是依赖试错。
 - 由上层 client 进行 tool discovery、参数组织与调用编排。
 
 ## 入口选择原则
@@ -96,6 +97,7 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - 如果复用了已经失效的 `remote_id`，预期生命周期错误码应为 `remote_handle_consumed`。
 - Android remote 可通过 `rd.remote.connect` 的 `options.transport="adb_android"` 触发仓库内置的 `adb` bootstrap。
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
+- `rd.remote.connect` 与 `rd.capture.open_replay` 在 daemon / streamable transports 下会更新结构化 progress；如宿主不支持 push，至少应通过 `daemon status` 读取 `active_operation`。
 - `active_event_id` 与对外暴露的 canonical `event_id` 只表示可被 `rd.event.get_action_details` round-trip 的 action event；对 `rd.resource.get_usage` / `rd.resource.get_history` 中不可 round-trip 的底层记录，应查看 `raw_event_id` 与 `event_resolvable`。
 
 更完整的操作说明见 [docs/quickstart.md](docs/quickstart.md)。

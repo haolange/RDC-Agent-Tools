@@ -17,14 +17,19 @@ verifier 首次失败的 draw call；以及 *batch* runner，用于顺序
 from __future__ import annotations
 
 import logging
+import json
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from rdx.config import ConfidenceWeightsConfig, RdxConfig
 from rdx.models import (
     ArtifactRef,
     BisectResult,
     BisectRange,
+    ConfidenceBreakdown,
+    ConfidenceWeights,
     ExperimentDef,
     ExperimentEvidence,
     ExperimentResult,
@@ -102,12 +107,14 @@ class ExperimentRunner:
         verifier_engine: Any,
         patch_engine: Any,
         artifact_store: Any,
+        config: Optional[RdxConfig] = None,
     ) -> None:
         self._session_manager = session_manager
         self._render_service = render_service
         self._verifier_engine = verifier_engine
         self._patch_engine = patch_engine
         self._artifact_store = artifact_store
+        self._config = config or RdxConfig()
 
         # 以 patch_id 为键的 PatchSpec 注册表。调用方必须在
         # ExperimentDef 引用之前注册 spec。
@@ -273,9 +280,11 @@ class ExperimentRunner:
         range_lo: int,
         range_hi: int,
         verifier_config: VerifierConfig,
-        strategy: str = "binary",
-        max_iters: int = 60,
-        confidence_threshold: float = 0.85,
+        strategy: str = "",
+        max_iters: int = 0,
+        confidence_threshold: float = 0.0,
+        confidence_weights: Optional[Dict[str, float]] = None,
+        confidence_profile: str = "",
     ) -> BisectResult:
         """对 event 范围进行二分搜索，找到第一个 "bad" event。
 
@@ -310,6 +319,14 @@ class ExperimentRunner:
                 f"hi must be greater than lo"
             )
 
+        runtime_strategy = str(strategy or self._config.bisect.default_strategy or "binary")
+        runtime_max_iters = int(max_iters or self._config.bisect.max_iterations or 60)
+        runtime_threshold = float(
+            confidence_threshold or self._config.bisect.default_confidence_threshold or 0.85
+        )
+        weights = self._resolve_confidence_weights(confidence_weights, self._config)
+        profile = str(confidence_profile or self._config.bisect.confidence_profile or "default")
+
         total_range = range_hi - range_lo
         lo = range_lo
         hi = range_hi
@@ -320,7 +337,7 @@ class ExperimentRunner:
         last_bad = hi
 
         # -- Phase 1: binary search（经典二分）------------------------------
-        while lo + 1 < hi and iterations < max_iters:
+        while lo + 1 < hi and iterations < runtime_max_iters:
             mid = (lo + hi) // 2
 
             exp_id = _new_id("bexp")
@@ -347,12 +364,13 @@ class ExperimentRunner:
             confidence = self._calculate_confidence(
                 last_good, last_bad, total_range,
                 boundary_consistent_count,
+                weights=weights,
             )
-            if confidence >= confidence_threshold and hi - lo <= 1:
+            if confidence >= runtime_threshold and hi - lo <= 1:
                 break
 
         # -- Phase 2 (ddmin): 边界强化 -------------------------------------
-        if strategy == "ddmin":
+        if runtime_strategy == "ddmin":
             # 重新验证边界 events，并探测相邻点以提高置信度。
             verification_points: List[tuple] = [
                 (last_good, True),   # expect good
@@ -364,7 +382,7 @@ class ExperimentRunner:
                 verification_points.append((last_bad + 1, False))
 
             for point, expect_good in verification_points:
-                if iterations >= max_iters:
+                if iterations >= runtime_max_iters:
                     break
                 exp_id = _new_id("bexp")
                 metrics = await self._safe_verify(
@@ -384,14 +402,30 @@ class ExperimentRunner:
                     )
 
         # -- 最终 confidence 计算 ------------------------------------------
-        confidence = self._calculate_confidence(
-            last_good, last_bad, total_range, boundary_consistent_count,
+        breakdown = self._calculate_confidence_breakdown(
+            last_good,
+            last_bad,
+            total_range,
+            boundary_consistent_count,
+            weights=weights,
+        )
+        confidence = breakdown.weighted_total
+        self._record_bisect_history(
+            capture_id=capture_id,
+            strategy=runtime_strategy,
+            confidence_profile=profile,
+            weights=weights,
+            total_range=total_range,
+            boundary_consistent_count=boundary_consistent_count,
+            iterations=iterations,
+            confidence=confidence,
+            verifier_config=verifier_config,
         )
 
         logger.info(
             "Bisect complete for capture %s: first_bad=%d, last_good=%d, "
             "confidence=%.3f, iterations=%d, strategy=%s",
-            capture_id, last_bad, last_good, confidence, iterations, strategy,
+            capture_id, last_bad, last_good, confidence, iterations, runtime_strategy,
         )
 
         return BisectResult(
@@ -400,6 +434,14 @@ class ExperimentRunner:
             evidence_chain=evidence_chain,
             confidence=confidence,
             iterations=iterations,
+            confidence_breakdown=breakdown,
+            confidence_weights=ConfidenceWeights(
+                sharpness=weights.sharpness,
+                consistency=weights.consistency,
+                range_factor=weights.range_factor,
+            ),
+            confidence_profile=profile,
+            boundary_consistent_count=boundary_consistent_count,
         )
 
     # ------------------------------------------------------------------
@@ -546,12 +588,33 @@ class ExperimentRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _calculate_confidence(
+    def _resolve_confidence_weights(
+        override: Optional[Dict[str, float]],
+        config: Optional[RdxConfig] = None,
+    ) -> ConfidenceWeightsConfig:
+        cfg = config or RdxConfig()
+        source = override if isinstance(override, dict) else {}
+        sharpness = float(source.get("sharpness", cfg.confidence_weights.sharpness))
+        consistency = float(source.get("consistency", cfg.confidence_weights.consistency))
+        range_factor = float(source.get("range_factor", cfg.confidence_weights.range_factor))
+        total = sharpness + consistency + range_factor
+        if sharpness < 0 or consistency < 0 or range_factor < 0 or total <= 0:
+            raise ValueError("confidence weights must be positive and sum to a non-zero value")
+        return ConfidenceWeightsConfig(
+            sharpness=sharpness / total,
+            consistency=consistency / total,
+            range_factor=range_factor / total,
+        )
+
+    @classmethod
+    def _calculate_confidence_breakdown(
         good_id: int,
         bad_id: int,
         total_range: int,
         boundary_consistent_count: int,
-    ) -> float:
+        *,
+        weights: ConfidenceWeightsConfig,
+    ) -> ConfidenceBreakdown:
         """计算 bisect 边界的 ``[0, 1]`` 置信度分数。
 
         置信度更高的条件：
@@ -561,7 +624,7 @@ class ExperimentRunner:
         * 搜索范围更小（异常机会更少）。
         """
         if total_range <= 0:
-            return 0.0
+            return ConfidenceBreakdown()
 
         boundary_gap = abs(bad_id - good_id)
 
@@ -575,11 +638,70 @@ class ExperimentRunner:
         range_factor = min(50.0 / max(total_range, 1), 1.0)
 
         confidence = (
-            0.50 * sharpness
-            + 0.35 * consistency
-            + 0.15 * range_factor
+            weights.sharpness * sharpness
+            + weights.consistency * consistency
+            + weights.range_factor * range_factor
         )
-        return max(0.0, min(confidence, 1.0))
+        return ConfidenceBreakdown(
+            sharpness=sharpness,
+            consistency=consistency,
+            range_factor=range_factor,
+            weighted_total=max(0.0, min(confidence, 1.0)),
+        )
+
+    @classmethod
+    def _calculate_confidence(
+        cls,
+        good_id: int,
+        bad_id: int,
+        total_range: int,
+        boundary_consistent_count: int,
+        *,
+        weights: ConfidenceWeightsConfig,
+    ) -> float:
+        return cls._calculate_confidence_breakdown(
+            good_id,
+            bad_id,
+            total_range,
+            boundary_consistent_count,
+            weights=weights,
+        ).weighted_total
+
+    def _record_bisect_history(
+        self,
+        *,
+        capture_id: str,
+        strategy: str,
+        confidence_profile: str,
+        weights: ConfidenceWeightsConfig,
+        total_range: int,
+        boundary_consistent_count: int,
+        iterations: int,
+        confidence: float,
+        verifier_config: VerifierConfig,
+    ) -> None:
+        if str(self._config.adaptive_bisect.mode or "off").strip().lower() == "off":
+            return
+        history_path = Path(self._config.adaptive_bisect.history_store_path)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "capture_id": str(capture_id),
+            "strategy": str(strategy),
+            "confidence_profile": str(confidence_profile),
+            "weights": {
+                "sharpness": weights.sharpness,
+                "consistency": weights.consistency,
+                "range_factor": weights.range_factor,
+            },
+            "total_range": int(total_range),
+            "boundary_consistent_count": int(boundary_consistent_count),
+            "iterations": int(iterations),
+            "confidence": float(confidence),
+            "verifier_type": str(verifier_config.type),
+            "ts": _ts(),
+        }
+        with history_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     # ------------------------------------------------------------------
     # Verdict determination

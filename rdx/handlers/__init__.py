@@ -1,0 +1,2 @@
+"""Namespace-scoped tool handlers."""
+

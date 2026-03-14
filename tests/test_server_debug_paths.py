@@ -100,15 +100,15 @@ def _install_debug_env(monkeypatch, controller: _FakeController, history_items: 
     async def _fake_history(controller_obj: object, resource_id: object, x: int, y: int, subresource: object):  # type: ignore[no-untyped-def]
         return history_items
 
-    monkeypatch.setattr(server, "_offload", _fake_offload)
-    monkeypatch.setattr(server, "_get_controller", _fake_get_controller)
-    monkeypatch.setattr(server, "_ensure_event", _fake_ensure_event)
-    monkeypatch.setattr(server, "_configure_texture_output_for_target", _fake_configure)
-    monkeypatch.setattr(server, "_pixel_history_raw", _fake_history)
-    monkeypatch.setattr(server, "_output_target_resource_ids", lambda session_id, event_id: asyncio.sleep(0, result=[]))
-    monkeypatch.setattr(server, "_refresh_pixel_context", lambda session_id, x, y: asyncio.sleep(0))
-    monkeypatch.setattr(server, "_get_rd", lambda: SimpleNamespace(DebugPixelInputs=_FakeDebugInputs))
-    monkeypatch.setattr(server, "_session_manager", SimpleNamespace(get_output=lambda session_id: _FakeOutput()))
+    monkeypatch.setattr(server.server_runtime, "_offload", _fake_offload)
+    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
+    monkeypatch.setattr(server.server_runtime, "_configure_texture_output_for_target", _fake_configure)
+    monkeypatch.setattr(server.server_runtime, "_pixel_history_raw", _fake_history)
+    monkeypatch.setattr(server.server_runtime, "_output_target_resource_ids", lambda session_id, event_id: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(server.server_runtime, "_refresh_pixel_context", lambda session_id, x, y: asyncio.sleep(0))
+    monkeypatch.setattr(server.server_runtime, "_get_rd", lambda: SimpleNamespace(DebugPixelInputs=_FakeDebugInputs))
+    monkeypatch.setattr(server.server_runtime, "_session_manager", SimpleNamespace(get_output=lambda session_id: _FakeOutput()))
     server._runtime.shader_debugs.clear()
 
 

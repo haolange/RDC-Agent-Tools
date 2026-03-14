@@ -1,15 +1,21 @@
-﻿"""Context-scoped snapshot helpers shared by runtime and daemon-facing tools."""
+"""Context-scoped snapshot helpers shared by runtime and daemon-facing tools."""
 
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
+import msvcrt
+
 from rdx.runtime_paths import cli_runtime_dir
 
-MAX_RECENT_ARTIFACTS = 8
 USER_CONTEXT_KEYS = {
     "focus_pixel",
     "focus_resource_id",
@@ -26,10 +32,28 @@ RUNTIME_OWNED_KEYS = {
     "origin_remote_id",
     "last_artifacts",
 }
+_CONTEXT_MUTEXES: dict[str, threading.Lock] = {}
+_CONTEXT_MUTEXES_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class SnapshotRetentionPolicy:
+    total_limit: int = 32
+    per_type_limit: int = 8
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _context_mutex(context: Optional[str]) -> threading.Lock:
+    ctx = normalize_context_id(context)
+    with _CONTEXT_MUTEXES_LOCK:
+        lock = _CONTEXT_MUTEXES.get(ctx)
+        if lock is None:
+            lock = threading.Lock()
+            _CONTEXT_MUTEXES[ctx] = lock
+        return lock
 
 
 def normalize_context_id(context: Optional[str]) -> str:
@@ -44,6 +68,24 @@ def _sanitize_context(context: Optional[str]) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in ctx)
 
 
+def _coerce_retention_policy(retention: Any = None) -> SnapshotRetentionPolicy:
+    if isinstance(retention, SnapshotRetentionPolicy):
+        return retention
+    if isinstance(retention, dict):
+        total_limit = int(retention.get("total_limit") or SnapshotRetentionPolicy.total_limit)
+        per_type_limit = int(retention.get("per_type_limit") or SnapshotRetentionPolicy.per_type_limit)
+        return SnapshotRetentionPolicy(
+            total_limit=max(total_limit, 1),
+            per_type_limit=max(per_type_limit, 1),
+        )
+    total_limit = int(getattr(retention, "total_limit", SnapshotRetentionPolicy.total_limit) or SnapshotRetentionPolicy.total_limit)
+    per_type_limit = int(getattr(retention, "per_type_limit", SnapshotRetentionPolicy.per_type_limit) or SnapshotRetentionPolicy.per_type_limit)
+    return SnapshotRetentionPolicy(
+        total_limit=max(total_limit, 1),
+        per_type_limit=max(per_type_limit, 1),
+    )
+
+
 def context_snapshot_path(context: Optional[str] = "default") -> Path:
     state_dir = cli_runtime_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -51,6 +93,25 @@ def context_snapshot_path(context: Optional[str] = "default") -> Path:
     if ctx == "default":
         return state_dir / "context_snapshot.json"
     return state_dir / f"context_snapshot_{_sanitize_context(ctx)}.json"
+
+
+def _context_snapshot_lock_path(context: Optional[str] = "default") -> Path:
+    return context_snapshot_path(context).with_suffix(".lock")
+
+
+@contextmanager
+def _locked_snapshot_file(context: Optional[str] = "default"):
+    lock_path = _context_snapshot_lock_path(context)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _context_mutex(context):
+        with open(lock_path, "a+b") as handle:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def default_context_snapshot(context: Optional[str] = "default") -> Dict[str, Any]:
@@ -135,7 +196,45 @@ def _normalize_artifact_entry(value: Any) -> Dict[str, Any] | None:
     }
 
 
-def normalize_context_snapshot(payload: Dict[str, Any] | None, context: Optional[str] = "default") -> Dict[str, Any]:
+def _trim_artifacts(entries: Iterable[Dict[str, Any]], *, retention: SnapshotRetentionPolicy) -> list[Dict[str, Any]]:
+    deduped: list[Dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for item in sorted(
+        (
+            entry
+            for entry in entries
+            if isinstance(entry, dict) and str(entry.get("path") or "").strip()
+        ),
+        key=lambda entry: int(entry.get("ts_ms") or 0),
+        reverse=True,
+    ):
+        path = str(item.get("path") or "").strip()
+        if path in seen_paths:
+            continue
+        deduped.append(item)
+        seen_paths.add(path)
+
+    kept: list[Dict[str, Any]] = []
+    per_type_counts: dict[str, int] = {}
+    for entry in deduped:
+        artifact_type = str(entry.get("type") or "file").strip() or "file"
+        count = per_type_counts.get(artifact_type, 0)
+        if count >= retention.per_type_limit:
+            continue
+        per_type_counts[artifact_type] = count + 1
+        kept.append(entry)
+        if len(kept) >= retention.total_limit:
+            break
+    return kept
+
+
+def normalize_context_snapshot(
+    payload: Dict[str, Any] | None,
+    context: Optional[str] = "default",
+    *,
+    retention: Any = None,
+) -> Dict[str, Any]:
+    retention_policy = _coerce_retention_policy(retention)
     snapshot = default_context_snapshot(context)
     if not isinstance(payload, dict):
         return snapshot
@@ -175,45 +274,74 @@ def normalize_context_snapshot(payload: Dict[str, Any] | None, context: Optional
             entry = _normalize_artifact_entry(item)
             if entry is not None:
                 normalized.append(entry)
-        snapshot["last_artifacts"] = normalized[:MAX_RECENT_ARTIFACTS]
+        snapshot["last_artifacts"] = _trim_artifacts(normalized, retention=retention_policy)
 
     snapshot["updated_at_ms"] = _normalize_int(payload.get("updated_at_ms"), _now_ms())
     return snapshot
 
 
-def load_context_snapshot(context: Optional[str] = "default") -> Dict[str, Any]:
+def load_context_snapshot(
+    context: Optional[str] = "default",
+    *,
+    retention: Any = None,
+) -> Dict[str, Any]:
     path = context_snapshot_path(context)
     if not path.is_file():
         return default_context_snapshot(context)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default_context_snapshot(context)
-    return normalize_context_snapshot(payload, context)
+    with _locked_snapshot_file(context):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return default_context_snapshot(context)
+    return normalize_context_snapshot(payload, context, retention=retention)
 
 
-def save_context_snapshot(payload: Dict[str, Any], context: Optional[str] = "default") -> Dict[str, Any]:
-    snapshot = normalize_context_snapshot(payload, context)
+def save_context_snapshot(
+    payload: Dict[str, Any],
+    context: Optional[str] = "default",
+    *,
+    retention: Any = None,
+) -> Dict[str, Any]:
+    snapshot = normalize_context_snapshot(payload, context, retention=retention)
     snapshot["updated_at_ms"] = _now_ms()
     path = context_snapshot_path(context)
-    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _locked_snapshot_file(context):
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
+            os.replace(tmp_name, path)
+        finally:
+            try:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+            except Exception:
+                pass
     return snapshot
 
 
 def clear_context_snapshot(context: Optional[str] = "default") -> None:
-    try:
-        context_snapshot_path(context).unlink(missing_ok=True)
-    except Exception:
-        pass
+    with _locked_snapshot_file(context):
+        try:
+            context_snapshot_path(context).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
-def update_user_context(snapshot: Dict[str, Any], key: str, value: Any) -> Dict[str, Any]:
+def update_user_context(
+    snapshot: Dict[str, Any],
+    key: str,
+    value: Any,
+    *,
+    retention: Any = None,
+) -> Dict[str, Any]:
     if key not in USER_CONTEXT_KEYS:
         if key in RUNTIME_OWNED_KEYS:
             raise ValueError(f"Context key '{key}' is runtime-owned and cannot be updated manually")
         raise ValueError(f"Unsupported context key: {key}")
 
-    updated = normalize_context_snapshot(snapshot, snapshot.get("context_id"))
+    updated = normalize_context_snapshot(snapshot, snapshot.get("context_id"), retention=retention)
     if key == "focus_pixel":
         updated["focus"]["pixel"] = normalize_pixel(value)
     elif key == "focus_resource_id":
@@ -231,8 +359,10 @@ def merge_recent_artifacts(
     artifacts: Iterable[Dict[str, Any]],
     *,
     source_tool: str,
+    retention: Any = None,
 ) -> Dict[str, Any]:
-    updated = normalize_context_snapshot(snapshot, snapshot.get("context_id"))
+    retention_policy = _coerce_retention_policy(retention)
+    updated = normalize_context_snapshot(snapshot, snapshot.get("context_id"), retention=retention_policy)
     current = [
         entry
         for entry in (updated.get("last_artifacts") or [])
@@ -251,6 +381,6 @@ def merge_recent_artifacts(
         }
         current = [item for item in current if str(item.get("path") or "").strip() != path]
         current.insert(0, entry)
-    updated["last_artifacts"] = current[:MAX_RECENT_ARTIFACTS]
+    updated["last_artifacts"] = _trim_artifacts(current, retention=retention_policy)
     updated["updated_at_ms"] = _now_ms()
     return updated

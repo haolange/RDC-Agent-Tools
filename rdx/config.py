@@ -62,6 +62,26 @@ class BisectConfig:
     max_iterations: int = 60
     default_confidence_threshold: float = 0.85
     early_stop_on_clear_boundary: bool = True
+    confidence_profile: str = "default"
+
+
+@dataclass
+class ConfidenceWeightsConfig:
+    sharpness: float = 0.50
+    consistency: float = 0.35
+    range_factor: float = 0.15
+
+
+@dataclass
+class SnapshotRetentionConfig:
+    total_limit: int = 32
+    per_type_limit: int = 8
+
+
+@dataclass
+class AdaptiveBisectConfig:
+    mode: str = "off"  # off | recommend
+    history_store_path: Path = field(default_factory=lambda: runtime_root() / "bisect_history.jsonl")
 
 
 @dataclass
@@ -93,6 +113,9 @@ class RdxConfig:
     bisect: BisectConfig = field(default_factory=BisectConfig)
     patch: PatchConfig = field(default_factory=PatchConfig)
     report: ReportConfig = field(default_factory=ReportConfig)
+    confidence_weights: ConfidenceWeightsConfig = field(default_factory=ConfidenceWeightsConfig)
+    snapshot_retention: SnapshotRetentionConfig = field(default_factory=SnapshotRetentionConfig)
+    adaptive_bisect: AdaptiveBisectConfig = field(default_factory=AdaptiveBisectConfig)
 
     renderdoc_module_path: Optional[str] = None  # renderdoc module 的 sys.path 补充路径
     log_level: str = "INFO"
@@ -117,4 +140,20 @@ class RdxConfig:
             cfg.patch.spirv_tools_path = p
         if p := os.environ.get("RDX_HEADLESS"):
             cfg.replay.headless = p.lower() in ("1", "true", "yes")
+        if p := os.environ.get("RDX_BISECT_CONFIDENCE_SHARPNESS"):
+            cfg.confidence_weights.sharpness = float(p)
+        if p := os.environ.get("RDX_BISECT_CONFIDENCE_CONSISTENCY"):
+            cfg.confidence_weights.consistency = float(p)
+        if p := os.environ.get("RDX_BISECT_CONFIDENCE_RANGE_FACTOR"):
+            cfg.confidence_weights.range_factor = float(p)
+        if p := os.environ.get("RDX_BISECT_PROFILE"):
+            cfg.bisect.confidence_profile = p
+        if p := os.environ.get("RDX_BISECT_ADAPTIVE_MODE"):
+            cfg.adaptive_bisect.mode = p
+        if p := os.environ.get("RDX_BISECT_HISTORY_STORE"):
+            cfg.adaptive_bisect.history_store_path = Path(p)
+        if p := os.environ.get("RDX_CONTEXT_ARTIFACT_TOTAL_LIMIT"):
+            cfg.snapshot_retention.total_limit = int(p)
+        if p := os.environ.get("RDX_CONTEXT_ARTIFACT_PER_TYPE_LIMIT"):
+            cfg.snapshot_retention.per_type_limit = int(p)
         return cfg

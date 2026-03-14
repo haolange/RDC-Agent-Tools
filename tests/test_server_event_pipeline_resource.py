@@ -184,9 +184,9 @@ def _install_common_env(monkeypatch: pytest.MonkeyPatch, controller: _FakeContro
         ActionFlags=_FakeActionFlags,
         ShaderStage=_FakeShaderStage,
     )
-    monkeypatch.setattr(server, "_offload", _inline_offload)
-    monkeypatch.setattr(server, "_get_controller", _fake_get_controller)
-    monkeypatch.setattr(server, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(server.server_runtime, "_get_rd", lambda: fake_rd)
 
 
 def _seed_capture(capture_file_id: str = "capf_demo") -> None:
@@ -227,8 +227,8 @@ def _reset_server_state() -> None:
     original_captures = dict(server._runtime.captures)
     original_replays = dict(server._runtime.replays)
     original_contexts = dict(server._runtime.context_snapshots)
-    original_pipeline_service = server._pipeline_service
-    original_session_manager = server._session_manager
+    original_pipeline_service = server.server_runtime._pipeline_service
+    original_session_manager = server.server_runtime._session_manager
     clear_context_snapshot()
     server._runtime.context_snapshots.clear()
     try:
@@ -239,8 +239,8 @@ def _reset_server_state() -> None:
         server._runtime.captures = original_captures
         server._runtime.replays = original_replays
         server._runtime.context_snapshots.update(original_contexts)
-        server._pipeline_service = original_pipeline_service
-        server._session_manager = original_session_manager
+        server.server_runtime._pipeline_service = original_pipeline_service
+        server.server_runtime._session_manager = original_session_manager
 
 
 def test_event_set_active_validates_before_mutating_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,18 +254,18 @@ def test_event_set_active_validates_before_mutating_state(monkeypatch: pytest.Mo
     _seed_capture()
     _seed_session(202)
 
-    invalid = json.loads(asyncio.run(server._dispatch_tool_legacy("rd.event.set_active", {"session_id": "sess_demo", "event_id": 53})))
-    assert invalid["success"] is False
-    assert invalid["code"] == "event_not_found"
-    assert invalid["category"] == "not_found"
-    assert invalid["details"] == {"session_id": "sess_demo", "event_id": 53}
+    invalid = asyncio.run(server.dispatch_operation("rd.event.set_active", {"session_id": "sess_demo", "event_id": 53}, transport="test"))
+    assert invalid["ok"] is False
+    assert invalid["error"]["code"] == "event_not_found"
+    assert invalid["error"]["category"] == "not_found"
+    assert invalid["error"]["details"] == {"session_id": "sess_demo", "event_id": 53}
     assert controller.set_frame_calls == []
     assert server._runtime.replays["sess_demo"].active_event_id == 202
     assert server._context_snapshot()["runtime"]["active_event_id"] == 202
 
-    valid = json.loads(asyncio.run(server._dispatch_tool_legacy("rd.event.set_active", {"session_id": "sess_demo", "event_id": 101})))
-    assert valid["success"] is True
-    assert valid["active_event_id"] == 101
+    valid = asyncio.run(server.dispatch_operation("rd.event.set_active", {"session_id": "sess_demo", "event_id": 101}, transport="test"))
+    assert valid["ok"] is True
+    assert valid["data"]["active_event_id"] == 101
     assert controller.set_frame_calls == [101]
     assert server._runtime.replays["sess_demo"].active_event_id == 101
     assert server._context_snapshot()["runtime"]["active_event_id"] == 101
@@ -298,8 +298,8 @@ def test_pipeline_dispatch_uses_one_resolved_event_context(monkeypatch: pytest.M
     )
     pipeline_service = _FakePipelineService()
     _install_common_env(monkeypatch, controller)
-    server._pipeline_service = pipeline_service
-    server._session_manager = SimpleNamespace()
+    server.server_runtime._pipeline_service = pipeline_service
+    server.server_runtime._session_manager = SimpleNamespace()
     _seed_capture()
     _seed_session(53)
 
@@ -443,7 +443,7 @@ def test_capture_close_file_reports_all_dependent_sessions() -> None:
 
 def test_capture_close_file_succeeds_after_close_replay() -> None:
     manager = _FakeSessionManager()
-    server._session_manager = manager
+    server.server_runtime._session_manager = manager
     _seed_capture()
     _seed_session(101)
 

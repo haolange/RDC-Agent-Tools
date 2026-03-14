@@ -22,6 +22,7 @@ from rdx.daemon.client import (
     clear_session_state,
     save_daemon_state,
 )
+from rdx.progress import ProgressEvent, ProgressSink
 from rdx.runtime_bootstrap import bootstrap_renderdoc_runtime
 from rdx.runtime_paths import cli_runtime_dir
 from rdx.server import dispatch_operation, runtime_shutdown, runtime_startup
@@ -97,7 +98,7 @@ def _is_process_running(pid: int) -> bool:
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
-class DaemonRuntime:
+class DaemonRuntime(ProgressSink):
     def __init__(
         self,
         *,
@@ -136,6 +137,7 @@ class DaemonRuntime:
             "idle_timeout_seconds": self.idle_timeout_seconds,
             "attached_clients": [],
             "active_request_count": 0,
+            "active_operation": {},
             "session_id": "",
             "capture_file_id": "",
             "capture_path": "",
@@ -145,6 +147,7 @@ class DaemonRuntime:
         self._listener = None
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
+        self._exec_lock = threading.Lock()
 
     def _auth(self, request: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
         if str(request.get("token", "")) != self.token:
@@ -220,6 +223,48 @@ class DaemonRuntime:
         self.state["capture_path"] = ""
         self.state["active_event_id"] = 0
         self.state["frame_index"] = 0
+        self.state["active_operation"] = {}
+
+    def _set_active_operation_locked(
+        self,
+        *,
+        operation: str,
+        stage: str,
+        message: str,
+        trace_id: str = "",
+        progress_pct: float | None = None,
+        details: Dict[str, Any] | None = None,
+    ) -> None:
+        existing = self.state.get("active_operation")
+        started_at_ms = 0
+        if isinstance(existing, dict):
+            started_at_ms = int(existing.get("started_at_ms") or 0)
+        self.state["active_operation"] = {
+            "trace_id": str(trace_id or (existing.get("trace_id") if isinstance(existing, dict) else "") or ""),
+            "operation": str(operation),
+            "stage": str(stage),
+            "message": str(message),
+            "progress_pct": progress_pct,
+            "details": dict(details or {}),
+            "started_at_ms": started_at_ms or _now_ms(),
+            "updated_at_ms": _now_ms(),
+        }
+
+    def _clear_active_operation_locked(self) -> None:
+        self.state["active_operation"] = {}
+
+    def publish(self, event: ProgressEvent) -> None:
+        with self._state_lock:
+            self._set_active_operation_locked(
+                operation=event.operation,
+                stage=event.stage,
+                message=event.message,
+                trace_id=event.trace_id,
+                progress_pct=event.progress_pct,
+                details=event.details,
+            )
+            self.state["last_activity_at"] = _utc_now_iso()
+        self._persist_state()
 
     def _sync_context_snapshot_locked(self, params: Dict[str, Any]) -> None:
         mapping = {
@@ -301,45 +346,77 @@ class DaemonRuntime:
         return self._status_payload()
 
     def _run_exec(self, operation: str, args: Dict[str, Any], *, transport: str, remote: bool) -> Dict[str, Any]:
-        with self._state_lock:
-            self.state["active_request_count"] = int(self.state.get("active_request_count") or 0) + 1
-            self.state["last_activity_at"] = _utc_now_iso()
-        self._persist_state()
-        try:
-            result = asyncio.run(dispatch_operation(operation, args, transport=transport, remote=remote, context_id=self.daemon_context))
-            return {"ok": True, "result": result}
-        finally:
+        with self._exec_lock:
             with self._state_lock:
-                self.state["active_request_count"] = max(
-                    0,
-                    int(self.state.get("active_request_count") or 0) - 1,
-                )
+                self.state["active_request_count"] = int(self.state.get("active_request_count") or 0) + 1
                 self.state["last_activity_at"] = _utc_now_iso()
+                self._set_active_operation_locked(
+                    operation=operation,
+                    stage="starting",
+                    message="Operation queued in daemon",
+                )
             self._persist_state()
+            try:
+                result = asyncio.run(
+                    dispatch_operation(
+                        operation,
+                        args,
+                        transport=transport,
+                        remote=remote,
+                        context_id=self.daemon_context,
+                        progress_sink=self,
+                    )
+                )
+                return {"ok": True, "result": result}
+            finally:
+                with self._state_lock:
+                    self.state["active_request_count"] = max(
+                        0,
+                        int(self.state.get("active_request_count") or 0) - 1,
+                    )
+                    self._clear_active_operation_locked()
+                    self.state["last_activity_at"] = _utc_now_iso()
+                self._persist_state()
 
     def _run_clear_context(self) -> Dict[str, Any]:
-        with self._state_lock:
-            self.state["active_request_count"] = int(self.state.get("active_request_count") or 0) + 1
-            self.state["last_activity_at"] = _utc_now_iso()
-        self._persist_state()
-        released: Dict[str, Any] = {}
-        try:
-            result = asyncio.run(dispatch_operation("rd.core.shutdown", {}, transport="daemon", remote=False, context_id=self.daemon_context))
-            if isinstance(result, dict):
-                data = result.get("data")
-                if isinstance(data, dict):
-                    released = dict(data.get("released") or {})
-        finally:
+        with self._exec_lock:
             with self._state_lock:
-                self._clear_context_snapshot_locked()
-                self.state["active_request_count"] = max(
-                    0,
-                    int(self.state.get("active_request_count") or 0) - 1,
-                )
+                self.state["active_request_count"] = int(self.state.get("active_request_count") or 0) + 1
                 self.state["last_activity_at"] = _utc_now_iso()
-            clear_session_state(self.daemon_context)
+                self._set_active_operation_locked(
+                    operation="rd.core.shutdown",
+                    stage="starting",
+                    message="Clearing daemon context",
+                )
             self._persist_state()
-        return {"ok": True, "result": {"released": released, "state": self._snapshot_state()}}
+            released: Dict[str, Any] = {}
+            try:
+                result = asyncio.run(
+                    dispatch_operation(
+                        "rd.core.shutdown",
+                        {},
+                        transport="daemon",
+                        remote=False,
+                        context_id=self.daemon_context,
+                        progress_sink=self,
+                    )
+                )
+                if isinstance(result, dict):
+                    data = result.get("data")
+                    if isinstance(data, dict):
+                        released = dict(data.get("released") or {})
+            finally:
+                with self._state_lock:
+                    self._clear_context_snapshot_locked()
+                    self.state["active_request_count"] = max(
+                        0,
+                        int(self.state.get("active_request_count") or 0) - 1,
+                    )
+                    self._clear_active_operation_locked()
+                    self.state["last_activity_at"] = _utc_now_iso()
+                clear_session_state(self.daemon_context)
+                self._persist_state()
+            return {"ok": True, "result": {"released": released, "state": self._snapshot_state()}}
 
     def _watch_lifecycle(self) -> None:
         while self.running:
@@ -442,6 +519,18 @@ class DaemonRuntime:
             return result
         return {"ok": False, "error": {"code": "unknown_method", "message": f"unknown method: {method}"}}
 
+    def _serve_connection(self, conn: Any) -> None:
+        try:
+            request = conn.recv()
+            conn.send(self.handle_request(request))
+        except Exception as exc:  # noqa: BLE001
+            try:
+                conn.send({"ok": False, "error": {"code": "daemon_error", "message": str(exc)}})
+            except Exception:
+                pass
+        finally:
+            conn.close()
+
     def serve_forever(self) -> int:
         self._listener = Listener(address=self.address, family="AF_PIPE")
         logger.info("daemon listening on %s", self.address)
@@ -457,16 +546,12 @@ class DaemonRuntime:
                     conn = self._listener.accept()
                 except Exception:
                     break
-                try:
-                    request = conn.recv()
-                    conn.send(self.handle_request(request))
-                except Exception as exc:  # noqa: BLE001
-                    try:
-                        conn.send({"ok": False, "error": {"code": "daemon_error", "message": str(exc)}})
-                    except Exception:
-                        pass
-                finally:
-                    conn.close()
+                threading.Thread(
+                    target=self._serve_connection,
+                    args=(conn,),
+                    name=f"rdx-daemon-conn-{_now_ms()}",
+                    daemon=True,
+                ).start()
         finally:
             if self._listener is not None:
                 try:

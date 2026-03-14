@@ -120,6 +120,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 - `daemon status` 读的是 daemon state，不等价于 local session state，也不保证字段完全同构。
 - `rd.session.get_context` 读的是当前 context 的快照，不等于“直接遍历所有 runtime 内部对象”。
 - 真正的 live replay/debug 对象存在于 runtime 内部对象层，不能简单由某一份状态文件完全代表。
+- `last_artifacts` 是有界 recent index，而不是 artifact 仓库本身；当前 retention policy 默认为 `total_limit=32`、`per_type_limit=8`。
 
 ## 5. `context`、daemon 与 session state
 
@@ -162,6 +163,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --connect
 - 命令通过当前 context 的 daemon 执行或复用状态。
 - 更适合跨多条命令持续操作同一个 session。
 - `MCP` 入口默认也依赖同一套 daemon / context 机制。
+- 长操作期间的中间状态以 daemon `active_operation` 为准，而不是靠日志文本猜测。
 
 ## 7. artifact 的角色
 

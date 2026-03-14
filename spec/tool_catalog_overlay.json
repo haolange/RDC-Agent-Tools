@@ -1,0 +1,23 @@
+{
+  "tools": {
+    "rd.capture.open_replay": {
+      "prerequisites": [
+        {
+          "requires": "capture_file_id",
+          "via_tools": [
+            "rd.capture.open_file"
+          ],
+          "reason": "Opening a replay always requires an opened capture handle."
+        },
+        {
+          "requires": "remote_id",
+          "via_tools": [
+            "rd.remote.connect"
+          ],
+          "when": "options.remote_id_present",
+          "reason": "Remote replay requires a live remote handle in options.remote_id."
+        }
+      ]
+    }
+  }
+}

@@ -18,6 +18,7 @@ _SECTION_HEADING_RE = re.compile(r"^[\u4e00-\u9fff]+[\u3001\uff0c]")
 _WORD_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 _CONTEXT_GROUP = "3.17\uff0c\u4e0a\u4e0b\u6587\u5feb\u7167\u5de5\u5177 (Context Snapshot Tools)"
 _VFS_GROUP = "3.18\uff0cVFS \u5bfc\u822a\u5de5\u5177 (VFS Navigation Tools)"
+_OVERLAY_PATH = Path(__file__).resolve().with_name("tool_catalog_overlay.json")
 _MANUAL_TOOLS = [
     {
         "name": "rd.session.get_context",
@@ -62,6 +63,23 @@ _MANUAL_TOOLS = [
         "returns_raw": "success (bool)<br>path (str)<br>node (dict): \u5305\u542b {name, path, kind, exists, requires_session, operations, summary?}<br>resolved_session_id (str, \u53ef\u9009)<br>context_id (str)<br>error_message (str, \u53ef\u9009)",
     },
 ]
+_STATE_PREREQUISITES = {
+    "capture_file_id": {
+        "requires": "capture_file_id",
+        "via_tools": ["rd.capture.open_file"],
+        "reason": "This tool requires an opened capture handle before it can act on capture-backed state.",
+    },
+    "session_id": {
+        "requires": "session_id",
+        "via_tools": ["rd.capture.open_file", "rd.capture.open_replay"],
+        "reason": "This tool operates on a live replay session.",
+    },
+    "remote_id": {
+        "requires": "remote_id",
+        "via_tools": ["rd.remote.connect"],
+        "reason": "This tool targets a live remote endpoint handle.",
+    },
+}
 
 
 def _extract_param_names(param_line: str) -> List[str]:
@@ -191,6 +209,70 @@ def _normalize_source_path(source_path: Path, repo_root: Path) -> str:
         return source_path.name
 
 
+def _load_overlay() -> Dict[str, Any]:
+    if not _OVERLAY_PATH.is_file():
+        return {"tools": {}}
+    payload = json.loads(_OVERLAY_PATH.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return {"tools": {}}
+    tools = payload.get("tools")
+    if not isinstance(tools, dict):
+        payload["tools"] = {}
+    return payload
+
+
+def _infer_prerequisites(tool_name: str, param_names: List[str]) -> List[Dict[str, Any]]:
+    prerequisites: List[Dict[str, Any]] = []
+    for param_name in param_names:
+        item = _STATE_PREREQUISITES.get(param_name)
+        if item is None:
+            continue
+        prerequisites.append(dict(item))
+    if tool_name.startswith("rd.remote.") and tool_name != "rd.core.init":
+        prerequisites.append(
+            {
+                "requires": "capability.remote",
+                "via_tools": ["rd.core.init"],
+                "reason": "Remote tools require remote capability to be enabled for the current runtime.",
+            }
+        )
+    if tool_name.startswith("rd.app."):
+        prerequisites.append(
+            {
+                "requires": "capability.app_api",
+                "via_tools": ["rd.core.init"],
+                "reason": "In-process app tools require app API integration to be enabled.",
+            }
+        )
+    unique: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in prerequisites:
+        key = (str(item.get("requires") or ""), str(item.get("when") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def _apply_overlay(tools: List[Dict[str, Any]], overlay: Dict[str, Any]) -> List[Dict[str, Any]]:
+    tool_overrides = overlay.get("tools") if isinstance(overlay, dict) else {}
+    if not isinstance(tool_overrides, dict):
+        return tools
+    updated: List[Dict[str, Any]] = []
+    for tool in tools:
+        name = str(tool.get("name") or "").strip()
+        override = tool_overrides.get(name)
+        if isinstance(override, dict):
+            merged = dict(tool)
+            for key, value in override.items():
+                merged[key] = value
+            updated.append(merged)
+        else:
+            updated.append(tool)
+    return updated
+
+
 def build_catalog(source_path: Path, output_path: Path) -> Dict[str, Any]:
     repo_root = output_path.resolve().parents[1]
     if source_path.suffix.lower() == ".docx":
@@ -209,6 +291,7 @@ def build_catalog(source_path: Path, output_path: Path) -> Dict[str, Any]:
                 "parameter_raw": parameter_raw,
                 "returns_raw": row["returns_raw"],
                 "param_names": _extract_param_names(parameter_raw),
+                "prerequisites": _infer_prerequisites(row["name"], _extract_param_names(parameter_raw)),
             },
         )
 
@@ -225,8 +308,11 @@ def build_catalog(source_path: Path, output_path: Path) -> Dict[str, Any]:
                 "parameter_raw": parameter_raw,
                 "returns_raw": row["returns_raw"],
                 "param_names": _extract_param_names(parameter_raw),
+                "prerequisites": _infer_prerequisites(row["name"], _extract_param_names(parameter_raw)),
             },
         )
+
+    tools = _apply_overlay(tools, _load_overlay())
 
     payload: Dict[str, Any] = {
         "source_path": _normalize_source_path(source_path, repo_root),

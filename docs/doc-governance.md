@@ -68,6 +68,7 @@
 - `docs/tools.md`
 - `docs/agent-model.md`
 - `docs/doc-governance.md`
+- 如新增/修改 `prerequisites`，同步检查 frameworks 的 tool snapshot 与 contract validators
 - 如涉及开发后自测流程，再检查 `AGENTS.md`
 
 ### session / context / daemon 语义变更

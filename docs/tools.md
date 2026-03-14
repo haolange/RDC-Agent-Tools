@@ -16,6 +16,7 @@
 - runtime 行为是平台真相的运行时体现。
 - `CLI` 只是部分平台动作的 convenience wrapper，不是完整能力面的等价镜像，也不是规范源。
 - 规范定义以 `spec/tool_catalog.json` 为准。
+- catalog 现在包含结构化 `prerequisites`；它是 Agent 做静态前置推理的第一入口，不应再把 tool 顺序知识隐藏在文档段落或运行时报错里。
 
 补充一条入口边界：
 
@@ -64,6 +65,7 @@
 - `rd.capture.open_replay` 的 remote 入口是 `options.remote_id`，而不是隐式回退到 `localhost`。
 - remote replay 成功后，原 `remote_id` 会进入 consumed 生命周期语义，不再能继续 `ping` / `disconnect` / `open_replay`。
 - 若后续继续对旧 `remote_id` 调用 remote tool，预期会得到 `remote_handle_consumed` 一类生命周期错误，而不是“平台随机坏了”。
+- `rd.remote.connect` 与 `rd.capture.open_replay` 会更新结构化 progress；daemon 路径下应通过 `daemon status/get_state -> active_operation` 读取统一状态面。
 
 ## 权威来源
 

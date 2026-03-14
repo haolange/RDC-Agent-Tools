@@ -25,6 +25,7 @@ SCAN_SKIP_PREFIXES = (
     ".git/",
     "intermediate/",
     ".pytest_cache/",
+    ".venv/",
 )
 REQUIRED_DOCS = (
     "README.md",

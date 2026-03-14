@@ -190,6 +190,8 @@ def _normalize_daemon_state_payload(payload: Dict[str, Any], context: Optional[s
     )
     state["attached_clients"] = _normalize_attached_clients(payload.get("attached_clients"))
     state["active_request_count"] = int(payload.get("active_request_count") or 0)
+    active_operation = payload.get("active_operation")
+    state["active_operation"] = dict(active_operation) if isinstance(active_operation, dict) else {}
     state["session_id"] = str(payload.get("session_id") or "").strip()
     state["capture_file_id"] = str(payload.get("capture_file_id") or "").strip()
     state["capture_path"] = str(payload.get("capture_path") or "").strip()

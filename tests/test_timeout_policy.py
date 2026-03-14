@@ -111,9 +111,9 @@ def test_dispatch_remote_connect_uses_default_timeout_when_missing(monkeypatch) 
         captured["url"] = url
         captured["timeout_ms"] = timeout_ms
 
-    monkeypatch.setattr(server, "_offload", _inline_offload)
-    monkeypatch.setattr(server, "_wait_for_remote_endpoint", _capture_wait)
-    monkeypatch.setattr(server, "_create_remote_server_connection", lambda url: DummyRemoteServer())
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_wait_for_remote_endpoint", _capture_wait)
+    monkeypatch.setattr(server.server_runtime, "_create_remote_server_connection", lambda url: DummyRemoteServer())
 
     server._runtime.remotes.clear()
     server._runtime.enable_remote = True

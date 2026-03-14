@@ -18,6 +18,18 @@ _MOJIBAKE_FRAGMENTS = (
     "\ufffd",
 )
 _PLACEHOLDER_RE = re.compile(r"\?{4,}")
+_ALLOWED_PREREQS = {
+    "capture_file_id",
+    "session_id",
+    "remote_id",
+    "active_event_id",
+    "capability.remote",
+    "capability.app_api",
+}
+_ALLOWED_WHEN = {
+    "",
+    "options.remote_id_present",
+}
 
 
 def _iter_readability_errors(payload: dict[str, Any]) -> list[str]:
@@ -46,6 +58,46 @@ def _iter_readability_errors(payload: dict[str, Any]) -> list[str]:
             text = str(item.get(field) or "")
             if _PLACEHOLDER_RE.search(text) or any(fragment in text for fragment in _MOJIBAKE_FRAGMENTS):
                 issues.append(f"{name}:{field} contains unreadable text")
+    return issues
+
+
+def _iter_schema_errors(payload: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    tools = payload.get("tools", [])
+    names = {str(item.get("name") or "").strip() for item in tools if isinstance(item, dict)}
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        prereqs = item.get("prerequisites", [])
+        if not isinstance(prereqs, list):
+            issues.append(f"{name}: prerequisites must be a list")
+            continue
+        seen: set[tuple[str, str]] = set()
+        for prereq in prereqs:
+            if not isinstance(prereq, dict):
+                issues.append(f"{name}: prerequisite must be an object")
+                continue
+            requires = str(prereq.get("requires") or "").strip()
+            when = str(prereq.get("when") or "").strip()
+            via_tools = prereq.get("via_tools", [])
+            if requires not in _ALLOWED_PREREQS:
+                issues.append(f"{name}: invalid prerequisite requires={requires}")
+            if when not in _ALLOWED_WHEN:
+                issues.append(f"{name}: invalid prerequisite when={when}")
+            if not isinstance(via_tools, list) or not via_tools:
+                issues.append(f"{name}: prerequisite {requires} must declare via_tools")
+            else:
+                for via_tool in via_tools:
+                    via_name = str(via_tool or "").strip()
+                    if via_name == name:
+                        issues.append(f"{name}: prerequisite {requires} cannot self-reference via_tools")
+                    if via_name not in names:
+                        issues.append(f"{name}: prerequisite {requires} references unknown tool {via_name}")
+            key = (requires, when)
+            if key in seen:
+                issues.append(f"{name}: duplicate prerequisite {requires} when={when or '<always>'}")
+            seen.add(key)
     return issues
 
 
@@ -78,6 +130,13 @@ def main() -> int:
         for issue in readability_issues[:20]:
             print(f"- {issue}")
         return 5
+
+    schema_issues = _iter_schema_errors(data)
+    if schema_issues:
+        print("[spec] Catalog schema validation failed")
+        for issue in schema_issues[:20]:
+            print(f"- {issue}")
+        return 6
 
     print(f"[spec] Catalog validation passed ({len(unique)} unique rd.* tools)")
     return 0

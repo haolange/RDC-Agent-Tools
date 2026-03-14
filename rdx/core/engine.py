@@ -13,6 +13,7 @@ from .artifact_publisher import ArtifactPublisher
 from .contracts import canonical_error, canonical_success, collect_artifact_candidates
 from .errors import CoreError, InternalToolError, NotFoundError, map_exception
 from .operation_registry import OperationRegistry
+from rdx.progress import ProgressReporter
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class ExecutionContext:
     remote: bool = False
     trace_id: str = field(default_factory=lambda: f"trc_{uuid.uuid4().hex[:12]}")
     metadata: Dict[str, Any] = field(default_factory=dict)
+    progress_reporter: Optional[ProgressReporter] = None
 
 
 class CoreEngine:

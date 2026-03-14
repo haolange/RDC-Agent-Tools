@@ -73,13 +73,16 @@
   - `rd.resource.get_usage` / `rd.resource.get_history` 返回的 `raw_event_id` 仅用于诊断，不应默认直接传回 `rd.event.*`。
 - 把 handle 当作短生命周期引用。
   - 上层如需缓存，必须准备重建 session 的恢复路径，而不是把 handle 当成永久主键。
+- 先读 catalog 的 `prerequisites`，再决定 tool 序列。
+  - session / capture / remote / capability 前置应优先做静态满足性判断。
 - 显式参数优先于 snapshot 默认值。
   - `rd.session.*` 只用于补充上下文，不应覆盖本轮调用显式给出的参数。
 - 优先轻量调用。
   - 先获取事件、状态、元数据，再进入导出、diff、debug 等更重的操作。
 - 失败时先看共享契约。
-  - 先检查 `ok` 与 `error_message`。
-  - 如果需要归因，再看 `error.details.source_layer`、`classification`、`capture_context`、`renderdoc_status`。
+- 先检查 `ok` 与 `error_message`。
+- 如果需要归因，再看 `error.details.source_layer`、`classification`、`capture_context`、`renderdoc_status`。
+- 对长耗时操作，优先看 progress/status，而不是把“静默等待”当作失败信号。
 
 ## 5. 恢复职责 ownership
 

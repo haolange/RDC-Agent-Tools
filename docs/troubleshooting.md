@@ -238,3 +238,7 @@ rdx call rd.session.update_context --args-json "{\"key\":\"focus_pixel\",\"value
 短时间误关 shell 后，通常仍可在相同 context 上重新附着。
 
 长时间无人接管时，daemon 会因无 attached client 且超过 idle TTL 自动退出。
+## 长操作静默
+
+- 若 `rd.remote.connect` 或 `rd.capture.open_replay` 耗时较长，优先读取 daemon `status/get_state` 中的 `active_operation`。
+- 若没有 push-style progress，`active_operation.stage` 仍是唯一权威中间状态，不要再依赖日志文本推断。

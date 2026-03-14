@@ -58,3 +58,13 @@ python scripts/check_markdown_health.py
 - `*.md` 编码是否为 UTF-8 with BOM
 - 关键文档是否存在
 - 本地 Markdown 链接是否悬空
+## 新增运行时配置
+
+- `snapshot_retention.total_limit`
+  - context snapshot 中 `last_artifacts` 的全局上限，默认 `32`。
+- `snapshot_retention.per_type_limit`
+  - context snapshot 中同一 `artifact.type` 的上限，默认 `8`。
+- `confidence_weights`
+  - `sharpness` / `consistency` / `range_factor` 三项 bisect 置信度权重；权重在写入时会归一化。
+- `adaptive_bisect.mode`
+  - `off | recommend`；首版只支持离线推荐，不做在线自动写回。

@@ -56,9 +56,9 @@ def test_dispatch_remote_connect_returns_live_handle_and_server_info(monkeypatch
     async def _inline_offload(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
-    monkeypatch.setattr(server, "_offload", _inline_offload)
-    monkeypatch.setattr(server, "_wait_for_remote_endpoint", lambda url, timeout_ms: None)
-    monkeypatch.setattr(server, "_create_remote_server_connection", lambda url: DummyRemoteServer())
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_wait_for_remote_endpoint", lambda url, timeout_ms: None)
+    monkeypatch.setattr(server.server_runtime, "_create_remote_server_connection", lambda url: DummyRemoteServer())
 
     server._runtime.remotes.clear()
     server._runtime.enable_remote = True
@@ -88,13 +88,13 @@ def test_dispatch_remote_connect_failure_does_not_allocate_remote_id(monkeypatch
     async def _inline_offload(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
-    monkeypatch.setattr(server, "_offload", _inline_offload)
-    monkeypatch.setattr(server, "_wait_for_remote_endpoint", lambda url, timeout_ms: None)
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_wait_for_remote_endpoint", lambda url, timeout_ms: None)
 
     def _boom(url: str) -> DummyRemoteServer:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(server, "_create_remote_server_connection", _boom)
+    monkeypatch.setattr(server.server_runtime, "_create_remote_server_connection", _boom)
 
     server._runtime.remotes.clear()
     server._runtime.enable_remote = True
@@ -112,7 +112,7 @@ def test_dispatch_remote_connect_failure_does_not_allocate_remote_id(monkeypatch
 
 
 def test_dispatch_capture_open_replay_consumes_remote_handle(monkeypatch) -> None:
-    original_session_manager = server._session_manager
+    original_session_manager = server.server_runtime._session_manager
     original_captures = dict(server._runtime.captures)
     original_replays = dict(server._runtime.replays)
     original_remotes = dict(server._runtime.remotes)
@@ -126,10 +126,10 @@ def test_dispatch_capture_open_replay_consumes_remote_handle(monkeypatch) -> Non
     async def _fake_get_controller(session_id: str) -> FakeController:
         return FakeController()
 
-    monkeypatch.setattr(server, "_offload", _inline_offload)
-    monkeypatch.setattr(server, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
 
-    server._session_manager = fake_manager
+    server.server_runtime._session_manager = fake_manager
     server._runtime.captures = {
         "capf_demo": server.CaptureFileHandle(capture_file_id="capf_demo", file_path="capture.rdc", read_only=True)
     }
@@ -177,7 +177,7 @@ def test_dispatch_capture_open_replay_consumes_remote_handle(monkeypatch) -> Non
     finally:
         clear_context_snapshot()
         server._runtime.context_snapshots.clear()
-        server._session_manager = original_session_manager
+        server.server_runtime._session_manager = original_session_manager
         server._runtime.captures = original_captures
         server._runtime.replays = original_replays
         server._runtime.remotes = original_remotes

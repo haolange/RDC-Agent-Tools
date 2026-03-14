@@ -390,12 +390,29 @@ class BisectRange(BaseModel):
     hi: int
 
 
+class ConfidenceWeights(BaseModel):
+    sharpness: float = 0.50
+    consistency: float = 0.35
+    range_factor: float = 0.15
+
+
+class ConfidenceBreakdown(BaseModel):
+    sharpness: float = 0.0
+    consistency: float = 0.0
+    range_factor: float = 0.0
+    weighted_total: float = 0.0
+
+
 class BisectResult(BaseModel):
     first_bad_event_id: int
     first_good_event_id: int
     evidence_chain: List[str] = Field(default_factory=list)
     confidence: float = 0.0
     iterations: int = 0
+    confidence_breakdown: ConfidenceBreakdown = Field(default_factory=ConfidenceBreakdown)
+    confidence_weights: ConfidenceWeights = Field(default_factory=ConfidenceWeights)
+    confidence_profile: str = "default"
+    boundary_consistent_count: int = 0
 
 
 # ---------------------------------------------------------------------------
