@@ -10,8 +10,9 @@
   - `rg` 不可用/权限失败时需要 Python fallback；
   - literal/path 规则与 regex 规则必须分开处理；
   - release gate 不应把自己的 rule 定义与测试样例误判成仓库泄漏。
-- 当前 catalog 数量以 `spec/tool_catalog.json` 为准；截至 2026-03-10 为 `202`。
+- 当前 catalog 数量以 `spec/tool_catalog.json` 为准；当前为 `210`。
 - 只读 `rd.vfs.*` 已进入公开能力面，但它是导航层，不是第二套平台真相。
+- `rd.session.*` 现已公开 session 表 / current pointer / 本地恢复入口；`rd.core.*` 现已公开操作历史、runtime 指标与结构化 discovery 入口。
 
 ## 当前产品边界
 

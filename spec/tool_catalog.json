@@ -1,9 +1,9 @@
 {
   "source_path": "spec/doc_extracted.txt",
-  "tool_count": 202,
-  "generated_at": "2026-03-15T19:35:29.927285Z",
+  "tool_count": 210,
+  "generated_at": "2026-03-16T10:13:19.621591Z",
   "groups": {
-    "3.1，核心与环境管理 (Core & Environment)": 9,
+    "3.1，核心与环境管理 (Core & Environment)": 14,
     "3.2，捕获文件与 Replay Session (Capture & Replay)": 13,
     "3.3，事件导航与 API 检查 (Event Navigation & API Inspection)": 12,
     "3.4，管线状态查询 (Pipeline State Inspection)": 25,
@@ -19,7 +19,7 @@
     "3.14，诊断工具 (Diagnostics, Heuristic Checks)": 11,
     "3.15，专家级宏工作流 (Expert Macro Workflows)": 14,
     "3.16，通用辅助工具 (Utilities, Optional)": 6,
-    "3.17，上下文快照工具 (Context Snapshot Tools)": 2,
+    "3.17，上下文快照工具 (Context Snapshot Tools)": 5,
     "3.18，VFS 导航工具 (VFS Navigation Tools)": 4
   },
   "tools": [
@@ -385,12 +385,13 @@
       "name": "rd.event.get_actions",
       "group": "3.3，事件导航与 API 检查 (Event Navigation & API Inspection)",
       "description": "用于获取当前帧的根 Action 列表，进而构建 Drawcall/Marker 树（兼容 V3 版本）。",
-      "parameter_raw": "session_id (str)<br>include_markers (bool, 可选, 默认 true)<br>include_drawcalls (bool, 可选, 默认 true)",
-      "returns_raw": "ok (bool)<br>data (dict): {actions}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "parameter_raw": "session_id (str)<br>include_markers (bool, 可选, 默认 true)<br>include_drawcalls (bool, 可选, 默认 true)<br>max_nodes (int, 可选, 默认 2000): 有界返回的最大事件节点数",
+      "returns_raw": "ok (bool)<br>data (dict): {actions, pagination}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
         "include_markers",
-        "include_drawcalls"
+        "include_drawcalls",
+        "max_nodes"
       ],
       "prerequisites": [
         {
@@ -407,12 +408,15 @@
       "name": "rd.event.get_action_tree",
       "group": "3.3，事件导航与 API 检查 (Event Navigation & API Inspection)",
       "description": "获取当前帧完整的 Action 树，支持按深度或过滤条件进行裁剪。",
-      "parameter_raw": "session_id (str)<br>max_depth (int, 可选): 限制树的深度<br>filter (dict, 可选): 过滤条件，例如 {name_regex?, flags_include?, flags_exclude?, event_id_range?}",
-      "returns_raw": "ok (bool)<br>data (dict): {root}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "parameter_raw": "session_id (str)<br>max_depth (int, 可选)<br>filter (dict, 可选)<br>offset (int, 可选, 默认 0): 根节点分页偏移<br>limit (int, 可选, 默认 256): 根节点分页大小<br>max_nodes (int, 可选, 默认 2000): 整棵树返回的最大节点数",
+      "returns_raw": "ok (bool)<br>data (dict): {root, pagination}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
         "max_depth",
-        "filter"
+        "filter",
+        "offset",
+        "limit",
+        "max_nodes"
       ],
       "prerequisites": [
         {
@@ -4268,9 +4272,9 @@
     {
       "name": "rd.session.get_context",
       "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
-      "description": "读取当前 context 快照，返回 runtime、remote、focus 与 recent artifacts 的结构化状态。",
+      "description": "读取当前 context 快照与持久化状态索引，返回 runtime、remote、focus、session 表、恢复信息、最近操作与限制配置。",
       "parameter_raw": "",
-      "returns_raw": "ok (bool)<br>data (dict): {context_id, runtime, remote, focus, last_artifacts, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, runtime, remote, focus, last_artifacts, current_session_id, sessions, recovery, limits, active_operation, recent_operations, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [],
       "prerequisites": []
     },
@@ -4283,6 +4287,108 @@
       "param_names": [
         "key",
         "value"
+      ],
+      "prerequisites": []
+    },
+    {
+      "name": "rd.session.list_sessions",
+      "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
+      "description": "列出当前 context 下的持久化 session 表、当前选中 session 与恢复摘要。",
+      "parameter_raw": "",
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, current_session_id, sessions, recovery, limits}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "param_names": [],
+      "prerequisites": []
+    },
+    {
+      "name": "rd.session.select_session",
+      "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
+      "description": "切换当前 context 的 current session 指针，而不销毁其他已持有的 session。",
+      "parameter_raw": "session_id (str)",
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, runtime, remote, focus, current_session_id, sessions, recovery, limits, recent_operations, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "param_names": [
+        "session_id"
+      ],
+      "prerequisites": []
+    },
+    {
+      "name": "rd.session.resume",
+      "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
+      "description": "基于持久化状态尝试恢复当前 context 的本地 `.rdc` session；可选仅校验指定 session 的恢复结果。",
+      "parameter_raw": "session_id (str, 可选): 若给定则在恢复完成后校验该 session 是否已恢复为 live",
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, runtime, remote, focus, current_session_id, sessions, recovery, limits, recent_operations, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "param_names": [
+        "session_id"
+      ],
+      "prerequisites": []
+    },
+    {
+      "name": "rd.core.get_operation_history",
+      "group": "3.1，核心与环境管理 (Core & Environment)",
+      "description": "读取当前 context 最近的 trace-linked 操作历史，可按时间、状态与操作名过滤。",
+      "parameter_raw": "since_ms (int, 可选): 仅返回该时间戳之后更新过的操作<br>operation (str, 可选): 按操作名子串过滤<br>status (str, 可选): 按 running/completed/failed 过滤<br>max_items (int, 可选, 默认 32)",
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, operations}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "param_names": [
+        "since_ms",
+        "operation",
+        "status",
+        "max_items"
+      ],
+      "prerequisites": []
+    },
+    {
+      "name": "rd.core.get_runtime_metrics",
+      "group": "3.1，核心与环境管理 (Core & Environment)",
+      "description": "读取当前 context 的自监控指标、限制配置、恢复摘要与最近操作统计。",
+      "parameter_raw": "",
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, limits, metrics, recovery, recent_operations}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "param_names": [],
+      "prerequisites": []
+    },
+    {
+      "name": "rd.core.list_tools",
+      "group": "3.1，核心与环境管理 (Core & Environment)",
+      "description": "按 namespace、group、capability、role、intent 等结构化条件列出可用 tool，避免一次性注入全部描述。",
+      "parameter_raw": "namespace (str, 可选)<br>group (str, 可选)<br>capability (str, 可选)<br>role (str, 可选): canonical|macro|navigation<br>intent (str, 可选)<br>mutates_state (bool, 可选)<br>detail_level (str, 可选, 默认 'summary'): summary|full",
+      "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "param_names": [
+        "namespace",
+        "group",
+        "capability",
+        "role",
+        "intent",
+        "mutates_state",
+        "detail_level"
+      ],
+      "prerequisites": []
+    },
+    {
+      "name": "rd.core.search_tools",
+      "group": "3.1，核心与环境管理 (Core & Environment)",
+      "description": "按名称、描述、group、capability 与 intent 的结构化子串搜索 tool，返回适配 Agent 的轻量视图。",
+      "parameter_raw": "query (str, 可选)<br>namespace (str, 可选)<br>capability (str, 可选)<br>role (str, 可选): canonical|macro|navigation<br>intent (str, 可选)<br>detail_level (str, 可选, 默认 'summary'): summary|full",
+      "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "param_names": [
+        "query",
+        "namespace",
+        "capability",
+        "role",
+        "intent",
+        "detail_level"
+      ],
+      "prerequisites": []
+    },
+    {
+      "name": "rd.core.get_tool_graph",
+      "group": "3.1，核心与环境管理 (Core & Environment)",
+      "description": "返回 tool 之间的 prerequisite 与 macro-to-canonical 依赖图，帮助 Agent 推断调用链与展开路径。",
+      "parameter_raw": "query (str, 可选)<br>namespace (str, 可选)<br>capability (str, 可选)<br>role (str, 可选): canonical|macro|navigation<br>intent (str, 可选)",
+      "returns_raw": "ok (bool)<br>data (dict): {tools, edges}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "param_names": [
+        "query",
+        "namespace",
+        "capability",
+        "role",
+        "intent"
       ],
       "prerequisites": []
     },

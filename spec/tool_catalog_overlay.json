@@ -1,5 +1,27 @@
 {
   "tools": {
+    "rd.event.get_actions": {
+      "parameter_raw": "session_id (str)<br>include_markers (bool, 可选, 默认 true)<br>include_drawcalls (bool, 可选, 默认 true)<br>max_nodes (int, 可选, 默认 2000): 有界返回的最大事件节点数",
+      "param_names": [
+        "session_id",
+        "include_markers",
+        "include_drawcalls",
+        "max_nodes"
+      ],
+      "returns_raw": "ok (bool)<br>data (dict): {actions, pagination}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)"
+    },
+    "rd.event.get_action_tree": {
+      "parameter_raw": "session_id (str)<br>max_depth (int, 可选)<br>filter (dict, 可选)<br>offset (int, 可选, 默认 0): 根节点分页偏移<br>limit (int, 可选, 默认 256): 根节点分页大小<br>max_nodes (int, 可选, 默认 2000): 整棵树返回的最大节点数",
+      "param_names": [
+        "session_id",
+        "max_depth",
+        "filter",
+        "offset",
+        "limit",
+        "max_nodes"
+      ],
+      "returns_raw": "ok (bool)<br>data (dict): {root, pagination}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)"
+    },
     "rd.capture.open_replay": {
       "prerequisites": [
         {

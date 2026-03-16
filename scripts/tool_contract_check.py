@@ -1458,6 +1458,18 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
             args[param] = "GBuffer|gbuffer"
         elif param == "query":
             args[param] = {"name_contains": "Draw"} if tool.startswith("rd.event.") else "shader"
+        elif param == "namespace":
+            args[param] = "rd.core"
+        elif param == "capability":
+            args[param] = "remote"
+        elif param == "role":
+            args[param] = "macro"
+        elif param == "intent":
+            args[param] = "analysis"
+        elif param == "mutates_state":
+            args[param] = False
+        elif param == "status":
+            args[param] = "completed"
         elif param == "target":
             if tool in {"rd.shader.compile", "rd.shader.get_disassembly"}:
                 args[param] = "ps_5_0"

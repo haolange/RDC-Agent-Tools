@@ -53,10 +53,13 @@ remote endpoint
 - `context snapshot`
   - `rd.session.get_context` 返回的 context 级快照。
   - 它汇总当前 runtime 选中的 `session_id`、`capture_file_id`、remote 生命周期、focus 与 recent artifacts，供 Agent 长链调用复用。
+- `persistent context state`
+  - daemon-backed 持久化索引，保存当前 context 的 `captures`、`sessions`、`current_session_id`、`recovery`、`limits` 与 `recent_operations`。
+  - daemon 重启后，本地 `.rdc` session 的恢复以它为准；`context snapshot` 只是当前视角投影。
 
 ## 2. `rd.session.*` 的职责边界
 
-当前公开的 context 工具有两个：
+当前公开的 context 工具有五个：
 
 - `rd.session.get_context`
   - 读取当前 context 的只读快照。
@@ -73,8 +76,14 @@ remote endpoint
     - `active_event_id`
     - `remote_id`
     - `last_artifacts`
+- `rd.session.list_sessions`
+  - 返回当前 context 的 session 表与 `current_session_id`。
+- `rd.session.select_session`
+  - 只切换当前 context 的 current session 指针，不销毁其他 session 记录。
+- `rd.session.resume`
+  - 基于持久化索引恢复本地 `.rdc` session；remote session 不会自动重连。
 
-因此，`rd.session.*` 不是“伪 session 管理器”，而是“context 状态读取与补充入口”。
+因此，`rd.session.*` 不是“伪 session 管理器”，而是“context 状态读取、session 选择与恢复入口”。
 
 ## 3. `CLI capture open` 实际做了什么
 
@@ -96,7 +105,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 
 ## 4. 状态面与来源优先级
 
-`rdx-tools` 至少存在三类彼此相关但不等价的状态面：
+`rdx-tools` 至少存在四类彼此相关但不等价的状态面：
 
 - daemon 状态（daemon state）
   - 记录 daemon 生命周期、context、pipe、已附着 client、部分会话摘要。
@@ -104,6 +113,8 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
   - 真正的 replay、debug、active event、controller 等进程内对象。
 - context 快照（context snapshot）
   - 供 Agent 或自动化读取的 context 级快照，汇总 runtime / remote / focus / recent artifacts。
+- persistent context state
+  - 记录 `captures`、`sessions`、`current_session_id`、`recovery`、`limits` 与 `recent_operations`，是本地恢复与多 session 选择的持久化真相。
 
 补充一条 event 语义边界：
 
@@ -115,7 +126,8 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 
 - `capture status` 读的是当前 context 的 daemon / snapshot 摘要，不是 adapter-local 状态文件。
 - `daemon status` 读的是 daemon state，不等于“直接遍历所有 runtime 内部对象”。
-- `rd.session.get_context` 读的是当前 context 的快照，不等于“直接遍历所有 runtime 内部对象”。
+- `rd.session.get_context` 读的是当前 context 的快照与持久化索引组合视图，不等于“直接遍历所有 runtime 内部对象”。
+- `rd.session.list_sessions` / `rd.session.resume` 面向持久化状态索引，不等于“直接遍历所有 runtime 内部对象”。
 - 真正的 live replay/debug 对象存在于 runtime 内部对象层，不能简单由某一份状态文件完全代表。
 - `last_artifacts` 是有界 recent index，而不是 artifact 仓库本身；当前 retention policy 默认为 `total_limit=32`、`per_type_limit=8`。
 
@@ -126,6 +138,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 - daemon 状态（daemon state）
 - runtime 内部对象
 - context 快照（context snapshot）
+- persistent context state
 
 推荐约定：
 
@@ -135,8 +148,10 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 这意味着：
 
 - `CLI` 与 `MCP` 可以共用同一套 daemon 机制。
-- capture、session、active event、focus、recent artifacts 都按 context 隔离。
+- capture、session、active event、focus、recent artifacts、recent operations 都按 context 隔离。
+- 一个 context 现在可以同时持有多条本地 session 记录；`current_session_id` 只表示当前选中的工作面，而不是该 context 唯一能存在的 session。
 - 上层 Agent 如果要跨多轮任务持续工作，优先复用同一 context，而不是把 handle 当作永久主键缓存。
+- `rdx daemon stop` 只停止 daemon，不会清空该 context 的本地恢复索引；真正销毁状态要执行 `rdx context clear` 或 `rd.core.shutdown`。
 
 补充一条入口选择原则：
 

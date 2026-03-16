@@ -27,6 +27,7 @@
 - `capture_file_id`、`session_id` 是运行时句柄，不是长期稳定标识。
 - remote 路径还存在 `remote_id` consumed 生命周期，不能把它当作可无限复用的句柄。
 - 长链任务如果没有 context snapshot，模型很容易忘记上一轮 focus 与 artifact 路径。
+- 一个 context 现在可以持有多条本地 session 记录；如果 Agent 只记住单个 `session_id`，很容易把“当前选中 session”和“context 持有的全部 session”混为一谈。
 - 不是所有底层 RenderDoc `eventId` 都能回灌到 `rd.event.*`；上层必须区分 canonical `event_id` 与 `raw_event_id`。
 - 不要在 replay 仍存活时提前调用 `rd.capture.close_file`；推荐清理顺序是先 `rd.capture.close_replay`，再关闭对应 capture handle。
 - 失败恢复依赖共享契约，调用端需要明确检查 `ok`、`error.message` 与 `error.details`。
@@ -67,7 +68,16 @@
   - 对 Android remote，不要假设外部 `qrenderdoc` 已经替你做了 bootstrap；`rd.remote.connect` 的 `options.transport="adb_android"` 才是平台定义入口。
 - 显式保存关键状态。
   - 至少保存 `capture_file_id`、`session_id`、当前 `frame_index`、必要时保存 `event_id`。
-  - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
+  - 长链任务优先通过 `rd.session.get_context` / `rd.session.list_sessions` / `rd.session.update_context` 维护 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
+- 多 session context 下显式选择 current session。
+  - 当 `rd.session.list_sessions` 返回多条记录时，后续 inspection 前优先通过 `rd.session.select_session` 锁定当前工作面。
+- 对 daemon 重启后的本地链路，优先读取恢复面。
+  - 本地 `.rdc` session 可通过 `rd.session.get_context` / `rd.session.resume` 自动或显式恢复。
+  - remote session 不会自动重连；一旦 daemon 退出，应重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
+- 先用 discovery 接口，再决定注入多少 tool 描述。
+  - `rd.core.list_tools` 适合按 `namespace`、`group`、`capability`、`role` 做结构化枚举。
+  - `rd.core.search_tools` 适合按当前任务关键词做轻量筛选。
+  - `rd.core.get_tool_graph` 适合查看 prerequisite 与 macro-to-canonical 依赖图，而不是让模型自己猜工具调用链。
 - 只把可 round-trip 的 canonical `event_id` 当作后续 `rd.event.set_active` 候选。
   - `rd.resource.get_usage` / `rd.resource.get_history` 返回的 `raw_event_id` 仅用于诊断，不应默认直接传回 `rd.event.*`。
 - 把 handle 当作短生命周期引用。
@@ -82,6 +92,9 @@
 - 先检查 `ok` 与 `error.message`。
 - 如果需要归因，再看 `error.details.source_layer`、`classification`、`capture_context`、`renderdoc_status`。
 - 对长耗时操作，优先看 progress/status，而不是把“静默等待”当作失败信号。
+- 对最近动作与恢复尝试，优先看结构化历史而不是日志猜测。
+  - `rd.core.get_operation_history` 返回 trace-linked 最近调用。
+  - `rd.core.get_runtime_metrics` 返回恢复次数、拒绝次数、进程内存与近期耗时摘要。
 
 ## 5. 恢复职责 ownership
 
@@ -123,8 +136,11 @@
 - 任务开始时如何声明当前入口模式
 - 选择 `MCP` 时如何校验 MCP server 已配置
 - 如何建立与复用 session
+- 如何在一个 context 内枚举并切换多条 session
+- daemon 停止后哪些状态会保留，哪些 remote 链路需要重建
 - 如何保存关键状态
 - 如何通过 `rd.session.get_context` / `rd.session.update_context` 维护长链状态
+- 如何通过 `rd.core.list_tools` / `rd.core.search_tools` / `rd.core.get_tool_graph` 控制 tool discovery 的粒度
 - 如何处理失败与恢复
 
 上层框架文档不必描述：

@@ -26,6 +26,14 @@ rdx daemon stop
 rdx context clear
 ```
 
+补充语义：
+
+- `rdx daemon stop`
+  - 只停止 daemon。
+  - 默认保留本地 `.rdc` 的持久化 session/capture 索引，便于后续 warm resume。
+- `rdx context clear`
+  - 会显式销毁当前 context 的 snapshot 与持久化恢复状态。
+
 ## `scripts/` 主链
 
 优先使用正式支持的脚本主链：`scripts/check_markdown_health.py`、`scripts/release_gate.py`、`scripts/rdx_bat_command_smoke.py`、`scripts/tool_contract_check.py`、`scripts/smoke_report_aggregator.py`、`scripts/package_runtime.py`、`scripts/cleanup_workspace.py`。
@@ -47,20 +55,21 @@ rdx.bat --non-interactive mcp --ensure-env
 
 排查问题时，请先区分四类状态面：
 
-- 本地 session state（local session state）
-  - 由 `capture open` 等命令写入本地状态文件，供后续命令读取。
 - daemon 状态（daemon state）
   - 记录 daemon 生命周期、context、pipe、已附着 client、部分会话摘要。
 - runtime 内部对象
   - 真正的 replay、debug、active event、controller 等进程内对象。
 - context 快照（context snapshot）
   - 由 `rd.session.get_context` 暴露的当前 context 快照，汇总 runtime / remote / focus / recent artifacts。
+- persistent context state
+  - 保存 `captures`、`sessions`、`current_session_id`、`recovery`、`limits` 与 `recent_operations`，用于多 session 选择与本地恢复。
 
 因此：
 
-- `capture status` 读的是 local session state，不是直接探测 live runtime。
-- `daemon status` 读的是 daemon state，不等价于 local session state，也不保证字段完全同构。
+- `capture status` 读的是 daemon 摘要与 context 视角，不是直接探测全部 live runtime。
+- `daemon status` 读的是 daemon state，不等价于 runtime 内部对象，也不保证字段完全同构。
 - `rd.session.get_context` 适合排查当前链路视角，但它也不是“所有 runtime 内部对象的完整转储”。
+- `rd.session.list_sessions` / `rd.session.resume` 更适合排查“这个 context 还持有哪些本地 session 记录、哪些已经 degraded”。
 
 ## `rdx daemon status` 返回 `no active daemon`
 
@@ -83,16 +92,20 @@ rdx.bat --non-interactive mcp --ensure-env
 
 原因通常不是“平台自相矛盾”，而是因为两条命令读取的是不同状态面：
 
-- `capture status` 读取 local session state
+- `capture status` 读取当前 context 视角
 - `daemon status` 读取 daemon state
 
 可能场景包括：
 
-- daemon 仍然存活，但 local session state 尚未写入或已被清理
+- daemon 仍然存活，但当前 context 没有 live runtime session
 - daemon 仍然存活，但当前 context 下没有可复用的 capture/session 摘要
 - 你查询的是不同 context
 
-如果目标是继续使用当前 `.rdc` 链路，优先检查当前 context，并视情况重新执行 `capture open`。
+如果目标是继续使用当前 `.rdc` 链路，优先检查当前 context，并按顺序查看：
+
+- `rd.session.get_context`
+- `rd.session.list_sessions`
+- `rd.session.resume`
 
 ## `rd.event.set_active` 返回 `event_not_found`
 
@@ -238,6 +251,8 @@ rdx call rd.session.update_context --args-json "{\"key\":\"focus_pixel\",\"value
 短时间误关 shell 后，通常仍可在相同 context 上重新附着。
 
 长时间无人接管时，daemon 会因无 attached client 且超过 idle TTL 自动退出。
+
+daemon 退出后，本地 `.rdc` session 默认会保留在持久化 context state 中；再次附着同一 context 时，平台会优先尝试自动恢复本地 session。remote session 不会自动重连。
 ## 长操作静默
 
 - 若 `rd.remote.connect` 或 `rd.capture.open_replay` 耗时较长，优先读取 daemon `status/get_state` 中的 `active_operation`。

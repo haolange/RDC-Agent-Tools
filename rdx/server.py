@@ -16,6 +16,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from rdx import server_runtime
 from rdx.core.artifact_publisher import ArtifactPublisher
 from rdx.core.contracts import canonical_error
+from rdx.core.errors import map_exception
 from rdx.core.engine import CoreEngine, ExecutionContext
 from rdx.daemon.client import daemon_request
 from rdx.progress import ProgressReporter, ProgressSink
@@ -89,9 +90,34 @@ async def dispatch_operation(
     context_token = server_runtime._CURRENT_CONTEXT_ID.set(chosen_context_id)
     progress_token = server_runtime._CURRENT_PROGRESS_REPORTER.set(ctx.progress_reporter)
     try:
-        payload = await _core_engine.execute(operation, call_args, context=ctx)
-        if isinstance(payload, dict):
-            server_runtime._postprocess_context_snapshot(operation, call_args, payload, ctx)
+        server_runtime._record_operation_start(
+            chosen_context_id,
+            trace_id=ctx.trace_id,
+            operation=operation,
+            transport=transport,
+            args=call_args,
+        )
+        try:
+            await server_runtime.ensure_context_ready(chosen_context_id)
+            payload = await _core_engine.execute(operation, call_args, context=ctx)
+            if isinstance(payload, dict):
+                server_runtime._postprocess_context_snapshot(operation, call_args, payload, ctx)
+        except Exception as exc:  # noqa: BLE001
+            core_exc = map_exception(exc)
+            payload = canonical_error(
+                result_kind=str(operation),
+                code=core_exc.code,
+                category=core_exc.category,
+                message=core_exc.message,
+                details=core_exc.details,
+                trace_id=ctx.trace_id,
+                transport=ctx.transport,
+            )
+        server_runtime._record_operation_finish(
+            chosen_context_id,
+            trace_id=ctx.trace_id,
+            payload=payload,
+        )
         meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
         server_runtime.logger.info(
             "op.done transport=%s op=%s trace_id=%s ok=%s duration_ms=%s",

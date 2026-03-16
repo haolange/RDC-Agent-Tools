@@ -141,10 +141,21 @@ class SessionManager:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
 
-    async def create_session(self, backend_config: Dict[str, Any], replay_config: Dict[str, Any]) -> SessionInfo:
+    async def create_session(
+        self,
+        backend_config: Dict[str, Any],
+        replay_config: Dict[str, Any],
+        *,
+        preferred_session_id: Optional[str] = None,
+    ) -> SessionInfo:
         backend_type = BackendType.REMOTE if backend_config.get("type") == "remote" else BackendType.LOCAL
         async with self._lock:
-            session_id = _new_id("sess")
+            session_id = str(preferred_session_id or "").strip() or _new_id("sess")
+            if session_id in self._sessions:
+                raise SessionError(
+                    code="session_conflict",
+                    message=f"Session {session_id} already exists",
+                )
             state = SessionState(
                 session_id=session_id,
                 backend_type=backend_type,

@@ -122,11 +122,10 @@ def test_stop_daemon_uses_loaded_state_before_cleanup(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(daemon_client, "_is_process_running", lambda pid: False)
     monkeypatch.setattr(daemon_client, "clear_daemon_state", lambda context="default": cleared.append(f"daemon:{context}"))
     monkeypatch.setattr(daemon_client, "clear_session_state", lambda context="default": cleared.append(f"session:{context}"))
-    monkeypatch.setattr(daemon_client, "clear_context_snapshot", lambda context="default": cleared.append(f"snapshot:{context}"))
 
     ok, message = daemon_client.stop_daemon("ctx-live")
 
     assert ok is True
     assert message == "daemon stopped"
     assert calls == [(321, "ctx-live")]
-    assert cleared == ["daemon:ctx-live", "session:ctx-live", "snapshot:ctx-live"]
+    assert cleared == ["daemon:ctx-live", "session:ctx-live"]

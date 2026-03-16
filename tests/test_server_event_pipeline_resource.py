@@ -271,6 +271,40 @@ def test_event_set_active_validates_before_mutating_state(monkeypatch: pytest.Mo
     assert server._context_snapshot()["runtime"]["active_event_id"] == 101
 
 
+def test_get_action_tree_paginates_and_bounds_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[
+            _FakeAction(101, name="root_a", children=[_FakeAction(111, name="child_a")]),
+            _FakeAction(201, name="root_b", children=[_FakeAction(211, name="child_b")]),
+            _FakeAction(301, name="root_c", children=[_FakeAction(311, name="child_c")]),
+        ]
+    )
+    _install_common_env(monkeypatch, controller)
+    _seed_capture()
+    _seed_session(101)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_event(
+                "get_action_tree",
+                {"session_id": "sess_demo", "offset": 1, "limit": 1, "max_nodes": 2},
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["pagination"] == {
+        "offset": 1,
+        "limit": 1,
+        "max_nodes": 2,
+        "returned_root_count": 1,
+        "total_root_count": 3,
+        "truncated": True,
+    }
+    assert payload["root"]["children"][0]["event_id"] == 201
+    assert payload["root"]["children"][0]["children"][0]["event_id"] == 211
+
+
 def test_ensure_event_repairs_polluted_active_event(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = _FakeController(
         roots=[

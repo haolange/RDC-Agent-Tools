@@ -1,6 +1,6 @@
 ﻿# tool catalog 入口
 
-`rdx-tools` 当前暴露 catalog 定义的 `202` 个规范 `rd.*` tools。
+`rdx-tools` 当前暴露 catalog 定义的 `210` 个规范 `rd.*` tools。
 
 本文只承担 catalog 入口职责，不承担使用教程。如何建立 session、如何理解 `context` 与 daemon、如何给 Agent 写平台说明，请分别参考：
 
@@ -35,6 +35,14 @@
 - `rd.vfs.resolve`
 - `rd.session.get_context`
 - `rd.session.update_context`
+- `rd.session.list_sessions`
+- `rd.session.select_session`
+- `rd.session.resume`
+- `rd.core.get_operation_history`
+- `rd.core.get_runtime_metrics`
+- `rd.core.list_tools`
+- `rd.core.search_tools`
+- `rd.core.get_tool_graph`
 
 其中 `rd.vfs.*` 的定位是：
 
@@ -46,12 +54,21 @@
 其中 `rd.session.*` 用于暴露 context snapshot：
 
 - 读取当前 context 的 runtime / remote / focus / recent artifacts 状态。
+- 读取并切换 `current_session_id` 与 `sessions` 表。
+- 暴露 `recovery`、`limits`、`active_operation` 与 `recent_operations`。
 - 让上层 Agent 只补充 user-owned 字段，例如 `focus_pixel`、`focus_resource_id`、`focus_shader_id`、`notes`。
 - 不允许人工或 Agent 通过它们直接篡改 runtime-owned 字段，如 `session_id`、`capture_file_id`、`active_event_id`、`remote_id`。
+
+其中新增 `rd.core.*` discovery / observability 入口用于：
+
+- 读取 trace-linked 操作历史与当前 runtime 自监控指标。
+- 按 `namespace`、`group`、`capability`、`role`、`intent` 做轻量 tool discovery。
+- 显式返回 prerequisite 与 macro-to-canonical 依赖图，而不是要求 Agent 自己从 210 个 tool 描述中猜调用链。
 
 ## Event 语义
 
 - `rd.event.set_active` 只接受可被 action tree 解析的 canonical `event_id`；失败不会污染 runtime / context 中现有的 `active_event_id`。
+- `rd.event.get_actions` 与 `rd.event.get_action_tree` 现在默认走有界返回，并通过 `pagination` 暴露是否截断；大 capture 下不再默认一次性物化整棵事件树。
 - `rd.pipeline.*` 的同次调用内，snapshot 与 live pipeline 读取共享同一个已解析 event 上下文，不允许前后错位。
 - `rd.resource.get_usage` / `rd.resource.get_history` 会同时暴露：
   - canonical `event_id`

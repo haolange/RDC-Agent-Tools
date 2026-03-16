@@ -56,9 +56,10 @@ daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问
 
 `MCP` server 入口，适合无法直接进入本地环境的外部宿主，或用户明确要求按 `MCP` 接入的场景。
 
-- 暴露 catalog 当前定义的全部 `rd.*` tools；当前 `tool_count` 为 `202`。
+- 暴露 catalog 当前定义的全部 `rd.*` tools；当前 `tool_count` 为 `210`。
 - 新增只读 `rd.vfs.*` 入口，用于以 JSON-first 方式探索 draw/pass/resource/pipeline/context 结构。
-- 已公开包含 `rd.session.get_context` 与 `rd.session.update_context`。
+- 已公开包含 `rd.session.get_context`、`rd.session.update_context`、`rd.session.list_sessions`、`rd.session.select_session`、`rd.session.resume`。
+- 已公开包含 `rd.core.get_operation_history`、`rd.core.get_runtime_metrics`、`rd.core.list_tools`、`rd.core.search_tools`、`rd.core.get_tool_graph`。
 - catalog 现已为 tool 提供结构化 `prerequisites`，上层 Agent 应在调用前优先做静态前置检查，而不是依赖试错。
 - 由上层 client 进行 tool discovery、参数组织与调用编排。
 
@@ -96,6 +97,8 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - 如果复用了已经失效的 `remote_id`，预期生命周期错误码应为 `remote_handle_consumed`。
 - Android remote 可通过 `rd.remote.connect` 的 `options.transport="adb_android"` 触发仓库内置的 `adb` bootstrap。
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
+- 一个 context 现在可持有多条本地 session 记录；`rd.session.get_context` 会同时返回 `current_session_id`、`sessions`、`recovery`、`limits` 与 `recent_operations`。
+- daemon 退出或重启后，本地 `.rdc` session 会按持久化索引尝试自动恢复；remote session 不会自动重连，只会保留 tombstone 与恢复错误面。
 - `rd.remote.connect` 与 `rd.capture.open_replay` 在 daemon / streamable transports 下会更新结构化 progress；如宿主不支持 push，至少应通过 `daemon status` 读取 `active_operation`。
 - `active_event_id` 与对外暴露的 canonical `event_id` 只表示可被 `rd.event.get_action_details` round-trip 的 action event；对 `rd.resource.get_usage` / `rd.resource.get_history` 中不可 round-trip 的底层记录，应查看 `raw_event_id` 与 `event_resolvable`。
 
@@ -134,12 +137,13 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 ## 关键约束
 
 - tool catalog 的权威来源是 `spec/tool_catalog.json`。
-- catalog 当前数量以 `tool_count` 字段为准；当前为 `202`，后续变更必须同步更新 validator、help 输出与文档口径。
+- catalog 当前数量以 `tool_count` 字段为准；当前为 `210`，后续变更必须同步更新 validator、help 输出与文档口径。
 - 运行时响应遵循共享契约；调试时优先检查 `ok` 与 `error.message`，必要时继续看 `error.details`。
 - 默认参考根目录由 `rdx.bat` 或脚本自身位置推导；`RDX_TOOLS_ROOT` 仅用于覆盖默认值。
 - `rd.event.set_active` 若收到不可解析的 `event_id`，必须失败且保持现有 runtime / context 状态不变。
 - `rd.capture.close_file` 若目标 `capture_file_id` 仍被 live replay 持有，必须失败；推荐顺序是 `rd.capture.close_replay -> rd.capture.close_file`。
 - `rd.vfs.*` 是只读探索层，不替代结构化 `rd.*` canonical tools；所有修改、切换、导出与 context 更新仍继续通过原有 `rd.*` API 完成。
+- `rdx daemon stop` 只停止 daemon，不会清空本地 `.rdc` 的持久化恢复索引；如需显式销毁 context 状态，应执行 `rdx context clear`。
 
 ## 验证
 

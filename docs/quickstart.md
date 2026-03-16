@@ -59,7 +59,17 @@ rdx daemon status
 
 ```bat
 rdx call rd.session.get_context --format json
+rdx call rd.session.list_sessions --format json
 ```
+
+如果 daemon 因显式 `stop`、shell 退出或异常退出而中断，再次附着同一 context 时，可直接读取：
+
+```bat
+rdx call rd.session.get_context --format json
+rdx call rd.session.resume --format json
+```
+
+当前平台会优先按持久化索引自动恢复本地 `.rdc` session；remote session 不会自动重连。
 
 如果想用只读路径式方式快速探索当前 frame，也可以直接查看：
 
@@ -80,6 +90,8 @@ rdx context clear
 ```
 
 `exit` / `quit` 只退出当前 shell，不会自动停止 daemon，也不会自动清理 context。
+`rdx daemon stop` 只停止 daemon，默认保留本地 `.rdc` 的持久化恢复状态。
+`rdx context clear` 才会显式销毁当前 context 的持久化 session/capture 索引与 snapshot。
 
 ## 3. 对接 `MCP` client
 
@@ -133,6 +145,7 @@ rdx.bat --non-interactive cli --daemon-context smoke daemon status
 4. `rd.replay.set_frame`
 5. `rd.event.get_actions`
 6. 需要确认当前 context 状态时，调用 `rd.session.get_context`
+7. 一个 context 同时持有多条 session 时，使用 `rd.session.list_sessions` / `rd.session.select_session`
 
 这条链路只负责建立可操作 session，不代表任何上层 debug 或 analysis workflow。
 
@@ -153,6 +166,7 @@ rdx.bat --non-interactive cli --daemon-context smoke daemon status
 - `rd.remote.connect` 会负责 Android `adb` bootstrap：选择设备、选择仓库内 APK、启动 `RenderDocCmd`、push `renderdoc.conf`、建立 `adb forward`。
 - 如果 `rd.remote.connect` 失败，不应继续盲跑依赖 `remote_id` 的后续链路。
 - 如果 `rd.capture.open_replay(options.remote_id=...)` 成功，原 `remote_id` 会被消费；如需新的 live handle，必须重新 `rd.remote.connect`。
+- 如果 daemon 之后重启，remote session 不会自动恢复；应重新 `rd.remote.connect` 并重新建立 remote replay 链路。
 
 如果后续要把资源追踪结果再喂回事件链路，请额外注意：
 

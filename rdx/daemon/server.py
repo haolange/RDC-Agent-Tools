@@ -25,6 +25,7 @@ from rdx.daemon.client import (
 from rdx.progress import ProgressEvent, ProgressSink
 from rdx.runtime_bootstrap import bootstrap_renderdoc_runtime
 from rdx.runtime_paths import cli_runtime_dir
+from rdx.runtime_state import load_context_state
 from rdx.server import dispatch_operation, runtime_shutdown, runtime_startup
 
 logger = logging.getLogger("rdx.daemon")
@@ -143,6 +144,9 @@ class DaemonRuntime(ProgressSink):
             "capture_path": "",
             "active_event_id": 0,
             "frame_index": 0,
+            "session_count": 0,
+            "capture_count": 0,
+            "recovery_status": "idle",
         }
         self._listener = None
         self._stop_event = threading.Event()
@@ -288,17 +292,21 @@ class DaemonRuntime(ProgressSink):
         runtime_payload = snapshot.get("runtime", {}) if isinstance(snapshot, dict) else {}
         if not isinstance(runtime_payload, dict):
             runtime_payload = {}
+        context_state = load_context_state(self.daemon_context)
         capture_file_id = str(runtime_payload.get("capture_file_id") or "")
         capture_path = ""
         if capture_file_id:
             handle = server_runtime._runtime.captures.get(capture_file_id)
             if handle is not None:
                 capture_path = str(handle.file_path or "")
-        self.state["session_id"] = str(runtime_payload.get("session_id") or "")
-        self.state["capture_file_id"] = capture_file_id
+        self.state["session_id"] = str(runtime_payload.get("session_id") or context_state.get("current_session_id") or "")
+        self.state["capture_file_id"] = capture_file_id or str(context_state.get("current_capture_file_id") or "")
         self.state["capture_path"] = capture_path
         self.state["active_event_id"] = int(runtime_payload.get("active_event_id") or 0)
         self.state["frame_index"] = int(runtime_payload.get("frame_index") or 0)
+        self.state["session_count"] = len(context_state.get("sessions", {}))
+        self.state["capture_count"] = len(context_state.get("captures", {}))
+        self.state["recovery_status"] = str((context_state.get("recovery") or {}).get("status") or "idle")
 
     def _handle_attach_client(self, params: Dict[str, Any]) -> Dict[str, Any]:
         client_id = str(params.get("client_id") or "").strip()
@@ -622,6 +630,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _stop)
 
     asyncio.run(runtime_startup())
+    asyncio.run(server_runtime.ensure_context_ready(str(args.daemon_context)))
     try:
         raise SystemExit(daemon.serve_forever())
     finally:

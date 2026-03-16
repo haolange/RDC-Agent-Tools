@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from rdx.context_snapshot import clear_context_snapshot
+from rdx.runtime_state import clear_context_state
 from rdx.runtime_paths import cli_runtime_dir
 
 STATE_DIR = cli_runtime_dir()
@@ -197,6 +198,9 @@ def _normalize_daemon_state_payload(payload: Dict[str, Any], context: Optional[s
     state["capture_path"] = str(payload.get("capture_path") or "").strip()
     state["active_event_id"] = int(payload.get("active_event_id") or 0)
     state["frame_index"] = int(payload.get("frame_index") or 0)
+    state["session_count"] = int(payload.get("session_count") or 0)
+    state["capture_count"] = int(payload.get("capture_count") or 0)
+    state["recovery_status"] = str(payload.get("recovery_status") or "").strip()
     return state
 
 
@@ -658,6 +662,7 @@ def clear_context(context: Optional[str] = "default") -> Tuple[bool, str, Dict[s
         cleanup_stale_daemon_states(context=chosen_ctx)
         clear_session_state(context=chosen_ctx)
         clear_context_snapshot(context=chosen_ctx)
+        clear_context_state(context=chosen_ctx)
         return True, "context cleared (no active daemon)", {"released": {}, "state": {}}
 
     try:
@@ -669,12 +674,14 @@ def clear_context(context: Optional[str] = "default") -> Tuple[bool, str, Dict[s
             return False, "context clear failed", {"state": refreshed}
         clear_session_state(context=chosen_ctx)
         clear_context_snapshot(context=chosen_ctx)
+        clear_context_state(context=chosen_ctx)
         return True, "context cleared (no active daemon)", {"released": {}, "state": {}}
     if not bool(response.get("ok")):
         err = response.get("error") if isinstance(response.get("error"), dict) else {}
         return False, str(err.get("message") or "context clear failed"), {}
     clear_session_state(context=chosen_ctx)
     clear_context_snapshot(context=chosen_ctx)
+    clear_context_state(context=chosen_ctx)
     updated = _update_saved_state_from_response(response, chosen_ctx)
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     details = dict(result)
@@ -692,7 +699,6 @@ def stop_daemon(context: Optional[str] = "default") -> Tuple[bool, str]:
     if not st:
         clear_daemon_state(context=chosen_ctx)
         clear_session_state(context=chosen_ctx)
-        clear_context_snapshot(context=chosen_ctx)
         return False, "no active daemon"
 
     pid = int(st.get("pid") or 0)
@@ -703,5 +709,4 @@ def stop_daemon(context: Optional[str] = "default") -> Tuple[bool, str]:
 
     clear_daemon_state(context=chosen_ctx)
     clear_session_state(context=chosen_ctx)
-    clear_context_snapshot(context=chosen_ctx)
     return True, "daemon stopped"

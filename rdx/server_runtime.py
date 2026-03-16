@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import ctypes
 import csv
 import difflib
 import hashlib
@@ -70,6 +71,17 @@ from rdx.remote_bootstrap import (
 )
 from rdx.runtime_bootstrap import bootstrap_renderdoc_runtime
 from rdx.runtime_paths import artifacts_dir, ensure_runtime_dirs, runtime_root
+from rdx.runtime_state import (
+    append_runtime_log,
+    clear_context_state,
+    context_state_path,
+    default_context_state,
+    list_context_ids,
+    load_context_state,
+    read_runtime_logs,
+    save_context_state,
+    summarize_operation_durations,
+)
 from rdx.utils.artifact_store import ArtifactStore
 from rdx.core.tsv_projection import project_rows, to_tsv_string
 
@@ -160,6 +172,8 @@ class RuntimeState:
     session_owned_remotes: Dict[str, RemoteHandle] = field(default_factory=dict)
     consumed_remotes: Dict[str, ConsumedRemoteHandle] = field(default_factory=dict)
     context_snapshots: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    context_states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    hydrated_contexts: set[str] = field(default_factory=set)
     app_capture_options: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     shader_debugs: Dict[str, ShaderDebugHandle] = field(default_factory=dict)
     shader_replacements: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
@@ -193,6 +207,14 @@ def _progress(
     reporter = _current_progress_reporter()
     if reporter is None:
         return
+    _record_operation_stage(
+        _runtime_context_id(),
+        trace_id=str(reporter.trace_id),
+        stage=str(stage),
+        message=str(message),
+        progress_pct=progress_pct,
+        details=details,
+    )
     reporter.emit(stage, message, progress_pct=progress_pct, details=details)
 
 
@@ -230,6 +252,18 @@ def _serialize_runtime_config() -> Dict[str, Any]:
         "adaptive_bisect": {
             "mode": str(getattr(cfg.adaptive_bisect, "mode", "off") or "off"),
             "history_store_path": str(getattr(cfg.adaptive_bisect, "history_store_path", runtime_root() / "bisect_history.jsonl")),
+        },
+        "runtime_limits": {
+            "max_contexts": int(getattr(cfg.runtime_limits, "max_contexts", 8) or 8),
+            "max_sessions_per_context": int(getattr(cfg.runtime_limits, "max_sessions_per_context", 4) or 4),
+            "max_capture_files": int(getattr(cfg.runtime_limits, "max_capture_files", 8) or 8),
+            "max_capture_size_bytes": int(getattr(cfg.runtime_limits, "max_capture_size_bytes", 4 * 1024 * 1024 * 1024) or (4 * 1024 * 1024 * 1024)),
+            "max_estimated_replay_memory_bytes": int(
+                getattr(cfg.runtime_limits, "max_estimated_replay_memory_bytes", 8 * 1024 * 1024 * 1024)
+                or (8 * 1024 * 1024 * 1024)
+            ),
+            "replay_memory_multiplier": float(getattr(cfg.runtime_limits, "replay_memory_multiplier", 3.0) or 3.0),
+            "max_recent_operations": int(getattr(cfg.runtime_limits, "max_recent_operations", 64) or 64),
         },
     }
 
@@ -282,6 +316,28 @@ def _apply_runtime_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
             _config.adaptive_bisect.history_store_path = Path(
                 str(adaptive_payload.get("history_store_path") or runtime_root() / "bisect_history.jsonl")
             )
+    limits_payload = payload.get("runtime_limits")
+    if isinstance(limits_payload, dict):
+        if "max_contexts" in limits_payload:
+            _config.runtime_limits.max_contexts = max(1, int(limits_payload.get("max_contexts") or 8))
+        if "max_sessions_per_context" in limits_payload:
+            _config.runtime_limits.max_sessions_per_context = max(1, int(limits_payload.get("max_sessions_per_context") or 4))
+        if "max_capture_files" in limits_payload:
+            _config.runtime_limits.max_capture_files = max(1, int(limits_payload.get("max_capture_files") or 8))
+        if "max_capture_size_bytes" in limits_payload:
+            _config.runtime_limits.max_capture_size_bytes = max(1, int(limits_payload.get("max_capture_size_bytes") or (4 * 1024 * 1024 * 1024)))
+        if "max_estimated_replay_memory_bytes" in limits_payload:
+            _config.runtime_limits.max_estimated_replay_memory_bytes = max(
+                1,
+                int(limits_payload.get("max_estimated_replay_memory_bytes") or (8 * 1024 * 1024 * 1024)),
+            )
+        if "replay_memory_multiplier" in limits_payload:
+            _config.runtime_limits.replay_memory_multiplier = max(
+                1.0,
+                float(limits_payload.get("replay_memory_multiplier") or 3.0),
+            )
+        if "max_recent_operations" in limits_payload:
+            _config.runtime_limits.max_recent_operations = max(1, int(limits_payload.get("max_recent_operations") or 64))
     _runtime.config = _serialize_runtime_config()
     return dict(_runtime.config)
 
@@ -290,17 +346,484 @@ def _now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
-def _record_log(level: str, message: str, context: Optional[Dict[str, Any]] = None) -> None:
-    _runtime.logs.append(
-        {
-            "ts_ms": _now_ms(),
-            "level": level.lower(),
-            "message": message,
-            "context": context or {},
+def _runtime_limits() -> Dict[str, Any]:
+    cfg = _config or RdxConfig()
+    return {
+        "max_contexts": int(getattr(cfg.runtime_limits, "max_contexts", 8) or 8),
+        "max_sessions_per_context": int(getattr(cfg.runtime_limits, "max_sessions_per_context", 4) or 4),
+        "max_capture_files": int(getattr(cfg.runtime_limits, "max_capture_files", 8) or 8),
+        "max_capture_size_bytes": int(getattr(cfg.runtime_limits, "max_capture_size_bytes", 4 * 1024 * 1024 * 1024) or (4 * 1024 * 1024 * 1024)),
+        "max_estimated_replay_memory_bytes": int(
+            getattr(cfg.runtime_limits, "max_estimated_replay_memory_bytes", 8 * 1024 * 1024 * 1024)
+            or (8 * 1024 * 1024 * 1024)
+        ),
+        "replay_memory_multiplier": float(getattr(cfg.runtime_limits, "replay_memory_multiplier", 3.0) or 3.0),
+        "max_recent_operations": int(getattr(cfg.runtime_limits, "max_recent_operations", 64) or 64),
+    }
+
+
+def _context_state_exists(context_id: Optional[str] = None) -> bool:
+    return context_state_path(normalize_context_id(context_id or _runtime_context_id())).is_file()
+
+
+def _ensure_context_capacity(context_id: Optional[str] = None) -> None:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    if _context_state_exists(ctx) or ctx in _runtime.context_states:
+        return
+    max_contexts = int(_runtime_limits().get("max_contexts", 8) or 8)
+    existing = {normalize_context_id(item) for item in list_context_ids()}
+    if len(existing) >= max_contexts:
+        raise CoreError(
+            code="context_limit_exceeded",
+            message=f"Context limit exceeded for {ctx}",
+            category="runtime",
+            details={
+                "context_id": ctx,
+                "max_contexts": max_contexts,
+                "known_contexts": sorted(existing),
+            },
+        )
+
+
+def _context_state(context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _runtime.context_states.get(ctx)
+    if not isinstance(state, dict):
+        if not _context_state_exists(ctx):
+            _ensure_context_capacity(ctx)
+            state = default_context_state(ctx, limits=_runtime_limits())
+        else:
+            state = load_context_state(ctx, limits=_runtime_limits())
+    state["limits"] = {**dict(state.get("limits") or {}), **_runtime_limits()}
+    _runtime.context_states[ctx] = state
+    return state
+
+
+def _store_context_state(state: Dict[str, Any], context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    saved = save_context_state(state, ctx, limits=_runtime_limits())
+    _runtime.context_states[ctx] = saved
+    return saved
+
+
+def _capture_file_metadata(file_path: str) -> Dict[str, Any]:
+    path = Path(str(file_path or "")).resolve()
+    if not path.is_file():
+        return {
+            "file_path": str(path),
+            "file_size_bytes": 0,
+            "file_mtime_ms": 0,
+            "file_fingerprint": "",
+        }
+    stat = path.stat()
+    return {
+        "file_path": str(path),
+        "file_size_bytes": int(stat.st_size),
+        "file_mtime_ms": int(stat.st_mtime * 1000),
+        "file_fingerprint": f"{int(stat.st_size)}:{int(stat.st_mtime * 1000)}",
+    }
+
+
+def _estimated_replay_memory_bytes(file_size_bytes: int) -> int:
+    multiplier = float(_runtime_limits().get("replay_memory_multiplier", 3.0) or 3.0)
+    return int(max(0, int(file_size_bytes or 0)) * max(multiplier, 1.0))
+
+
+def _sync_context_metrics(context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    metrics = dict(state.get("metrics") or {})
+    metrics["active_session_count"] = len([item for item in state.get("sessions", {}).values() if isinstance(item, dict)])
+    metrics["active_capture_count"] = len([item for item in state.get("captures", {}).values() if isinstance(item, dict)])
+    state["metrics"] = metrics
+    return _store_context_state(state, ctx)
+
+
+def _session_record_from_runtime(session_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    replay = _runtime.replays.get(str(session_id))
+    if replay is None:
+        raise KeyError(f"unknown session_id: {session_id}")
+    capture = _runtime.captures.get(replay.capture_file_id)
+    capture_meta = _capture_file_metadata(capture.file_path if capture is not None else "")
+    return {
+        "session_id": str(session_id),
+        "capture_file_id": str(replay.capture_file_id),
+        "rdc_path": str(capture.file_path if capture is not None else ""),
+        "file_fingerprint": str(capture_meta.get("file_fingerprint") or ""),
+        "file_size_bytes": int(capture_meta.get("file_size_bytes") or 0),
+        "frame_index": int(replay.frame_index or 0),
+        "active_event_id": int(replay.active_event_id or 0),
+        "backend_type": str(_context_snapshot(ctx).get("runtime", {}).get("backend_type") or "local"),
+        "state": "active",
+        "is_live": True,
+        "last_error": "",
+        "updated_at_ms": _now_ms(),
+        "recovery": {
+            "status": "ready",
+            "last_attempt_ms": 0,
+            "last_success_ms": 0,
+            "attempt_count": 0,
+            "last_error": "",
+        },
+    }
+
+
+def _capture_record_from_runtime(capture_file_id: str) -> Dict[str, Any]:
+    capture = _runtime.captures.get(str(capture_file_id))
+    if capture is None:
+        raise KeyError(f"unknown capture_file_id: {capture_file_id}")
+    meta = _capture_file_metadata(capture.file_path)
+    return {
+        "capture_file_id": str(capture.capture_file_id),
+        "file_path": str(capture.file_path),
+        "read_only": bool(capture.read_only),
+        "driver": str(capture.driver or ""),
+        "file_size_bytes": int(meta.get("file_size_bytes") or 0),
+        "file_mtime_ms": int(meta.get("file_mtime_ms") or 0),
+        "file_fingerprint": str(meta.get("file_fingerprint") or ""),
+        "recovery_status": "ready",
+        "last_error": "",
+        "updated_at_ms": _now_ms(),
+    }
+
+
+def _select_session_from_state(
+    state: Dict[str, Any],
+    session_id: str = "",
+    *,
+    capture_file_id: str = "",
+) -> Dict[str, Any]:
+    sessions = state.get("sessions", {})
+    captures = state.get("captures", {})
+    chosen_session_id = str(session_id or state.get("current_session_id") or "").strip()
+    chosen_capture_id = str(capture_file_id or state.get("current_capture_file_id") or "").strip()
+    if chosen_session_id and chosen_session_id not in sessions:
+        chosen_session_id = ""
+    if not chosen_session_id and sessions:
+        chosen_session_id = next(iter(sessions.keys()))
+    if chosen_capture_id and chosen_capture_id not in captures:
+        chosen_capture_id = ""
+    if chosen_session_id and not chosen_capture_id:
+        chosen_capture_id = str((sessions.get(chosen_session_id) or {}).get("capture_file_id") or "")
+    if not chosen_capture_id and captures:
+        chosen_capture_id = next(iter(captures.keys()))
+    state["current_session_id"] = chosen_session_id
+    state["current_capture_file_id"] = chosen_capture_id
+    return state
+
+
+def _sync_context_snapshot_from_state(context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    state = _select_session_from_state(state)
+    sessions = state.get("sessions", {})
+    captures = state.get("captures", {})
+    current_session = sessions.get(state.get("current_session_id")) if isinstance(sessions, dict) else None
+    current_capture = captures.get(state.get("current_capture_file_id")) if isinstance(captures, dict) else None
+    snapshot = _runtime.context_snapshots.get(ctx)
+    if not isinstance(snapshot, dict):
+        snapshot = load_context_snapshot(ctx, retention=_snapshot_retention())
+    snapshot = normalize_context_snapshot(snapshot, ctx, retention=_snapshot_retention())
+    if isinstance(current_session, dict):
+        snapshot["runtime"].update(
+            {
+                "session_id": str(current_session.get("session_id") or ""),
+                "capture_file_id": str(current_session.get("capture_file_id") or ""),
+                "frame_index": int(current_session.get("frame_index") or 0),
+                "active_event_id": int(current_session.get("active_event_id") or 0),
+                "backend_type": str(current_session.get("backend_type") or "none"),
+            }
+        )
+    elif isinstance(current_capture, dict):
+        snapshot["runtime"].update(
+            {
+                "session_id": "",
+                "capture_file_id": str(current_capture.get("capture_file_id") or ""),
+                "frame_index": 0,
+                "active_event_id": 0,
+                "backend_type": "none",
+            }
+        )
+    else:
+        snapshot["runtime"] = default_context_snapshot(ctx).get("runtime", {})
+    _store_context_state(state, ctx)
+    return _store_context_snapshot(snapshot, ctx)
+
+
+def _upsert_context_capture(capture_file_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    state.setdefault("captures", {})[str(capture_file_id)] = _capture_record_from_runtime(capture_file_id)
+    state = _select_session_from_state(state, capture_file_id=str(capture_file_id))
+    _store_context_state(state, ctx)
+    _sync_context_metrics(ctx)
+    return _sync_context_snapshot_from_state(ctx)
+
+
+def _remove_context_capture(capture_file_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    state.get("captures", {}).pop(str(capture_file_id), None)
+    sessions = state.get("sessions", {})
+    if isinstance(sessions, dict):
+        for session_id, record in list(sessions.items()):
+            if isinstance(record, dict) and str(record.get("capture_file_id") or "") == str(capture_file_id):
+                sessions.pop(session_id, None)
+    state = _select_session_from_state(state)
+    _store_context_state(state, ctx)
+    _sync_context_metrics(ctx)
+    return _sync_context_snapshot_from_state(ctx)
+
+
+def _upsert_context_session(session_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    record = _session_record_from_runtime(session_id, context_id=ctx)
+    state.setdefault("sessions", {})[str(session_id)] = record
+    capture_file_id = str(record.get("capture_file_id") or "")
+    if capture_file_id and capture_file_id in _runtime.captures:
+        state.setdefault("captures", {})[capture_file_id] = _capture_record_from_runtime(capture_file_id)
+    state = _select_session_from_state(state, session_id=str(session_id), capture_file_id=capture_file_id)
+    _store_context_state(state, ctx)
+    _sync_context_metrics(ctx)
+    return _sync_context_snapshot_from_state(ctx)
+
+
+def _update_context_session_record(
+    session_id: str,
+    *,
+    context_id: Optional[str] = None,
+    frame_index: Optional[int] = None,
+    active_event_id: Optional[int] = None,
+    state_name: Optional[str] = None,
+    is_live: Optional[bool] = None,
+    last_error: Optional[str] = None,
+    recovery_status: Optional[str] = None,
+) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    sessions = state.setdefault("sessions", {})
+    record = dict(sessions.get(str(session_id)) or {})
+    if not record:
+        return state
+    if frame_index is not None:
+        record["frame_index"] = int(frame_index)
+    if active_event_id is not None:
+        record["active_event_id"] = int(active_event_id)
+    if state_name is not None:
+        record["state"] = str(state_name)
+    if is_live is not None:
+        record["is_live"] = bool(is_live)
+    if last_error is not None:
+        record["last_error"] = str(last_error)
+    recovery = dict(record.get("recovery") or {})
+    if recovery_status is not None:
+        recovery["status"] = str(recovery_status)
+    if last_error is not None:
+        recovery["last_error"] = str(last_error)
+    record["recovery"] = recovery
+    record["updated_at_ms"] = _now_ms()
+    sessions[str(session_id)] = record
+    _store_context_state(state, ctx)
+    return _sync_context_snapshot_from_state(ctx)
+
+
+def _remove_context_session(session_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    state.get("sessions", {}).pop(str(session_id), None)
+    state = _select_session_from_state(state)
+    _store_context_state(state, ctx)
+    _sync_context_metrics(ctx)
+    return _sync_context_snapshot_from_state(ctx)
+
+
+def _select_context_session_state(session_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    if str(session_id) not in state.get("sessions", {}):
+        raise CoreError(
+            code="session_not_found",
+            message=f"Unknown session_id: {session_id}",
+            category="not_found",
+            details={"session_id": str(session_id)},
+        )
+    state = _select_session_from_state(state, session_id=str(session_id))
+    _store_context_state(state, ctx)
+    return _sync_context_snapshot_from_state(ctx)
+
+
+def _trim_stage_events(stages: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return list(stages or [])[-32:]
+
+
+def _summarize_args(args: Dict[str, Any]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {"arg_keys": sorted(str(key) for key in args.keys())}
+    for key, value in list(args.items())[:8]:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            summary[str(key)] = value
+        elif isinstance(value, dict):
+            summary[str(key)] = {"keys": sorted(str(item) for item in value.keys())[:8]}
+        elif isinstance(value, list):
+            summary[str(key)] = {"len": len(value)}
+        else:
+            summary[str(key)] = {"type": type(value).__name__}
+    return summary
+
+
+def _upsert_operation_entry(
+    state: Dict[str, Any],
+    trace_id: str,
+    *,
+    defaults: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    recent = list(state.get("recent_operations") or [])
+    existing = next((item for item in recent if isinstance(item, dict) and str(item.get("trace_id") or "") == str(trace_id)), None)
+    if existing is None:
+        existing = {
+            "trace_id": str(trace_id),
+            "operation": "",
+            "transport": "",
+            "status": "running",
+            "args_summary": {},
+            "stages": [],
+            "result_ok": None,
+            "error_code": "",
+            "error_message": "",
+            "duration_ms": 0,
+            "started_at_ms": _now_ms(),
+            "updated_at_ms": _now_ms(),
+            "recovery_attempted": False,
+        }
+        recent.insert(0, existing)
+    if isinstance(defaults, dict):
+        for key, value in defaults.items():
+            existing.setdefault(key, value)
+    limit = int(state.get("limits", {}).get("max_recent_operations") or _runtime_limits().get("max_recent_operations", 64))
+    state["recent_operations"] = [item for item in recent if isinstance(item, dict)]
+    state["recent_operations"] = state["recent_operations"][: max(limit * 2, 8)]
+    return existing
+
+
+def _record_operation_start(
+    context_id: str,
+    *,
+    trace_id: str,
+    operation: str,
+    transport: str,
+    args: Dict[str, Any],
+) -> None:
+    ctx = normalize_context_id(context_id)
+    state = _context_state(ctx)
+    entry = _upsert_operation_entry(
+        state,
+        str(trace_id),
+        defaults={
+            "operation": str(operation),
+            "transport": str(transport),
+            "args_summary": _summarize_args(args),
+            "started_at_ms": _now_ms(),
         },
     )
+    entry["operation"] = str(operation)
+    entry["transport"] = str(transport)
+    entry["args_summary"] = _summarize_args(args)
+    entry["status"] = "running"
+    entry["updated_at_ms"] = _now_ms()
+    metrics = dict(state.get("metrics") or {})
+    metrics["operation_count"] = int(metrics.get("operation_count") or 0) + 1
+    metrics["last_operation_ms"] = _now_ms()
+    state["metrics"] = metrics
+    _store_context_state(state, ctx)
+
+
+def _record_operation_stage(
+    context_id: str,
+    *,
+    trace_id: str,
+    stage: str,
+    message: str,
+    progress_pct: Optional[float] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    ctx = normalize_context_id(context_id)
+    state = _context_state(ctx)
+    entry = _upsert_operation_entry(state, str(trace_id))
+    stages = list(entry.get("stages") or [])
+    stages.append(
+        {
+            "stage": str(stage),
+            "message": str(message),
+            "progress_pct": progress_pct,
+            "details": dict(details or {}),
+            "ts_ms": _now_ms(),
+        }
+    )
+    entry["stages"] = _trim_stage_events(stages)
+    entry["updated_at_ms"] = _now_ms()
+    _store_context_state(state, ctx)
+
+
+def _record_operation_finish(
+    context_id: str,
+    *,
+    trace_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    ctx = normalize_context_id(context_id)
+    state = _context_state(ctx)
+    entry = _upsert_operation_entry(state, str(trace_id))
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    ok = bool(payload.get("ok"))
+    duration_ms = int(meta.get("duration_ms") or entry.get("duration_ms") or 0)
+    entry["result_ok"] = ok
+    entry["status"] = "completed" if ok else "failed"
+    entry["error_code"] = str(error.get("code") or "")
+    entry["error_message"] = str(error.get("message") or "")
+    entry["duration_ms"] = duration_ms
+    entry["updated_at_ms"] = _now_ms()
+    metrics = dict(state.get("metrics") or {})
+    if not ok:
+        metrics["operation_error_count"] = int(metrics.get("operation_error_count") or 0) + 1
+    durations = list(metrics.get("recent_operation_duration_ms") or [])
+    if duration_ms >= 0:
+        durations.append(duration_ms)
+    metrics["recent_operation_duration_ms"] = durations[-64:]
+    metrics["last_operation_ms"] = _now_ms()
+    state["metrics"] = metrics
+    limit = int(state.get("limits", {}).get("max_recent_operations") or _runtime_limits().get("max_recent_operations", 64))
+    state["recent_operations"] = list(state.get("recent_operations") or [])[: max(limit, 1)]
+    _store_context_state(state, ctx)
+
+
+def _current_trace_details() -> Dict[str, str]:
+    reporter = _current_progress_reporter()
+    if reporter is None:
+        return {"trace_id": "", "operation": ""}
+    return {"trace_id": str(reporter.trace_id or ""), "operation": str(reporter.operation or "")}
+
+
+def _record_log(level: str, message: str, context: Optional[Dict[str, Any]] = None) -> None:
+    trace = _current_trace_details()
+    ctx = normalize_context_id(_runtime_context_id())
+    entry = {
+        "ts_ms": _now_ms(),
+        "level": level.lower(),
+        "message": message,
+        "context": context or {},
+        "trace_id": trace["trace_id"],
+        "operation": trace["operation"],
+        "context_id": ctx,
+    }
+    _runtime.logs.append(entry)
     if len(_runtime.logs) > 5000:
         _runtime.logs = _runtime.logs[-5000:]
+    try:
+        append_runtime_log(ctx, entry)
+    except Exception:
+        pass
 
 
 def _context_snapshot(context_id: Optional[str] = None) -> Dict[str, Any]:
@@ -309,17 +832,44 @@ def _context_snapshot(context_id: Optional[str] = None) -> Dict[str, Any]:
     if not isinstance(snapshot, dict):
         snapshot = load_context_snapshot(ctx, retention=_snapshot_retention())
     snapshot = normalize_context_snapshot(snapshot, ctx, retention=_snapshot_retention())
+    state = _context_state(ctx)
+    sessions = state.get("sessions", {}) if isinstance(state, dict) else {}
+    captures = state.get("captures", {}) if isinstance(state, dict) else {}
 
     runtime_payload = snapshot.get("runtime", {})
     session_id = str(runtime_payload.get("session_id") or "").strip()
     capture_file_id = str(runtime_payload.get("capture_file_id") or "").strip()
     if session_id and session_id not in _runtime.replays:
-        runtime_payload["session_id"] = ""
-        runtime_payload["frame_index"] = 0
-        runtime_payload["active_event_id"] = 0
-        runtime_payload["backend_type"] = "none"
+        state_session = sessions.get(session_id) if isinstance(sessions, dict) else None
+        if isinstance(state_session, dict):
+            runtime_payload["session_id"] = str(state_session.get("session_id") or "")
+            runtime_payload["capture_file_id"] = str(state_session.get("capture_file_id") or "")
+            runtime_payload["frame_index"] = int(state_session.get("frame_index") or 0)
+            runtime_payload["active_event_id"] = int(state_session.get("active_event_id") or 0)
+            runtime_payload["backend_type"] = str(state_session.get("backend_type") or "none")
+        else:
+            runtime_payload["session_id"] = ""
+            runtime_payload["frame_index"] = 0
+            runtime_payload["active_event_id"] = 0
+            runtime_payload["backend_type"] = "none"
     if capture_file_id and capture_file_id not in _runtime.captures:
-        runtime_payload["capture_file_id"] = ""
+        if capture_file_id in captures:
+            runtime_payload["capture_file_id"] = capture_file_id
+        else:
+            runtime_payload["capture_file_id"] = ""
+
+    current_session_id = str(state.get("current_session_id") or "").strip()
+    if current_session_id and not runtime_payload.get("session_id"):
+        state_session = sessions.get(current_session_id) if isinstance(sessions, dict) else None
+        if isinstance(state_session, dict):
+            runtime_payload["session_id"] = str(state_session.get("session_id") or "")
+            runtime_payload["capture_file_id"] = str(state_session.get("capture_file_id") or "")
+            runtime_payload["frame_index"] = int(state_session.get("frame_index") or 0)
+            runtime_payload["active_event_id"] = int(state_session.get("active_event_id") or 0)
+            runtime_payload["backend_type"] = str(state_session.get("backend_type") or "none")
+    current_capture_file_id = str(state.get("current_capture_file_id") or "").strip()
+    if current_capture_file_id and not runtime_payload.get("capture_file_id"):
+        runtime_payload["capture_file_id"] = current_capture_file_id
 
     remote_payload = snapshot.get("remote", {})
     remote_state = str(remote_payload.get("state") or "none")
@@ -355,31 +905,12 @@ def _store_context_snapshot(snapshot: Dict[str, Any], context_id: Optional[str] 
 
 
 def _set_context_capture_file(capture_file_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
-    snapshot = _context_snapshot(context_id)
-    snapshot["runtime"].update(
-        {
-            "session_id": "",
-            "capture_file_id": str(capture_file_id or ""),
-            "frame_index": 0,
-            "active_event_id": 0,
-            "backend_type": "none",
-        }
-    )
-    snapshot["focus"]["pixel"] = None
-    snapshot["focus"]["resource_id"] = ""
-    snapshot["focus"]["shader_id"] = ""
-    return _store_context_snapshot(snapshot, context_id)
+    return _upsert_context_capture(str(capture_file_id or ""), context_id=context_id)
 
 
 
 def _clear_context_capture_file(capture_file_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
-    snapshot = _context_snapshot(context_id)
-    if snapshot["runtime"].get("capture_file_id") == str(capture_file_id or ""):
-        snapshot["runtime"]["capture_file_id"] = ""
-        if not snapshot["runtime"].get("session_id"):
-            snapshot["runtime"]["backend_type"] = "none"
-        return _store_context_snapshot(snapshot, context_id)
-    return snapshot
+    return _remove_context_capture(str(capture_file_id or ""), context_id=context_id)
 
 
 
@@ -392,36 +923,57 @@ def _set_context_runtime_session(
     active_event_id: int,
     context_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    snapshot = _context_snapshot(context_id)
-    snapshot["runtime"].update(
-        {
-            "session_id": str(session_id or ""),
-            "capture_file_id": str(capture_file_id or ""),
-            "frame_index": int(frame_index or 0),
-            "active_event_id": int(active_event_id or 0),
-            "backend_type": str(backend_type or "none"),
-        }
-    )
-    return _store_context_snapshot(snapshot, context_id)
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    sessions = state.setdefault("sessions", {})
+    existing = dict(sessions.get(str(session_id)) or {})
+    sessions[str(session_id)] = {
+        **existing,
+        "session_id": str(session_id or ""),
+        "capture_file_id": str(capture_file_id or ""),
+        "rdc_path": str((_runtime.captures.get(str(capture_file_id)) or CaptureFileHandle("", "", True)).file_path or existing.get("rdc_path") or ""),
+        "file_fingerprint": str(existing.get("file_fingerprint") or _capture_file_metadata(str((_runtime.captures.get(str(capture_file_id)) or CaptureFileHandle("", "", True)).file_path or "")).get("file_fingerprint") or ""),
+        "file_size_bytes": int(existing.get("file_size_bytes") or _capture_file_metadata(str((_runtime.captures.get(str(capture_file_id)) or CaptureFileHandle("", "", True)).file_path or "")).get("file_size_bytes") or 0),
+        "frame_index": int(frame_index or 0),
+        "active_event_id": int(active_event_id or 0),
+        "backend_type": str(backend_type or "none"),
+        "state": "active",
+        "is_live": True,
+        "last_error": "",
+        "updated_at_ms": _now_ms(),
+        "recovery": {
+            "status": "ready",
+            "last_attempt_ms": int(existing.get("recovery", {}).get("last_attempt_ms") if isinstance(existing.get("recovery"), dict) else 0 or 0),
+            "last_success_ms": int(existing.get("recovery", {}).get("last_success_ms") if isinstance(existing.get("recovery"), dict) else 0 or 0),
+            "attempt_count": int(existing.get("recovery", {}).get("attempt_count") if isinstance(existing.get("recovery"), dict) else 0 or 0),
+            "last_error": "",
+        },
+    }
+    if str(capture_file_id or "") in _runtime.captures:
+        state.setdefault("captures", {})[str(capture_file_id)] = _capture_record_from_runtime(str(capture_file_id))
+    state = _select_session_from_state(state, session_id=str(session_id), capture_file_id=str(capture_file_id))
+    _store_context_state(state, ctx)
+    _sync_context_metrics(ctx)
+    return _sync_context_snapshot_from_state(ctx)
 
 
 
 def _set_context_active_event(session_id: str, event_id: int, *, context_id: Optional[str] = None) -> Dict[str, Any]:
-    snapshot = _context_snapshot(context_id)
-    if snapshot["runtime"].get("session_id") == str(session_id or ""):
-        snapshot["runtime"]["active_event_id"] = int(event_id or 0)
-        return _store_context_snapshot(snapshot, context_id)
-    return snapshot
+    return _update_context_session_record(
+        str(session_id or ""),
+        context_id=context_id,
+        active_event_id=int(event_id or 0),
+    )
 
 
 
 def _set_context_frame(session_id: str, frame_index: int, active_event_id: int, *, context_id: Optional[str] = None) -> Dict[str, Any]:
-    snapshot = _context_snapshot(context_id)
-    if snapshot["runtime"].get("session_id") == str(session_id or ""):
-        snapshot["runtime"]["frame_index"] = int(frame_index or 0)
-        snapshot["runtime"]["active_event_id"] = int(active_event_id or 0)
-        return _store_context_snapshot(snapshot, context_id)
-    return snapshot
+    return _update_context_session_record(
+        str(session_id or ""),
+        context_id=context_id,
+        frame_index=int(frame_index or 0),
+        active_event_id=int(active_event_id or 0),
+    )
 
 
 
@@ -487,23 +1039,22 @@ def _clear_context_remote_live(remote_id: str, *, context_id: Optional[str] = No
 
 
 def _clear_context_runtime(session_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
-    snapshot = _context_snapshot(context_id)
-    if snapshot["runtime"].get("session_id") == str(session_id or ""):
-        remote = snapshot.get("remote", {})
-        if remote.get("state") == "session_owned" and remote.get("consumed_by_session_id") == str(session_id or ""):
-            snapshot["remote"]["state"] = "consumed"
-        snapshot["runtime"] = default_context_snapshot(context_id).get("runtime", {})
-        snapshot["focus"]["pixel"] = None
-        snapshot["focus"]["resource_id"] = ""
-        snapshot["focus"]["shader_id"] = ""
-        return _store_context_snapshot(snapshot, context_id)
-    return snapshot
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    snapshot = _context_snapshot(ctx)
+    remote = snapshot.get("remote", {})
+    if remote.get("state") == "session_owned" and remote.get("consumed_by_session_id") == str(session_id or ""):
+        snapshot["remote"]["state"] = "consumed"
+        _store_context_snapshot(snapshot, ctx)
+    return _remove_context_session(str(session_id or ""), context_id=ctx)
 
 
 
 def _reset_context_snapshot(context_id: Optional[str] = None) -> Dict[str, Any]:
-    snapshot = default_context_snapshot(context_id)
-    return _store_context_snapshot(snapshot, context_id)
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    clear_context_state(ctx)
+    _runtime.context_states.pop(ctx, None)
+    snapshot = default_context_snapshot(ctx)
+    return _store_context_snapshot(snapshot, ctx)
 
 
 
@@ -1794,6 +2345,256 @@ async def _pipeline_snapshot(session_id: str, event_id: Optional[int] = None) ->
         session_manager=_session_manager,
     )
 
+
+def _recovery_payload(ok: bool, *, duration_ms: int, message: str = "", code: str = "") -> Dict[str, Any]:
+    return {
+        "ok": ok,
+        "meta": {"duration_ms": int(duration_ms)},
+        "error": ({"code": str(code or "runtime_error"), "message": str(message)} if (not ok and message) else {}),
+    }
+
+
+async def _restore_capture_handle_from_state(
+    context_id: str,
+    capture_file_id: str,
+    record: Dict[str, Any],
+) -> Optional[CaptureFileHandle]:
+    handle = _runtime.captures.get(str(capture_file_id))
+    if handle is not None:
+        return handle
+    file_path = str(record.get("file_path") or "").strip()
+    meta = _capture_file_metadata(file_path)
+    if not meta.get("file_path") or not Path(str(meta.get("file_path"))).is_file():
+        return None
+    handle = CaptureFileHandle(
+        capture_file_id=str(capture_file_id),
+        file_path=str(meta.get("file_path") or file_path),
+        read_only=bool(record.get("read_only", True)),
+        driver=str(record.get("driver") or ""),
+    )
+    _runtime.captures[str(capture_file_id)] = handle
+    return handle
+
+
+async def _recover_context_sessions(context_id: str) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id)
+    state = _context_state(ctx)
+    start_ms = _now_ms()
+    trace_id = f"rcv_{ctx}_{start_ms}"
+    recovered: list[str] = []
+    degraded: list[str] = []
+    _record_operation_start(ctx, trace_id=trace_id, operation="rd.session.resume", transport="recovery", args={"context_id": ctx})
+    _record_operation_stage(ctx, trace_id=trace_id, stage="scan", message="Scanning persisted local sessions for recovery")
+    recovery = dict(state.get("recovery") or {})
+    recovery["status"] = "scanning"
+    recovery["last_scan_ms"] = start_ms
+    recovery["last_attempt_ms"] = start_ms
+    recovery["attempt_count"] = int(recovery.get("attempt_count") or 0) + 1
+    recovery["last_error"] = ""
+    metrics = dict(state.get("metrics") or {})
+    metrics["recovery_attempt_count"] = int(metrics.get("recovery_attempt_count") or 0) + 1
+    state["recovery"] = recovery
+    state["metrics"] = metrics
+    _store_context_state(state, ctx)
+
+    session_limit = int(_runtime_limits().get("max_sessions_per_context", 4) or 4)
+    sessions = state.get("sessions", {}) if isinstance(state.get("sessions"), dict) else {}
+    captures = state.get("captures", {}) if isinstance(state.get("captures"), dict) else {}
+    live_count = len(_runtime.replays)
+    for capture_file_id, capture_record in list(captures.items()):
+        handle = await _restore_capture_handle_from_state(ctx, str(capture_file_id), dict(capture_record or {}))
+        if handle is None:
+            capture_record["recovery_status"] = "missing"
+            capture_record["last_error"] = "capture file missing"
+        else:
+            capture_record["recovery_status"] = "ready"
+            capture_record["last_error"] = ""
+        capture_record["updated_at_ms"] = _now_ms()
+        captures[str(capture_file_id)] = capture_record
+
+    for session_id, session_record in list(sessions.items()):
+        session_record = dict(session_record or {})
+        if live_count >= session_limit and session_id not in _runtime.replays:
+            session_record["state"] = "degraded"
+            session_record["is_live"] = False
+            session_record["last_error"] = "session limit exceeded during recovery"
+            session_record["recovery"] = {
+                **dict(session_record.get("recovery") or {}),
+                "status": "degraded",
+                "last_attempt_ms": _now_ms(),
+                "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
+                "last_error": "session limit exceeded during recovery",
+            }
+            sessions[str(session_id)] = session_record
+            degraded.append(str(session_id))
+            continue
+        if str(session_record.get("backend_type") or "local") != "local":
+            session_record["state"] = "degraded"
+            session_record["is_live"] = False
+            session_record["last_error"] = "remote sessions require explicit reconnect"
+            session_record["recovery"] = {
+                **dict(session_record.get("recovery") or {}),
+                "status": "degraded",
+                "last_attempt_ms": _now_ms(),
+                "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
+                "last_error": "remote sessions require explicit reconnect",
+            }
+            sessions[str(session_id)] = session_record
+            degraded.append(str(session_id))
+            continue
+        if session_id in _runtime.replays:
+            recovered.append(str(session_id))
+            continue
+        capture_file_id = str(session_record.get("capture_file_id") or "")
+        capture_record = captures.get(capture_file_id) if capture_file_id else None
+        capture_path = str(session_record.get("rdc_path") or (capture_record or {}).get("file_path") or "").strip()
+        capture_meta = _capture_file_metadata(capture_path)
+        if not capture_meta.get("file_path") or not Path(str(capture_meta.get("file_path"))).is_file():
+            session_record["state"] = "degraded"
+            session_record["is_live"] = False
+            session_record["last_error"] = "capture file missing"
+            session_record["recovery"] = {
+                **dict(session_record.get("recovery") or {}),
+                "status": "degraded",
+                "last_attempt_ms": _now_ms(),
+                "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
+                "last_error": "capture file missing",
+            }
+            sessions[str(session_id)] = session_record
+            degraded.append(str(session_id))
+            continue
+        if not capture_file_id:
+            capture_file_id = _new_id("capf")
+            session_record["capture_file_id"] = capture_file_id
+        capture_handle = await _restore_capture_handle_from_state(
+            ctx,
+            capture_file_id,
+            {
+                "capture_file_id": capture_file_id,
+                "file_path": str(capture_meta.get("file_path") or capture_path),
+                "read_only": True,
+                "driver": str((capture_record or {}).get("driver") or ""),
+                "file_size_bytes": int(capture_meta.get("file_size_bytes") or 0),
+                "file_mtime_ms": int(capture_meta.get("file_mtime_ms") or 0),
+                "file_fingerprint": str(capture_meta.get("file_fingerprint") or ""),
+            },
+        )
+        if capture_handle is None:
+            session_record["state"] = "degraded"
+            session_record["is_live"] = False
+            session_record["last_error"] = "capture handle restore failed"
+            sessions[str(session_id)] = session_record
+            degraded.append(str(session_id))
+            continue
+        captures[str(capture_file_id)] = _capture_record_from_runtime(capture_file_id)
+        try:
+            assert _session_manager is not None
+            _record_operation_stage(
+                ctx,
+                trace_id=trace_id,
+                stage="resume_session",
+                message=f"Reopening local session {session_id}",
+                details={"session_id": session_id, "capture_file_id": capture_file_id},
+            )
+            await _session_manager.create_session(
+                backend_config={"type": "local"},
+                replay_config={},
+                preferred_session_id=str(session_id),
+            )
+            await _session_manager.open_capture(str(session_id), str(capture_handle.file_path))
+            controller = await _get_controller(str(session_id))
+            roots = await _offload(controller.GetRootActions)
+            _, by_event = _build_action_index(roots)
+            desired_event_id = int(session_record.get("active_event_id") or 0)
+            if desired_event_id <= 0 or desired_event_id not in by_event:
+                desired_event_id = _pick_default_event_id(roots)
+            if desired_event_id > 0:
+                await _offload(controller.SetFrameEvent, desired_event_id, True)
+            replay = ReplayHandle(
+                session_id=str(session_id),
+                capture_file_id=str(capture_file_id),
+                frame_index=int(session_record.get("frame_index") or 0),
+                active_event_id=int(desired_event_id or 0),
+            )
+            _runtime.replays[str(session_id)] = replay
+            session_record["rdc_path"] = str(capture_handle.file_path)
+            session_record["file_fingerprint"] = str(capture_meta.get("file_fingerprint") or "")
+            session_record["file_size_bytes"] = int(capture_meta.get("file_size_bytes") or 0)
+            session_record["active_event_id"] = int(desired_event_id or 0)
+            session_record["state"] = "active"
+            session_record["is_live"] = True
+            session_record["last_error"] = ""
+            session_record["updated_at_ms"] = _now_ms()
+            session_record["recovery"] = {
+                **dict(session_record.get("recovery") or {}),
+                "status": "recovered",
+                "last_attempt_ms": _now_ms(),
+                "last_success_ms": _now_ms(),
+                "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
+                "last_error": "",
+            }
+            sessions[str(session_id)] = session_record
+            live_count += 1
+            recovered.append(str(session_id))
+        except Exception as exc:
+            try:
+                await _session_manager.close_session(str(session_id))
+            except Exception:
+                pass
+            _runtime.replays.pop(str(session_id), None)
+            session_record["state"] = "degraded"
+            session_record["is_live"] = False
+            session_record["last_error"] = str(exc)
+            session_record["updated_at_ms"] = _now_ms()
+            session_record["recovery"] = {
+                **dict(session_record.get("recovery") or {}),
+                "status": "degraded",
+                "last_attempt_ms": _now_ms(),
+                "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
+                "last_error": str(exc),
+            }
+            sessions[str(session_id)] = session_record
+            degraded.append(str(session_id))
+
+    recovery = dict(state.get("recovery") or {})
+    recovery["status"] = "ready"
+    recovery["last_scan_ms"] = _now_ms()
+    recovery["last_success_ms"] = _now_ms() if recovered else int(recovery.get("last_success_ms") or 0)
+    recovery["recovered_session_ids"] = recovered
+    recovery["degraded_session_ids"] = degraded
+    recovery["last_error"] = "" if not degraded else str((sessions.get(degraded[0]) or {}).get("last_error") or "")
+    state["captures"] = captures
+    state["sessions"] = sessions
+    state["recovery"] = recovery
+    metrics = dict(state.get("metrics") or {})
+    if recovered:
+        metrics["recovery_success_count"] = int(metrics.get("recovery_success_count") or 0) + len(recovered)
+    if degraded:
+        metrics["recovery_failure_count"] = int(metrics.get("recovery_failure_count") or 0) + len(degraded)
+    metrics["last_recovery_ms"] = _now_ms()
+    state["metrics"] = metrics
+    state = _select_session_from_state(state)
+    _store_context_state(state, ctx)
+    _sync_context_metrics(ctx)
+    _sync_context_snapshot_from_state(ctx)
+    duration_ms = _now_ms() - start_ms
+    _record_operation_finish(
+        ctx,
+        trace_id=trace_id,
+        payload=_recovery_payload(not degraded, duration_ms=duration_ms, message=recovery.get("last_error") or "", code="recovery_degraded"),
+    )
+    return _context_state(ctx)
+
+
+async def ensure_context_ready(context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    _context_state(ctx)
+    if ctx in _runtime.hydrated_contexts:
+        return _sync_context_metrics(ctx)
+    await _recover_context_sessions(ctx)
+    _runtime.hydrated_contexts.add(ctx)
+    return _context_state(ctx)
+
 async def runtime_startup() -> None:
     global _config, _session_manager, _event_graph_service, _render_service
     global _pipeline_service, _perf_service
@@ -1824,6 +2625,8 @@ async def runtime_startup() -> None:
     _runtime.config = _serialize_runtime_config()
     _runtime.initialized = False
     _runtime.logs.clear()
+    _runtime.context_states.clear()
+    _runtime.hydrated_contexts.clear()
     _runtime_bootstrapped = True
     _record_log("info", "RDX runtime initialized")
 
@@ -1863,7 +2666,8 @@ async def runtime_shutdown() -> None:
                 pass
     _runtime.consumed_remotes.clear()
     _runtime.context_snapshots.clear()
-    clear_context_snapshot(_runtime_context_id())
+    _runtime.context_states.clear()
+    _runtime.hydrated_contexts.clear()
     _runtime_bootstrapped = False
     _record_log("info", "RDX runtime shutdown complete")
 
@@ -1876,6 +2680,7 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
         if global_env:
             _apply_runtime_config(global_env)
         _runtime.initialized = True
+        _sync_context_metrics(_runtime_context_id())
         version = await _core_get_version_value()
         capabilities = await _core_capabilities(detail="summary")
         return _ok(api_version=version, capabilities=capabilities)
@@ -1912,6 +2717,8 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
                     pass
         _runtime.consumed_remotes.clear()
         _runtime.context_snapshots.clear()
+        _runtime.context_states.clear()
+        _runtime.hydrated_contexts.clear()
         _reset_context_snapshot()
         _runtime.initialized = False
         return _ok(released=released)
@@ -1952,7 +2759,10 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
         else:
             cutoff = 0
         out: List[Dict[str, Any]] = []
-        for item in _runtime.logs:
+        log_records = read_runtime_logs(_runtime_context_id(), since_ms=_as_int(since_ms) if since_ms is not None else None, max_lines=max_lines * 4)
+        if not log_records:
+            log_records = list(_runtime.logs)
+        for item in log_records:
             if since_ms is not None and int(item.get("ts_ms", 0)) < int(since_ms):
                 continue
             lv = str(item.get("level", "info")).lower()
@@ -1962,6 +2772,68 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
                 continue
             out.append(item)
         return _ok(logs=out[-max_lines:])
+
+    if action == "get_operation_history":
+        state = _context_state(_runtime_context_id())
+        max_items = _as_int(args.get("max_items"), 32)
+        since_ms = _as_int(args.get("since_ms"), 0)
+        operation_name = str(args.get("operation") or "").strip().lower()
+        status_filter = str(args.get("status") or "").strip().lower()
+        items = []
+        for entry in state.get("recent_operations", []):
+            if not isinstance(entry, dict):
+                continue
+            if since_ms and int(entry.get("updated_at_ms") or 0) < since_ms:
+                continue
+            if operation_name and operation_name not in str(entry.get("operation") or "").lower():
+                continue
+            if status_filter and status_filter != str(entry.get("status") or "").lower():
+                continue
+            items.append(entry)
+        return _ok(context_id=_runtime_context_id(), operations=items[:max_items])
+
+    if action == "get_runtime_metrics":
+        return _ok(**_runtime_metrics_payload(_runtime_context_id()))
+
+    if action == "list_tools":
+        detail_level = str(args.get("detail_level") or "summary").strip().lower() or "summary"
+        tools = _filter_tool_profiles(
+            namespace=str(args.get("namespace") or ""),
+            group=str(args.get("group") or ""),
+            capability=str(args.get("capability") or ""),
+            role=str(args.get("role") or ""),
+            intent=str(args.get("intent") or ""),
+            mutates_state=(
+                bool(args.get("mutates_state"))
+                if args.get("mutates_state") is not None
+                else None
+            ),
+            detail_level="full" if detail_level == "full" else "summary",
+        )
+        return _ok(tool_count=len(tools), tools=tools)
+
+    if action == "search_tools":
+        detail_level = str(args.get("detail_level") or "summary").strip().lower() or "summary"
+        tools = _filter_tool_profiles(
+            query=str(args.get("query") or ""),
+            namespace=str(args.get("namespace") or ""),
+            capability=str(args.get("capability") or ""),
+            role=str(args.get("role") or ""),
+            intent=str(args.get("intent") or ""),
+            detail_level="full" if detail_level == "full" else "summary",
+        )
+        return _ok(tool_count=len(tools), tools=tools)
+
+    if action == "get_tool_graph":
+        return _ok(
+            **_tool_graph_payload(
+                query=str(args.get("query") or ""),
+                namespace=str(args.get("namespace") or ""),
+                capability=str(args.get("capability") or ""),
+                role=str(args.get("role") or ""),
+                intent=str(args.get("intent") or ""),
+            )
+        )
 
     if action == "healthcheck":
         checks: List[Dict[str, Any]] = []
@@ -2074,12 +2946,283 @@ async def _core_capabilities(*, detail: str) -> Dict[str, Any]:
     return summary
 
 
+_MACRO_GUIDE: Dict[str, Dict[str, Any]] = {
+    "rd.macro.summarize_frame": {
+        "canonical_tools": ["rd.event.get_actions", "rd.pipeline.get_state_summary"],
+        "guidance": "Use the macro for a quick frame summary; switch to event/pipeline tools when you need exact event-level control.",
+    },
+    "rd.macro.find_pass_by_marker": {
+        "canonical_tools": ["rd.event.get_actions", "rd.event.search_actions", "rd.event.list_passes"],
+        "guidance": "Use the macro when you only know marker text; switch to event.list_passes for structured pass ranges.",
+    },
+    "rd.macro.locate_draw_affecting_pixel": {
+        "canonical_tools": ["rd.debug.pixel_history", "rd.event.get_action_details"],
+        "guidance": "Use the macro for pixel-driven triage; switch to debug/pipeline tools once you have candidate events.",
+    },
+    "rd.macro.explain_pixel": {
+        "canonical_tools": ["rd.debug.pixel_history", "rd.event.get_action_details", "rd.pipeline.get_state"],
+        "guidance": "Use the macro for narrative explanation; use canonical tools when you need raw evidence objects.",
+    },
+    "rd.macro.trace_resource_lifetime": {
+        "canonical_tools": ["rd.resource.get_history", "rd.resource.get_usage"],
+        "guidance": "Use the macro to start from a resource question; switch to resource history/usage for exact records.",
+    },
+}
+
+
+def _tool_namespace(tool_name: str) -> str:
+    parts = str(tool_name or "").split(".")
+    if len(parts) < 2:
+        return "rd"
+    return ".".join(parts[:2])
+
+
+def _tool_role(tool_name: str) -> str:
+    if tool_name.startswith("rd.macro."):
+        return "macro"
+    if tool_name.startswith("rd.vfs."):
+        return "navigation"
+    return "canonical"
+
+
+def _tool_mutates_state(tool_name: str) -> bool:
+    if tool_name.startswith("rd.vfs."):
+        return False
+    write_prefixes = (
+        "rd.core.init",
+        "rd.core.shutdown",
+        "rd.core.set_",
+        "rd.capture.open_",
+        "rd.capture.close_",
+        "rd.replay.set_",
+        "rd.event.set_",
+        "rd.remote.connect",
+        "rd.remote.disconnect",
+        "rd.app.",
+        "rd.session.update_context",
+        "rd.session.select_session",
+        "rd.session.resume",
+    )
+    return any(tool_name.startswith(prefix) for prefix in write_prefixes)
+
+
+def _tool_capabilities(tool: Dict[str, Any]) -> List[str]:
+    name = str(tool.get("name") or "")
+    capabilities: set[str] = set()
+    for prereq in tool.get("prerequisites", []):
+        if not isinstance(prereq, dict):
+            continue
+        requires = str(prereq.get("requires") or "").strip()
+        if requires.startswith("capability."):
+            capabilities.add(requires.split(".", 1)[1])
+    if name.startswith("rd.remote."):
+        capabilities.add("remote")
+    if name.startswith("rd.app."):
+        capabilities.add("app_api")
+    if name.startswith("rd.debug.") or name.startswith("rd.shader."):
+        capabilities.add("shader_debug")
+    if name.startswith("rd.perf."):
+        capabilities.add("counters")
+    return sorted(capabilities)
+
+
+def _tool_intents(tool: Dict[str, Any]) -> List[str]:
+    name = str(tool.get("name") or "")
+    group = str(tool.get("group") or "").lower()
+    intents: set[str] = set()
+    if name.startswith("rd.session.") or name.startswith("rd.capture.") or name.startswith("rd.replay."):
+        intents.add("session")
+    if name.startswith("rd.vfs.") or name.startswith("rd.core.list_tools") or name.startswith("rd.core.search_tools"):
+        intents.add("discovery")
+    if name.startswith("rd.remote."):
+        intents.add("remote")
+    if "analysis" in group or name.startswith("rd.analysis.") or name.startswith("rd.macro."):
+        intents.add("analysis")
+    if name.startswith("rd.export.") or name.startswith("rd.util.pack_zip"):
+        intents.add("export")
+    if name.startswith("rd.debug.") or name.startswith("rd.shader."):
+        intents.add("debug")
+    if not intents:
+        intents.add("inspection")
+    return sorted(intents)
+
+
+def _tool_profile(tool: Dict[str, Any], *, detail_level: str = "summary") -> Dict[str, Any]:
+    name = str(tool.get("name") or "")
+    payload = {
+        "name": name,
+        "namespace": _tool_namespace(name),
+        "group": str(tool.get("group") or ""),
+        "description": str(tool.get("description") or ""),
+        "role": _tool_role(name),
+        "mutates_state": _tool_mutates_state(name),
+        "capabilities": _tool_capabilities(tool),
+        "intents": _tool_intents(tool),
+        "prerequisites": list(tool.get("prerequisites") or []),
+        "param_names": list(tool.get("param_names") or []),
+    }
+    if name in _MACRO_GUIDE:
+        payload["canonical_tools"] = list(_MACRO_GUIDE[name]["canonical_tools"])
+        payload["guidance"] = str(_MACRO_GUIDE[name]["guidance"])
+    if detail_level == "full":
+        payload["parameter_raw"] = str(tool.get("parameter_raw") or "")
+        payload["returns_raw"] = str(tool.get("returns_raw") or "")
+        if tool.get("supports_projection") is not None:
+            payload["supports_projection"] = dict(tool.get("supports_projection") or {})
+    return payload
+
+
+def _filter_tool_profiles(
+    *,
+    query: str = "",
+    namespace: str = "",
+    group: str = "",
+    capability: str = "",
+    role: str = "",
+    intent: str = "",
+    mutates_state: Optional[bool] = None,
+    detail_level: str = "summary",
+) -> List[Dict[str, Any]]:
+    query_text = str(query or "").strip().lower()
+    namespace_text = str(namespace or "").strip().lower()
+    group_text = str(group or "").strip().lower()
+    capability_text = str(capability or "").strip().lower()
+    role_text = str(role or "").strip().lower()
+    intent_text = str(intent or "").strip().lower()
+    out: List[Dict[str, Any]] = []
+    for tool in _load_tool_catalog():
+        entry = _tool_profile(tool, detail_level=detail_level)
+        if namespace_text and str(entry.get("namespace") or "").lower() != namespace_text:
+            continue
+        if group_text and group_text not in str(entry.get("group") or "").lower():
+            continue
+        if capability_text and capability_text not in [str(item).lower() for item in entry.get("capabilities", [])]:
+            continue
+        if role_text and str(entry.get("role") or "").lower() != role_text:
+            continue
+        if intent_text and intent_text not in [str(item).lower() for item in entry.get("intents", [])]:
+            continue
+        if mutates_state is not None and bool(entry.get("mutates_state")) != bool(mutates_state):
+            continue
+        if query_text:
+            haystack = " ".join(
+                [
+                    str(entry.get("name") or ""),
+                    str(entry.get("group") or ""),
+                    str(entry.get("description") or ""),
+                    " ".join(str(item) for item in entry.get("capabilities", [])),
+                    " ".join(str(item) for item in entry.get("intents", [])),
+                ]
+            ).lower()
+            if query_text not in haystack:
+                continue
+        out.append(entry)
+    return out
+
+
+def _tool_graph_payload(*, query: str = "", namespace: str = "", intent: str = "", capability: str = "", role: str = "") -> Dict[str, Any]:
+    tools = _filter_tool_profiles(
+        query=query,
+        namespace=namespace,
+        intent=intent,
+        capability=capability,
+        role=role,
+        detail_level="summary",
+    )
+    selected = {str(item.get("name") or "") for item in tools}
+    edges: List[Dict[str, Any]] = []
+    for tool in tools:
+        name = str(tool.get("name") or "")
+        for prereq in tool.get("prerequisites", []):
+            if not isinstance(prereq, dict):
+                continue
+            for via_tool in prereq.get("via_tools", []):
+                via_name = str(via_tool or "").strip()
+                if via_name and via_name in selected:
+                    edges.append(
+                        {
+                            "from": via_name,
+                            "to": name,
+                            "type": "prerequisite",
+                            "requires": str(prereq.get("requires") or ""),
+                        }
+                    )
+        for canonical in tool.get("canonical_tools", []):
+            canonical_name = str(canonical or "").strip()
+            if canonical_name and canonical_name in selected:
+                edges.append({"from": name, "to": canonical_name, "type": "macro_expands_to"})
+    return {"tools": tools, "edges": edges}
+
+
+def _process_memory_bytes() -> int:
+    if os.name != "nt":
+        return 0
+    class _ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.c_ulong),
+            ("PageFaultCount", ctypes.c_ulong),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+    counters = _ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
+    handle = ctypes.windll.kernel32.GetCurrentProcess()
+    ok = ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+    if not ok:
+        return 0
+    return int(counters.WorkingSetSize)
+
+
+def _runtime_metrics_payload(context_id: Optional[str] = None) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _sync_context_metrics(ctx)
+    metrics = dict(state.get("metrics") or {})
+    metrics["operation_duration_summary"] = summarize_operation_durations(metrics.get("recent_operation_duration_ms") or [])
+    metrics["process_memory_bytes"] = _process_memory_bytes()
+    metrics["live_runtime_session_count"] = len(_runtime.replays)
+    metrics["live_runtime_capture_count"] = len(_runtime.captures)
+    metrics["live_remote_count"] = len(_runtime.remotes)
+    metrics["known_context_count"] = len({normalize_context_id(item) for item in list_context_ids()} | {ctx})
+    metrics["current_session_id"] = str(state.get("current_session_id") or "")
+    metrics["current_capture_file_id"] = str(state.get("current_capture_file_id") or "")
+    return {
+        "context_id": ctx,
+        "limits": dict(state.get("limits") or {}),
+        "metrics": metrics,
+        "recovery": dict(state.get("recovery") or {}),
+        "recent_operations": list(state.get("recent_operations") or []),
+    }
+
+
 async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
     context_id = _runtime_context_id()
 
     if action == "get_context":
         snapshot = _context_snapshot(context_id)
-        return _ok(**snapshot)
+        state = _sync_context_metrics(context_id)
+        active_operation: Dict[str, Any] = {}
+        try:
+            from rdx.daemon.client import load_daemon_state
+
+            daemon_state = load_daemon_state(context=context_id)
+            active_operation = dict(daemon_state.get("active_operation") or {})
+        except Exception:
+            active_operation = {}
+        return _ok(
+            **snapshot,
+            current_session_id=str(state.get("current_session_id") or ""),
+            sessions=list(state.get("sessions", {}).values()),
+            recovery=dict(state.get("recovery") or {}),
+            limits=dict(state.get("limits") or {}),
+            active_operation=active_operation,
+            recent_operations=list(state.get("recent_operations") or []),
+        )
 
     if action == "update_context":
         _require(args, "key")
@@ -2096,6 +3239,62 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
         snapshot = _store_context_snapshot(snapshot, context_id)
         return _ok(**snapshot)
 
+    if action == "list_sessions":
+        state = _sync_context_metrics(context_id)
+        return _ok(
+            context_id=context_id,
+            current_session_id=str(state.get("current_session_id") or ""),
+            sessions=list(state.get("sessions", {}).values()),
+            recovery=dict(state.get("recovery") or {}),
+            limits=dict(state.get("limits") or {}),
+        )
+
+    if action == "select_session":
+        _require(args, "session_id")
+        session_id = str(args["session_id"] or "").strip()
+        snapshot = _select_context_session_state(session_id, context_id=context_id)
+        state = _context_state(context_id)
+        return _ok(
+            **snapshot,
+            current_session_id=str(state.get("current_session_id") or ""),
+            sessions=list(state.get("sessions", {}).values()),
+            recovery=dict(state.get("recovery") or {}),
+            limits=dict(state.get("limits") or {}),
+            recent_operations=list(state.get("recent_operations") or []),
+        )
+
+    if action == "resume":
+        requested_session_id = str(args.get("session_id") or "").strip()
+        await _recover_context_sessions(context_id)
+        if requested_session_id:
+            state = _context_state(context_id)
+            session = dict(state.get("sessions", {}).get(requested_session_id) or {})
+            if not session:
+                return _err(
+                    f"Unknown session_id: {requested_session_id}",
+                    code="session_not_found",
+                    category="not_found",
+                    details={"session_id": requested_session_id},
+                )
+            if not bool(session.get("is_live")):
+                return _err(
+                    f"Session could not be resumed: {requested_session_id}",
+                    code="session_resume_failed",
+                    category="runtime",
+                    details={"session_id": requested_session_id, "last_error": str(session.get("last_error") or "")},
+                )
+            _select_context_session_state(requested_session_id, context_id=context_id)
+        state = _context_state(context_id)
+        snapshot = _context_snapshot(context_id)
+        return _ok(
+            **snapshot,
+            current_session_id=str(state.get("current_session_id") or ""),
+            sessions=list(state.get("sessions", {}).values()),
+            recovery=dict(state.get("recovery") or {}),
+            limits=dict(state.get("limits") or {}),
+            recent_operations=list(state.get("recent_operations") or []),
+        )
+
     return _err(f"Unsupported session action: {action}")
 
 
@@ -2107,6 +3306,47 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
         path = Path(file_path)
         if not path.is_file():
             return _err(f"Capture file not found: {file_path}")
+        state = _context_state(_runtime_context_id())
+        limits = dict(state.get("limits") or {})
+        file_meta = _capture_file_metadata(str(path))
+        if int(file_meta.get("file_size_bytes") or 0) > int(limits.get("max_capture_size_bytes") or 0):
+            metrics = dict(state.get("metrics") or {})
+            metrics["rejection_count"] = int(metrics.get("rejection_count") or 0) + 1
+            state["metrics"] = metrics
+            _store_context_state(state, _runtime_context_id())
+            return _err(
+                f"Capture file exceeds limit: {file_path}",
+                code="capture_file_too_large",
+                category="runtime",
+                details={
+                    "file_path": str(path),
+                    "file_size_bytes": int(file_meta.get("file_size_bytes") or 0),
+                    "max_capture_size_bytes": int(limits.get("max_capture_size_bytes") or 0),
+                },
+            )
+        if len(state.get("captures", {})) >= int(limits.get("max_capture_files") or 1):
+            metrics = dict(state.get("metrics") or {})
+            metrics["rejection_count"] = int(metrics.get("rejection_count") or 0) + 1
+            state["metrics"] = metrics
+            _store_context_state(state, _runtime_context_id())
+            return _err(
+                "Capture file limit exceeded",
+                code="capture_limit_exceeded",
+                category="runtime",
+                details={
+                    "max_capture_files": int(limits.get("max_capture_files") or 0),
+                    "active_capture_count": len(state.get("captures", {})),
+                },
+            )
+        _progress(
+            "capture_file_validated",
+            "Capture file validated",
+            progress_pct=0.1,
+            details={
+                "file_path": str(path),
+                "file_size_bytes": int(file_meta.get("file_size_bytes") or 0),
+            },
+        )
         driver = ""
         try:
             rd = _get_rd()
@@ -2194,6 +3434,42 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
         handle = _runtime.captures.get(capture_file_id)
         if handle is None:
             return _err(f"Unknown capture_file_id: {capture_file_id}")
+        state = _context_state(_runtime_context_id())
+        limits = dict(state.get("limits") or {})
+        session_count = len(state.get("sessions", {}))
+        if session_count >= int(limits.get("max_sessions_per_context") or 1):
+            metrics = dict(state.get("metrics") or {})
+            metrics["rejection_count"] = int(metrics.get("rejection_count") or 0) + 1
+            state["metrics"] = metrics
+            _store_context_state(state, _runtime_context_id())
+            return _err(
+                "Session limit exceeded for current context",
+                code="session_limit_exceeded",
+                category="runtime",
+                details={
+                    "max_sessions_per_context": int(limits.get("max_sessions_per_context") or 0),
+                    "active_session_count": session_count,
+                    "context_id": _runtime_context_id(),
+                },
+            )
+        file_meta = _capture_file_metadata(handle.file_path)
+        estimated_replay_memory_bytes = _estimated_replay_memory_bytes(int(file_meta.get("file_size_bytes") or 0))
+        if estimated_replay_memory_bytes > int(limits.get("max_estimated_replay_memory_bytes") or 0):
+            metrics = dict(state.get("metrics") or {})
+            metrics["rejection_count"] = int(metrics.get("rejection_count") or 0) + 1
+            state["metrics"] = metrics
+            _store_context_state(state, _runtime_context_id())
+            return _err(
+                "Estimated replay memory exceeds limit",
+                code="replay_memory_limit_exceeded",
+                category="runtime",
+                details={
+                    "capture_file_id": capture_file_id,
+                    "file_size_bytes": int(file_meta.get("file_size_bytes") or 0),
+                    "estimated_replay_memory_bytes": estimated_replay_memory_bytes,
+                    "max_estimated_replay_memory_bytes": int(limits.get("max_estimated_replay_memory_bytes") or 0),
+                },
+            )
         _progress("capture_open_started", "Opening replay session", progress_pct=0.55, details={"capture_file_id": capture_file_id})
         options = _as_dict(args.get("options"), default={})
         remote_id = str(options.get("remote_id") or "").strip()
@@ -2415,37 +3691,80 @@ async def _dispatch_event(action: str, args: Dict[str, Any]) -> str:
     if action == "get_actions":
         include_markers = _as_bool(args.get("include_markers"), True)
         include_drawcalls = _as_bool(args.get("include_drawcalls"), True)
-        out = []
-        for root in roots:
-            item = _action_to_dict(root, include_children=True, depth=0)
+        max_nodes = max(1, _as_int(args.get("max_nodes"), 2000))
+        emitted = 0
+
+        def bounded_action(action_obj: Any, depth: int = 0) -> Optional[Dict[str, Any]]:
+            nonlocal emitted
+            if emitted >= max_nodes:
+                return None
+            item = _action_to_dict(action_obj, include_children=False, depth=depth)
             flags = item.get("flags", {})
             if flags.get("is_marker") and not include_markers:
-                continue
+                return None
             if flags.get("is_draw") and not include_drawcalls:
-                continue
-            out.append(item)
-        return _ok(actions=out)
+                return None
+            emitted += 1
+            children = []
+            for child in getattr(action_obj, "children", None) or []:
+                if emitted >= max_nodes:
+                    break
+                child_item = bounded_action(child, depth + 1)
+                if child_item is not None:
+                    children.append(child_item)
+            item["children"] = children
+            return item
+
+        out = []
+        for root in roots:
+            if emitted >= max_nodes:
+                break
+            item = bounded_action(root, 0)
+            if item is not None:
+                out.append(item)
+        return _ok(actions=out, pagination={"max_nodes": max_nodes, "emitted_nodes": emitted, "truncated": emitted >= max_nodes})
 
     if action == "get_action_tree":
         max_depth = args.get("max_depth")
         filter_cfg = _as_dict(args.get("filter"), default={})
         name_contains = str(filter_cfg.get("name_contains", "")).strip().lower()
+        offset = max(0, _as_int(args.get("offset"), 0))
+        limit = max(1, _as_int(args.get("limit"), 256))
+        max_nodes = max(1, _as_int(args.get("max_nodes"), 2000))
+        emitted = 0
 
         def trim(node: Dict[str, Any], depth: int) -> Optional[Dict[str, Any]]:
+            nonlocal emitted
+            if emitted >= max_nodes:
+                return None
             if max_depth is not None and depth > int(max_depth):
                 return None
             if name_contains and name_contains not in str(node.get("name", "")).lower():
                 pass
+            emitted += 1
             children = [trim(c, depth + 1) for c in node.get("children", [])]
             node["children"] = [c for c in children if c is not None]
             return node
 
         root_payload = {"event_id": 0, "name": "root", "flags": {}, "children": []}
-        for r in roots:
+        selected_roots = list(roots)[offset : offset + limit]
+        for r in selected_roots:
+            if emitted >= max_nodes:
+                break
             node = trim(_action_to_dict(r, include_children=True, depth=1), 1)
             if node is not None:
                 root_payload["children"].append(node)
-        return _ok(root=root_payload)
+        return _ok(
+            root=root_payload,
+            pagination={
+                "offset": offset,
+                "limit": limit,
+                "max_nodes": max_nodes,
+                "returned_root_count": len(root_payload["children"]),
+                "total_root_count": len(list(roots)),
+                "truncated": emitted >= max_nodes,
+            },
+        )
 
     if action == "get_action_details":
         _require(args, "event_id")

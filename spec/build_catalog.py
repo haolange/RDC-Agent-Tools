@@ -16,6 +16,7 @@ _HEADING_RE = re.compile(r"^3\.\d+")
 _PARAM_NAME_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _SECTION_HEADING_RE = re.compile(r"^[\u4e00-\u9fff]+[\u3001\uff0c]")
 _WORD_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+_CORE_GROUP = "3.1\uff0c\u6838\u5fc3\u4e0e\u73af\u5883\u7ba1\u7406 (Core & Environment)"
 _CONTEXT_GROUP = "3.17\uff0c\u4e0a\u4e0b\u6587\u5feb\u7167\u5de5\u5177 (Context Snapshot Tools)"
 _VFS_GROUP = "3.18\uff0cVFS \u5bfc\u822a\u5de5\u5177 (VFS Navigation Tools)"
 _OVERLAY_PATH = Path(__file__).resolve().with_name("tool_catalog_overlay.json")
@@ -23,16 +24,74 @@ _MANUAL_TOOLS = [
     {
         "name": "rd.session.get_context",
         "group": _CONTEXT_GROUP,
-        "description": "\u8bfb\u53d6\u5f53\u524d context \u5feb\u7167\uff0c\u8fd4\u56de runtime\u3001remote\u3001focus \u4e0e recent artifacts \u7684\u7ed3\u6784\u5316\u72b6\u6001\u3002",
+        "description": "\u8bfb\u53d6\u5f53\u524d context \u5feb\u7167\u4e0e\u6301\u4e45\u5316\u72b6\u6001\u7d22\u5f15\uff0c\u8fd4\u56de runtime\u3001remote\u3001focus\u3001session \u8868\u3001\u6062\u590d\u4fe1\u606f\u3001\u6700\u8fd1\u64cd\u4f5c\u4e0e\u9650\u5236\u914d\u7f6e\u3002",
         "parameter_raw": "",
-        "returns_raw": "success (bool)<br>context_id (str)<br>runtime (dict): {session_id, capture_file_id, frame_index, active_event_id, backend_type}<br>remote (dict): {state, remote_id, origin_remote_id, endpoint, consumed_by_session_id}<br>focus (dict): {pixel?, resource_id?, shader_id?}<br>last_artifacts (list)<br>updated_at_ms (int)<br>error_message (str, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {context_id, runtime, remote, focus, last_artifacts, current_session_id, sessions, recovery, limits, active_operation, recent_operations, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
     },
     {
         "name": "rd.session.update_context",
         "group": _CONTEXT_GROUP,
         "description": "\u66f4\u65b0\u5f53\u524d context \u7684 user-owned \u5b57\u6bb5\uff0c\u4f8b\u5982 focus_pixel\u3001focus_resource_id\u3001focus_shader_id \u4e0e notes\u3002",
         "parameter_raw": "key (str)<br>value (json, \u53ef\u9009): \u4f20 null \u8868\u793a\u6e05\u9664\u5bf9\u5e94 user-owned \u5b57\u6bb5",
-        "returns_raw": "success (bool)<br>context_id (str)<br>runtime (dict): {session_id, capture_file_id, frame_index, active_event_id, backend_type}<br>remote (dict): {state, remote_id, origin_remote_id, endpoint, consumed_by_session_id}<br>focus (dict): {pixel?, resource_id?, shader_id?}<br>notes (str)<br>last_artifacts (list)<br>updated_at_ms (int)<br>error_message (str, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {context_id, runtime, remote, focus, notes, last_artifacts, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.session.list_sessions",
+        "group": _CONTEXT_GROUP,
+        "description": "\u5217\u51fa\u5f53\u524d context \u4e0b\u7684\u6301\u4e45\u5316 session \u8868\u3001\u5f53\u524d\u9009\u4e2d session \u4e0e\u6062\u590d\u6458\u8981\u3002",
+        "parameter_raw": "",
+        "returns_raw": "ok (bool)<br>data (dict): {context_id, current_session_id, sessions, recovery, limits}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.session.select_session",
+        "group": _CONTEXT_GROUP,
+        "description": "\u5207\u6362\u5f53\u524d context \u7684 current session \u6307\u9488\uff0c\u800c\u4e0d\u9500\u6bc1\u5176\u4ed6\u5df2\u6301\u6709\u7684 session\u3002",
+        "parameter_raw": "session_id (str)",
+        "returns_raw": "ok (bool)<br>data (dict): {context_id, runtime, remote, focus, current_session_id, sessions, recovery, limits, recent_operations, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+        "prerequisites": [],
+    },
+    {
+        "name": "rd.session.resume",
+        "group": _CONTEXT_GROUP,
+        "description": "\u57fa\u4e8e\u6301\u4e45\u5316\u72b6\u6001\u5c1d\u8bd5\u6062\u590d\u5f53\u524d context \u7684\u672c\u5730 `.rdc` session\uff1b\u53ef\u9009\u4ec5\u6821\u9a8c\u6307\u5b9a session \u7684\u6062\u590d\u7ed3\u679c\u3002",
+        "parameter_raw": "session_id (str, \u53ef\u9009): \u82e5\u7ed9\u5b9a\u5219\u5728\u6062\u590d\u5b8c\u6210\u540e\u6821\u9a8c\u8be5 session \u662f\u5426\u5df2\u6062\u590d\u4e3a live",
+        "returns_raw": "ok (bool)<br>data (dict): {context_id, runtime, remote, focus, current_session_id, sessions, recovery, limits, recent_operations, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+        "prerequisites": [],
+    },
+    {
+        "name": "rd.core.get_operation_history",
+        "group": _CORE_GROUP,
+        "description": "\u8bfb\u53d6\u5f53\u524d context \u6700\u8fd1\u7684 trace-linked \u64cd\u4f5c\u5386\u53f2\uff0c\u53ef\u6309\u65f6\u95f4\u3001\u72b6\u6001\u4e0e\u64cd\u4f5c\u540d\u8fc7\u6ee4\u3002",
+        "parameter_raw": "since_ms (int, \u53ef\u9009): \u4ec5\u8fd4\u56de\u8be5\u65f6\u95f4\u6233\u4e4b\u540e\u66f4\u65b0\u8fc7\u7684\u64cd\u4f5c<br>operation (str, \u53ef\u9009): \u6309\u64cd\u4f5c\u540d\u5b50\u4e32\u8fc7\u6ee4<br>status (str, \u53ef\u9009): \u6309 running/completed/failed \u8fc7\u6ee4<br>max_items (int, \u53ef\u9009, \u9ed8\u8ba4 32)",
+        "returns_raw": "ok (bool)<br>data (dict): {context_id, operations}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.core.get_runtime_metrics",
+        "group": _CORE_GROUP,
+        "description": "\u8bfb\u53d6\u5f53\u524d context \u7684\u81ea\u76d1\u63a7\u6307\u6807\u3001\u9650\u5236\u914d\u7f6e\u3001\u6062\u590d\u6458\u8981\u4e0e\u6700\u8fd1\u64cd\u4f5c\u7edf\u8ba1\u3002",
+        "parameter_raw": "",
+        "returns_raw": "ok (bool)<br>data (dict): {context_id, limits, metrics, recovery, recent_operations}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.core.list_tools",
+        "group": _CORE_GROUP,
+        "description": "\u6309 namespace\u3001group\u3001capability\u3001role\u3001intent \u7b49\u7ed3\u6784\u5316\u6761\u4ef6\u5217\u51fa\u53ef\u7528 tool\uff0c\u907f\u514d\u4e00\u6b21\u6027\u6ce8\u5165\u5168\u90e8\u63cf\u8ff0\u3002",
+        "parameter_raw": "namespace (str, \u53ef\u9009)<br>group (str, \u53ef\u9009)<br>capability (str, \u53ef\u9009)<br>role (str, \u53ef\u9009): canonical|macro|navigation<br>intent (str, \u53ef\u9009)<br>mutates_state (bool, \u53ef\u9009)<br>detail_level (str, \u53ef\u9009, \u9ed8\u8ba4 'summary'): summary|full",
+        "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.core.search_tools",
+        "group": _CORE_GROUP,
+        "description": "\u6309\u540d\u79f0\u3001\u63cf\u8ff0\u3001group\u3001capability \u4e0e intent \u7684\u7ed3\u6784\u5316\u5b50\u4e32\u641c\u7d22 tool\uff0c\u8fd4\u56de\u9002\u914d Agent \u7684\u8f7b\u91cf\u89c6\u56fe\u3002",
+        "parameter_raw": "query (str, \u53ef\u9009)<br>namespace (str, \u53ef\u9009)<br>capability (str, \u53ef\u9009)<br>role (str, \u53ef\u9009): canonical|macro|navigation<br>intent (str, \u53ef\u9009)<br>detail_level (str, \u53ef\u9009, \u9ed8\u8ba4 'summary'): summary|full",
+        "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+    },
+    {
+        "name": "rd.core.get_tool_graph",
+        "group": _CORE_GROUP,
+        "description": "\u8fd4\u56de tool \u4e4b\u95f4\u7684 prerequisite \u4e0e macro-to-canonical \u4f9d\u8d56\u56fe\uff0c\u5e2e\u52a9 Agent \u63a8\u65ad\u8c03\u7528\u94fe\u4e0e\u5c55\u5f00\u8def\u5f84\u3002",
+        "parameter_raw": "query (str, \u53ef\u9009)<br>namespace (str, \u53ef\u9009)<br>capability (str, \u53ef\u9009)<br>role (str, \u53ef\u9009): canonical|macro|navigation<br>intent (str, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {tools, edges}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
     },
     {
         "name": "rd.vfs.ls",

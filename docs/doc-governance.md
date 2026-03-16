@@ -15,6 +15,7 @@
 - `context`、daemon、session state、artifact、context snapshot 如何协同。
 - `remote_id` 的生命周期边界是什么。
 - 上层 Agent / framework 的责任边界在哪里。
+- 本地恢复索引、session 表与最近操作历史的规范入口是什么。
 
 ## 2. 分层职责表
 
@@ -68,12 +69,13 @@
 - `docs/tools.md`
 - `docs/agent-model.md`
 - `docs/doc-governance.md`
+- 如新增 discovery / observability / recovery 入口，补查 `docs/session-model.md` 与 `docs/troubleshooting.md`
 - 如新增/修改 `prerequisites`，同步检查 frameworks 的 tool snapshot 与 contract validators
 - 如涉及开发后自测流程，再检查 `AGENTS.md`
 
 ### session / context / daemon 语义变更
 
-如果改动影响 `.rdc -> session` 链路、`context`、daemon、session state、artifact、context snapshot、错误恢复路径，至少检查：
+如果改动影响 `.rdc -> session` 链路、`context`、daemon、session state、artifact、context snapshot、persistent context state、错误恢复路径，至少检查：
 
 - `docs/session-model.md`
 - `docs/quickstart.md`
@@ -113,6 +115,8 @@
 - 不把恢复 ownership 错放给仓库。
 - 如果 `remote_id` 被写入文档，必须说明它在 remote `open_replay` 成功后会被消费。
 - 如果 catalog 已公开 `rd.session.get_context` / `rd.session.update_context`，核心文档中必须能找到它们的角色说明。
+- 如果 catalog 已公开 `rd.session.list_sessions` / `rd.session.select_session` / `rd.session.resume`，核心文档中必须说明“一个 context 可持有多条 session 记录”和“`current_session_id` 只表示当前工作面”。
+- 如果 catalog 已公开 `rd.core.get_operation_history` / `rd.core.get_runtime_metrics` / `rd.core.list_tools` / `rd.core.search_tools` / `rd.core.get_tool_graph`，核心文档中必须说明它们的 discovery / observability 职责边界。
 - 如果文档写到 `event_id`，必须区分 canonical action event 与底层 `raw_event_id`；不得暗示任意 RenderDoc 原始 `eventId` 都能直接喂回 `rd.event.set_active`。
 
 ## 5. 量化指标
