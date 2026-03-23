@@ -174,12 +174,10 @@ class RuntimeState:
     context_snapshots: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     context_states: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     hydrated_contexts: set[str] = field(default_factory=set)
-    app_capture_options: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     shader_debugs: Dict[str, ShaderDebugHandle] = field(default_factory=dict)
     shader_replacements: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     initialized: bool = False
     enable_remote: bool = True
-    enable_app_api: bool = False
 
 
 _config: Optional[RdxConfig] = None
@@ -1070,7 +1068,7 @@ def _append_context_artifacts(artifacts: Sequence[Dict[str, Any]], source_tool: 
 def _sync_focus_from_args(operation: str, args: Dict[str, Any], *, context_id: Optional[str] = None) -> Dict[str, Any]:
     snapshot = _context_snapshot(context_id)
     changed = False
-    if operation in {"rd.macro.locate_draw_affecting_pixel", "rd.macro.explain_pixel", "rd.debug.pixel_history"}:
+    if operation in {"rd.macro.explain_pixel", "rd.debug.pixel_history"}:
         if args.get("x") is not None and args.get("y") is not None:
             pixel = {"x": int(args.get("x") or 0), "y": int(args.get("y") or 0)}
             target = args.get("target")
@@ -2676,7 +2674,6 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
     if action == "init":
         global_env = _as_dict(args.get("global_env"), default={})
         _runtime.enable_remote = _as_bool(args.get("enable_remote"), True)
-        _runtime.enable_app_api = _as_bool(args.get("enable_app_api"), False)
         if global_env:
             _apply_runtime_config(global_env)
         _runtime.initialized = True
@@ -2880,11 +2877,6 @@ async def _core_capabilities(*, detail: str) -> Dict[str, Any]:
             else "Requires a live RenderDoc remote endpoint."
         )
     )
-    app_reason = (
-        "App API tools are disabled by config and require in-process RenderDoc instrumentation."
-        if not _runtime.enable_app_api
-        else "Requires in-process RenderDoc instrumentation."
-    )
     summary = {
         "replay": _capability_entry(
             True,
@@ -2899,13 +2891,6 @@ async def _core_capabilities(*, detail: str) -> Dict[str, Any]:
             source="external_dependency",
             enabled_by_config=bool(_runtime.enable_remote),
             connected_handles=sum(1 for handle in _runtime.remotes.values() if handle.connected),
-        ),
-        "app_api": _capability_entry(
-            False,
-            reason=app_reason,
-            optional=True,
-            source="external_dependency",
-            enabled_by_config=bool(_runtime.enable_app_api),
         ),
         "shader_debug": _capability_entry(
             True,
@@ -2952,20 +2937,40 @@ _MACRO_GUIDE: Dict[str, Dict[str, Any]] = {
         "guidance": "Use the macro for a quick frame summary; switch to event/pipeline tools when you need exact event-level control.",
     },
     "rd.macro.find_pass_by_marker": {
-        "canonical_tools": ["rd.event.get_actions", "rd.event.search_actions", "rd.event.list_passes"],
+        "canonical_tools": ["rd.event.search_actions", "rd.event.list_passes"],
         "guidance": "Use the macro when you only know marker text; switch to event.list_passes for structured pass ranges.",
-    },
-    "rd.macro.locate_draw_affecting_pixel": {
-        "canonical_tools": ["rd.debug.pixel_history", "rd.event.get_action_details"],
-        "guidance": "Use the macro for pixel-driven triage; switch to debug/pipeline tools once you have candidate events.",
     },
     "rd.macro.explain_pixel": {
         "canonical_tools": ["rd.debug.pixel_history", "rd.event.get_action_details", "rd.pipeline.get_state"],
         "guidance": "Use the macro for narrative explanation; use canonical tools when you need raw evidence objects.",
     },
-    "rd.macro.trace_resource_lifetime": {
-        "canonical_tools": ["rd.resource.get_history", "rd.resource.get_usage"],
-        "guidance": "Use the macro to start from a resource question; switch to resource history/usage for exact records.",
+    "rd.macro.resource_dependency_graph": {
+        "canonical_tools": ["rd.event.get_action_tree", "rd.resource.get_usage", "rd.resource.get_history"],
+        "guidance": "Use the macro to build a coarse causal graph first; switch to event/resource tools when you need exact edges.",
+    },
+    "rd.macro.find_state_change_point": {
+        "canonical_tools": ["rd.pipeline.get_state", "rd.event.diff_pipeline_state"],
+        "guidance": "Use the macro to search a state transition window; switch to pipeline/event diff tools when you need exact snapshots.",
+    },
+    "rd.macro.compare_events_report": {
+        "canonical_tools": ["rd.event.diff_pipeline_state", "rd.event.get_action_details"],
+        "guidance": "Use the macro for a readable diff report; switch to event diff/details tools when you need raw change objects.",
+    },
+    "rd.macro.find_unexpected_clear": {
+        "canonical_tools": ["rd.event.search_actions"],
+        "guidance": "Use the macro to hunt clear/discard anomalies quickly; switch to event search when you need precise filters.",
+    },
+    "rd.macro.quick_triage_missing_draw": {
+        "canonical_tools": ["rd.diag.scan_common_issues", "rd.event.get_action_details", "rd.pipeline.get_state", "rd.debug.pixel_history"],
+        "guidance": "Use the macro to assemble an initial missing-draw triage; switch to canonical tools when you need exact evidence objects.",
+    },
+    "rd.macro.build_bug_report_pack": {
+        "canonical_tools": ["rd.export.repro_bundle_zip", "rd.export.markdown_report", "rd.session.get_context"],
+        "guidance": "Use the macro to package a report bundle; switch to export/session tools when you need direct artifact control.",
+    },
+    "rd.macro.shader_hotfix_validate": {
+        "canonical_tools": ["rd.shader.edit_and_replace", "rd.export.screenshot"],
+        "guidance": "Use the macro for closed-loop hotfix validation; switch to shader/export tools when you need each step independently.",
     },
 }
 
@@ -2975,6 +2980,50 @@ def _tool_namespace(tool_name: str) -> str:
     if len(parts) < 2:
         return "rd"
     return ".".join(parts[:2])
+
+
+_PRIMARY_DISCOVERY_NAMESPACE_RANKS = {
+    "rd.capture": 100,
+    "rd.replay": 110,
+    "rd.event": 120,
+    "rd.pipeline": 130,
+    "rd.resource": 140,
+    "rd.texture": 150,
+    "rd.buffer": 160,
+    "rd.mesh": 170,
+    "rd.shader": 180,
+    "rd.debug": 190,
+    "rd.export": 200,
+    "rd.remote": 210,
+    "rd.diag": 220,
+    "rd.perf": 230,
+    "rd.util": 240,
+}
+_MACRO_DISCOVERY_RANK = 300
+_META_DISCOVERY_RANK = 400
+_NAVIGATION_DISCOVERY_RANK = 500
+_NAVIGATION_QUERY_TERMS = {
+    "browse",
+    "path",
+    "tree",
+    "ls",
+    "navigate",
+    "vfs",
+    "浏览",
+    "路径",
+    "树",
+    "结构",
+    "导航",
+}
+_TABULAR_QUERY_TERMS = {
+    "table",
+    "tabular",
+    "tsv",
+    "spreadsheet",
+    "表格",
+    "制表",
+}
+_QUERY_TOKEN_RE = re.compile(r"[a-z0-9_]+|[\u4e00-\u9fff]+")
 
 
 def _tool_role(tool_name: str) -> str:
@@ -2998,7 +3047,6 @@ def _tool_mutates_state(tool_name: str) -> bool:
         "rd.event.set_",
         "rd.remote.connect",
         "rd.remote.disconnect",
-        "rd.app.",
         "rd.session.update_context",
         "rd.session.select_session",
         "rd.session.resume",
@@ -3017,8 +3065,6 @@ def _tool_capabilities(tool: Dict[str, Any]) -> List[str]:
             capabilities.add(requires.split(".", 1)[1])
     if name.startswith("rd.remote."):
         capabilities.add("remote")
-    if name.startswith("rd.app."):
-        capabilities.add("app_api")
     if name.startswith("rd.debug.") or name.startswith("rd.shader."):
         capabilities.add("shader_debug")
     if name.startswith("rd.perf."):
@@ -3036,15 +3082,115 @@ def _tool_intents(tool: Dict[str, Any]) -> List[str]:
         intents.add("discovery")
     if name.startswith("rd.remote."):
         intents.add("remote")
-    if "analysis" in group or name.startswith("rd.analysis.") or name.startswith("rd.macro."):
+    if (
+        name.startswith("rd.macro.")
+        or name in {"rd.diag.scan_common_issues", "rd.event.get_action_details", "rd.debug.pixel_history", "rd.texture.get_histogram", "rd.texture.compute_stats"}
+    ):
         intents.add("analysis")
-    if name.startswith("rd.export.") or name.startswith("rd.util.pack_zip"):
+    if name.startswith("rd.export.") or name.startswith("rd.util.pack_zip") or name in {"rd.texture.save_mip_chain"}:
         intents.add("export")
     if name.startswith("rd.debug.") or name.startswith("rd.shader."):
         intents.add("debug")
+    if "analysis" in group and not name.startswith("rd.analysis."):
+        intents.add("analysis")
     if not intents:
         intents.add("inspection")
     return sorted(intents)
+
+
+def _tool_discovery_rank(tool: Dict[str, Any] | str) -> int:
+    if isinstance(tool, dict):
+        name = str(tool.get("name") or "")
+    else:
+        name = str(tool or "")
+    if name.startswith("rd.vfs."):
+        return _NAVIGATION_DISCOVERY_RANK
+    if name.startswith("rd.macro."):
+        return _MACRO_DISCOVERY_RANK
+    if name.startswith("rd.session.") or name.startswith("rd.core."):
+        return _META_DISCOVERY_RANK
+    return _PRIMARY_DISCOVERY_NAMESPACE_RANKS.get(_tool_namespace(name), 250)
+
+
+def _tool_recommended_for(tool_name: str) -> List[str]:
+    if tool_name.startswith("rd.vfs."):
+        return ["browse_only"]
+    return []
+
+
+def _tool_not_primary_for(tool_name: str) -> List[str]:
+    if tool_name.startswith("rd.vfs."):
+        return ["precise_debug", "export", "state_mutation", "automation"]
+    return []
+
+
+def _query_contains_term(query_text: str, terms: set[str]) -> bool:
+    return any(term in query_text for term in terms)
+
+
+def _query_tokens(query_text: str) -> List[str]:
+    if not query_text:
+        return []
+    tokens = _QUERY_TOKEN_RE.findall(query_text)
+    if tokens:
+        return tokens
+    return [query_text]
+
+
+def _tool_supports_tabular_projection(entry: Dict[str, Any]) -> bool:
+    supports_projection = entry.get("supports_projection")
+    if not isinstance(supports_projection, dict):
+        return False
+    return bool(supports_projection.get("tabular"))
+
+
+def _tool_search_haystack(entry: Dict[str, Any]) -> str:
+    parts = [
+        str(entry.get("name") or ""),
+        str(entry.get("namespace") or ""),
+        str(entry.get("group") or ""),
+        str(entry.get("description") or ""),
+        " ".join(str(item) for item in entry.get("capabilities", [])),
+        " ".join(str(item) for item in entry.get("intents", [])),
+    ]
+    if _tool_supports_tabular_projection(entry):
+        parts.append("tabular tsv projection table spreadsheet 表格 制表")
+    if str(entry.get("role") or "") == "navigation":
+        parts.append("browse path tree navigate vfs 浏览 路径 树 结构 导航")
+    return " ".join(parts).lower()
+
+
+def _tool_matches_query(entry: Dict[str, Any], query_text: str) -> bool:
+    if not query_text:
+        return True
+    haystack = _tool_search_haystack(entry)
+    if query_text in haystack:
+        return True
+    tokens = _query_tokens(query_text)
+    if tokens and all(token in haystack for token in tokens):
+        return True
+    if _query_contains_term(query_text, _NAVIGATION_QUERY_TERMS) and str(entry.get("role") or "") == "navigation":
+        return True
+    if _query_contains_term(query_text, _TABULAR_QUERY_TERMS) and _tool_supports_tabular_projection(entry):
+        return True
+    return False
+
+
+def _tool_query_rank_adjustment(entry: Dict[str, Any], query_text: str) -> int:
+    if not query_text:
+        return 0
+    adjustment = 0
+    if _query_contains_term(query_text, _NAVIGATION_QUERY_TERMS) and str(entry.get("role") or "") == "navigation":
+        adjustment -= 450
+    if _query_contains_term(query_text, _TABULAR_QUERY_TERMS) and _tool_supports_tabular_projection(entry):
+        adjustment -= 275
+    return adjustment
+
+
+def _tool_sort_key(entry: Dict[str, Any], *, query_text: str = "") -> Tuple[int, str]:
+    rank = int(entry.get("discovery_rank") or _tool_discovery_rank(entry))
+    rank += _tool_query_rank_adjustment(entry, query_text)
+    return (rank, str(entry.get("name") or ""))
 
 
 def _tool_profile(tool: Dict[str, Any], *, detail_level: str = "summary") -> Dict[str, Any]:
@@ -3055,20 +3201,27 @@ def _tool_profile(tool: Dict[str, Any], *, detail_level: str = "summary") -> Dic
         "group": str(tool.get("group") or ""),
         "description": str(tool.get("description") or ""),
         "role": _tool_role(name),
+        "discovery_rank": _tool_discovery_rank(tool),
         "mutates_state": _tool_mutates_state(name),
         "capabilities": _tool_capabilities(tool),
         "intents": _tool_intents(tool),
         "prerequisites": list(tool.get("prerequisites") or []),
         "param_names": list(tool.get("param_names") or []),
     }
+    recommended_for = _tool_recommended_for(name)
+    if recommended_for:
+        payload["recommended_for"] = recommended_for
+    not_primary_for = _tool_not_primary_for(name)
+    if not_primary_for:
+        payload["not_primary_for"] = not_primary_for
+    if tool.get("supports_projection") is not None:
+        payload["supports_projection"] = dict(tool.get("supports_projection") or {})
     if name in _MACRO_GUIDE:
         payload["canonical_tools"] = list(_MACRO_GUIDE[name]["canonical_tools"])
         payload["guidance"] = str(_MACRO_GUIDE[name]["guidance"])
     if detail_level == "full":
         payload["parameter_raw"] = str(tool.get("parameter_raw") or "")
         payload["returns_raw"] = str(tool.get("returns_raw") or "")
-        if tool.get("supports_projection") is not None:
-            payload["supports_projection"] = dict(tool.get("supports_projection") or {})
     return payload
 
 
@@ -3104,19 +3257,10 @@ def _filter_tool_profiles(
             continue
         if mutates_state is not None and bool(entry.get("mutates_state")) != bool(mutates_state):
             continue
-        if query_text:
-            haystack = " ".join(
-                [
-                    str(entry.get("name") or ""),
-                    str(entry.get("group") or ""),
-                    str(entry.get("description") or ""),
-                    " ".join(str(item) for item in entry.get("capabilities", [])),
-                    " ".join(str(item) for item in entry.get("intents", [])),
-                ]
-            ).lower()
-            if query_text not in haystack:
-                continue
+        if query_text and not _tool_matches_query(entry, query_text):
+            continue
         out.append(entry)
+    out.sort(key=lambda item: _tool_sort_key(item, query_text=query_text))
     return out
 
 
@@ -4190,8 +4334,7 @@ async def _dispatch_resource(action: str, args: Dict[str, Any]) -> str:
         if any(t["resource_id"] == rid for t in textures):
             output_path = args.get("output_path")
             if output_path:
-                response = await _dispatch_texture(
-                    "save_to_file",
+                response = await _export_texture_file(
                     {
                         "session_id": session_id,
                         "texture_id": rid,
@@ -4288,6 +4431,249 @@ async def _dispatch_resource(action: str, args: Dict[str, Any]) -> str:
     return _err(f"Unsupported resource action: {action}")
 
 
+def _texture_export_channels(channels_value: Any) -> Dict[str, bool]:
+    if isinstance(channels_value, str):
+        selected = {token for token in channels_value.lower() if token in {"r", "g", "b", "a"}}
+        if not selected:
+            selected = {"r", "g", "b", "a"}
+        return {token: token in selected for token in ("r", "g", "b", "a")}
+    if isinstance(channels_value, dict):
+        return {
+            "r": _as_bool(channels_value.get("r"), True),
+            "g": _as_bool(channels_value.get("g"), True),
+            "b": _as_bool(channels_value.get("b"), True),
+            "a": _as_bool(channels_value.get("a"), True),
+        }
+    return {"r": True, "g": True, "b": True, "a": True}
+
+
+def _texture_export_view_config(args: Dict[str, Any], *, subresource: Dict[str, int]) -> Dict[str, Any]:
+    remap = _as_dict(args.get("remap"), default={})
+    view_config: Dict[str, Any] = {
+        "channels": _texture_export_channels(args.get("channels")),
+        "flip_y": _as_bool(args.get("flip_y"), False),
+        "subresource": dict(subresource),
+    }
+    if remap.get("black_point") is not None:
+        view_config["range_min"] = _as_float(remap.get("black_point"), 0.0)
+    if remap.get("white_point") is not None:
+        view_config["range_max"] = _as_float(remap.get("white_point"), 1.0)
+    if remap.get("hdr_multiplier") is not None:
+        view_config["hdr_multiplier"] = _as_float(remap.get("hdr_multiplier"), 4.0)
+    if remap.get("hdr_clamp") is not None:
+        view_config["hdr"] = _as_bool(remap.get("hdr_clamp"), False)
+    return view_config
+
+
+def _texture_export_uses_display_controls(args: Dict[str, Any]) -> bool:
+    remap = _as_dict(args.get("remap"), default={})
+    return args.get("channels") is not None or args.get("flip_y") is not None or bool(remap)
+
+
+async def _render_texture_export(
+    *,
+    session_id: str,
+    event_id: int,
+    texture_id: Any,
+    output_path: str,
+    file_format: str,
+    subresource: Dict[str, int],
+    view_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    assert _render_service is not None
+    artifact_ref, meta = await _render_service.render_event(
+        session_id=session_id,
+        event_id=event_id,
+        session_manager=_session_manager,
+        artifact_store=_artifact_store,
+        source_config={"source": "texture", "texture_id": texture_id, "subresource": dict(subresource)},
+        view_config={**view_config, "overlay": "none"},
+        output_format=file_format,
+    )
+    artifact_path = _artifact_path(artifact_ref)
+    out_path = Path(str(output_path))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(artifact_path, out_path)
+    export_meta = dict(meta)
+    export_meta["requested_remap"] = dict(_as_dict(view_config.get("requested_remap"), default={}))
+    return {
+        "artifact_path": artifact_path,
+        "saved_path": str(out_path),
+        "meta": export_meta,
+    }
+
+
+async def _save_texture_export(
+    *,
+    session_id: str,
+    event_id: int,
+    texture_id: Any,
+    output_path: str,
+    file_format: str,
+    subresource: Dict[str, int],
+) -> Dict[str, Any]:
+    assert _render_service is not None
+    artifact_ref, meta, saved_path = await _render_service.save_texture_file(
+        session_id=session_id,
+        event_id=event_id,
+        texture_id=texture_id,
+        session_manager=_session_manager,
+        artifact_store=_artifact_store,
+        output_format=file_format,
+        output_path=output_path,
+        subresource=subresource,
+    )
+    return {
+        "artifact_path": _artifact_path(artifact_ref),
+        "saved_path": saved_path or str(output_path),
+        "meta": meta,
+    }
+
+
+async def _export_texture_file(args: Dict[str, Any]) -> str:
+    _require(args, "session_id", "texture_id", "output_path")
+    session_id = str(args["session_id"])
+    event_id = _as_int(args.get("event_id"), _active_event(session_id))
+    if event_id <= 0:
+        event_id = await _ensure_event(session_id, None)
+    texture_id, texture_desc = await _get_texture_descriptor(
+        session_id,
+        args.get("texture_id"),
+        event_id=event_id,
+    )
+    binding_index = await _binding_name_index_for_event(session_id, event_id)
+    name_info = _compose_texture_name_info(
+        texture_id,
+        resource_name=str(getattr(texture_desc, "name", "")) if texture_desc is not None else "",
+        binding_names=binding_index.get(str(texture_id), []),
+        alias_name=_runtime.aliases.get(str(texture_id), ""),
+    )
+    recommended_formats = _recommend_formats_for_texture(texture_desc, name_info=name_info, for_screenshot=False)
+    requested_formats = _parse_requested_formats(args.get("file_format", "png"))
+    selected_formats = _select_export_formats(
+        requested_formats,
+        recommended_formats=recommended_formats,
+    )
+    subresource = _as_dict(args.get("subresource"), default={})
+    normalized_subresource = {
+        "mip": _as_int(subresource.get("mip"), 0),
+        "slice": _as_int(subresource.get("slice"), 0),
+        "sample": _as_int(subresource.get("sample"), 0),
+    }
+    width = int(getattr(texture_desc, "width", 0)) if texture_desc is not None else 0
+    height = int(getattr(texture_desc, "height", 0)) if texture_desc is not None else 0
+    dim_token = f"_{width}x{height}" if width > 0 and height > 0 else ""
+    base_name_stem = _safe_name_token(f"ev{event_id}_{name_info['name_stem']}{dim_token}")
+    base_output_path = str(args["output_path"])
+    multi_export = len(selected_formats) > 1
+    uses_display_controls = _texture_export_uses_display_controls(args)
+    view_config = _texture_export_view_config(args, subresource=normalized_subresource)
+    view_config["requested_remap"] = _as_dict(args.get("remap"), default={})
+    exports: List[Dict[str, Any]] = []
+    for export_format in selected_formats:
+        resolved_output_path = _resolve_export_output_path(
+            base_output_path,
+            name_stem=base_name_stem,
+            file_format=export_format,
+            multi=multi_export,
+        )
+        if uses_display_controls:
+            if export_format not in {"png", "jpg", "exr", "hdr"}:
+                return _err(
+                    "Display-mapped texture export only supports png, jpg, exr, hdr when channels/remap/flip_y are requested",
+                )
+            exports.append(
+                await _render_texture_export(
+                    session_id=session_id,
+                    event_id=event_id,
+                    texture_id=texture_id,
+                    output_path=resolved_output_path,
+                    file_format=export_format,
+                    subresource=normalized_subresource,
+                    view_config=view_config,
+                )
+            )
+            continue
+        exports.append(
+            await _save_texture_export(
+                session_id=session_id,
+                event_id=event_id,
+                texture_id=texture_id,
+                output_path=resolved_output_path,
+                file_format=export_format,
+                subresource=normalized_subresource,
+            )
+        )
+    if not multi_export:
+        single = exports[0]
+        return _ok(
+            artifact_path=single["artifact_path"],
+            saved_path=single["saved_path"],
+            meta=single["meta"],
+            selected_formats=selected_formats,
+            requested_formats=requested_formats,
+            recommended_formats=recommended_formats,
+            name_info=name_info,
+            texture_format=_texture_format_name(texture_desc),
+        )
+    return _ok(
+        exports=exports,
+        saved_paths=[item["saved_path"] for item in exports],
+        selected_formats=selected_formats,
+        requested_formats=requested_formats,
+        recommended_formats=recommended_formats,
+        name_info=name_info,
+        texture_format=_texture_format_name(texture_desc),
+    )
+
+
+async def _export_buffer_file(args: Dict[str, Any]) -> str:
+    _require(args, "session_id", "buffer_id", "output_path")
+    session_id = str(args["session_id"])
+    controller = await _get_controller(session_id)
+    rid = await _resolve_resource_id(session_id, args["buffer_id"])
+    offset = _as_int(args.get("offset"), 0)
+    size = args.get("size")
+    if size is None:
+        size = 0
+    data = await _offload(controller.GetBufferData, rid, offset, _as_int(size, 0))
+    out = Path(str(args["output_path"]))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    return _ok(saved_path=str(out), byte_size=len(data))
+
+
+async def _export_mesh_file(args: Dict[str, Any]) -> str:
+    _require(args, "session_id", "output_path")
+    session_id = str(args["session_id"])
+    event_id = _as_int(args.get("event_id"), _active_event(session_id))
+    if event_id <= 0:
+        event_id = await _ensure_event(session_id, None)
+    config_resp = await _dispatch_mesh("get_drawcall_mesh_config", {"session_id": session_id, "event_id": event_id})
+    payload = json.loads(config_resp)
+    if not payload.get("success"):
+        return config_resp
+    export_format = str(args.get("format", "obj")).lower()
+    include_attributes = _as_bool(args.get("include_attributes"), True)
+    space = str(args.get("space", "postvs")).lower()
+    out = Path(str(args["output_path"]))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            {
+                "format": export_format,
+                "include_attributes": include_attributes,
+                "space": space,
+                "mesh_config": payload.get("mesh_config", {}),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return _ok(saved_path=str(out), export_format=export_format, include_attributes=include_attributes, space=space)
+
+
 async def _dispatch_buffer(action: str, args: Dict[str, Any]) -> str:
     _require(args, "session_id", "buffer_id")
     session_id = str(args["session_id"])
@@ -4317,12 +4703,6 @@ async def _dispatch_buffer(action: str, args: Dict[str, Any]) -> str:
             artifact = await _artifact_store.store(data, mime="application/octet-stream", suffix=".bin")
             result["artifact_path"] = _artifact_path(artifact)
         return _ok(**result)
-
-    if action == "save_to_file":
-        out = Path(str(args.get("output_path")))
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(data)
-        return _ok(saved_path=str(out))
 
     if action == "search_pattern":
         pattern_value = args.get("pattern")
@@ -4454,16 +4834,6 @@ async def _dispatch_mesh(action: str, args: Dict[str, Any]) -> str:
                 break
             indices.append(struct.unpack(fmt, raw[i : i + size])[0])
         return _ok(indices=indices)
-    if action == "export":
-        _require(args, "session_id", "event_id", "output_path")
-        config_resp = await _dispatch_mesh("get_drawcall_mesh_config", {"session_id": args["session_id"], "event_id": args["event_id"]})
-        payload = json.loads(config_resp)
-        if not payload.get("success"):
-            return config_resp
-        out = Path(str(args["output_path"]))
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(payload.get("mesh_config", {}), ensure_ascii=False, indent=2), encoding="utf-8")
-        return _ok(saved_path=str(out))
     if action == "get_mesh_preview":
         _require(args, "session_id", "event_id")
         return await _dispatch_texture(
@@ -4681,90 +5051,6 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
         payload["name_info"] = name_info
         payload["texture_format"] = _texture_format_name(texture_desc)
         return _ok(**payload)
-
-    if action == "save_to_file":
-        event_id = _as_int(args.get("event_id"), _active_event(session_id))
-        if event_id <= 0:
-            event_id = await _ensure_event(session_id, None)
-        texture_id, texture_desc = await _get_texture_descriptor(
-            session_id,
-            args.get("texture_id"),
-            event_id=event_id,
-        )
-        binding_index = await _binding_name_index_for_event(session_id, event_id)
-        binding_names = list(binding_index.get(str(texture_id), []))
-        name_info = _compose_texture_name_info(
-            texture_id,
-            resource_name=str(getattr(texture_desc, "name", "")) if texture_desc is not None else "",
-            binding_names=binding_names,
-            alias_name=_runtime.aliases.get(str(texture_id), ""),
-        )
-        recommended_formats = _recommend_formats_for_texture(texture_desc, name_info=name_info, for_screenshot=False)
-        requested_formats = _parse_requested_formats(args.get("file_format", "png"))
-        selected_formats = _select_export_formats(
-            requested_formats,
-            recommended_formats=recommended_formats,
-        )
-        subresource = _as_dict(args.get("subresource"), default={})
-        normalized_subresource = {
-            "mip": _as_int(subresource.get("mip"), 0),
-            "slice": _as_int(subresource.get("slice"), 0),
-            "sample": _as_int(subresource.get("sample"), 0),
-        }
-        width = int(getattr(texture_desc, "width", 0)) if texture_desc is not None else 0
-        height = int(getattr(texture_desc, "height", 0)) if texture_desc is not None else 0
-        dim_token = f"_{width}x{height}" if width > 0 and height > 0 else ""
-        base_name_stem = _safe_name_token(f"ev{event_id}_{name_info['name_stem']}{dim_token}")
-        base_output_path = args.get("output_path")
-        multi_export = len(selected_formats) > 1
-        exports: List[Dict[str, Any]] = []
-        for export_format in selected_formats:
-            resolved_output_path = _resolve_export_output_path(
-                base_output_path,
-                name_stem=base_name_stem,
-                file_format=export_format,
-                multi=multi_export,
-            )
-            artifact_ref, meta, saved_path = await _render_service.save_texture_file(
-                session_id=session_id,
-                event_id=event_id,
-                texture_id=texture_id,
-                session_manager=_session_manager,
-                artifact_store=_artifact_store,
-                output_format=export_format,
-                output_path=resolved_output_path,
-                subresource=normalized_subresource,
-            )
-            artifact_path = _artifact_path(artifact_ref)
-            exports.append(
-                {
-                    "file_format": export_format,
-                    "artifact_path": artifact_path,
-                    "saved_path": saved_path or artifact_path,
-                    "meta": meta,
-                },
-            )
-        if not multi_export:
-            single = exports[0]
-            return _ok(
-                artifact_path=single["artifact_path"],
-                saved_path=single["saved_path"],
-                meta=single["meta"],
-                selected_formats=selected_formats,
-                requested_formats=requested_formats,
-                recommended_formats=recommended_formats,
-                name_info=name_info,
-                texture_format=_texture_format_name(texture_desc),
-            )
-        return _ok(
-            exports=exports,
-            saved_paths=[item["saved_path"] for item in exports],
-            selected_formats=selected_formats,
-            requested_formats=requested_formats,
-            recommended_formats=recommended_formats,
-            name_info=name_info,
-            texture_format=_texture_format_name(texture_desc),
-        )
 
     if action == "save_mip_chain":
         _require(args, "texture_id", "output_dir")
@@ -5704,38 +5990,11 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
             chosen_output_slot=chosen_output_slot,
         )
     if action == "texture":
-        return await _dispatch_texture(
-            "save_to_file",
-            {
-                "session_id": session_id,
-                "texture_id": args.get("texture_id"),
-                "event_id": args.get("event_id"),
-                "subresource": args.get("subresource"),
-                "output_path": args.get("output_path"),
-                "file_format": args.get("file_format", "png"),
-            },
-        )
+        return await _export_texture_file({"session_id": session_id, **dict(args or {})})
     if action == "buffer":
-        return await _dispatch_buffer(
-            "save_to_file",
-            {
-                "session_id": session_id,
-                "buffer_id": args.get("buffer_id"),
-                "offset": args.get("offset"),
-                "size": args.get("size"),
-                "output_path": args.get("output_path"),
-            },
-        )
+        return await _export_buffer_file({"session_id": session_id, **dict(args or {})})
     if action == "mesh":
-        return await _dispatch_mesh(
-            "export",
-            {
-                "session_id": session_id,
-                "event_id": args.get("event_id"),
-                "format": args.get("format"),
-                "output_path": args.get("output_path"),
-            },
-        )
+        return await _export_mesh_file({"session_id": session_id, **dict(args or {})})
     if action == "pipeline_state_json":
         _require(args, "output_path")
         state_resp = await _dispatch_pipeline("get_state", {"session_id": session_id, "detail_level": args.get("detail_level", "full")})
@@ -5955,13 +6214,6 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
         }
         return _ok(summary=summary)
 
-    if action == "generate_pass_summary":
-        _require(args, "pass_range")
-        pass_range = _as_dict(args["pass_range"])
-        start_evt = _as_int(pass_range.get("begin_event_id"), 0)
-        end_evt = _as_int(pass_range.get("end_event_id"), 0)
-        return _ok(summary={"begin_event_id": start_evt, "end_event_id": end_evt, "drawcall_count": max(0, end_evt - start_evt + 1)})
-
     if action == "find_pass_by_marker":
         _require(args, "name_regex")
         regex_text = str(args["name_regex"])
@@ -6010,15 +6262,6 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
         walk(roots if isinstance(roots, list) else [], [])
         return _ok(matches=matches)
 
-    if action == "locate_draw_affecting_pixel":
-        x_value, y_value, target_value = _resolve_macro_pixel()
-        history_resp = await _dispatch_debug("pixel_history", {"session_id": session_id, "x": x_value, "y": y_value, "target": target_value})
-        payload = json.loads(history_resp)
-        if not payload.get("success"):
-            return history_resp
-        candidates = payload.get("history", [])
-        return _ok(candidates=candidates)
-
     if action == "explain_pixel":
         x_value, y_value, target_value = _resolve_macro_pixel()
         history_resp = await _dispatch_debug("pixel_history", {"session_id": session_id, "x": x_value, "y": y_value, "target": target_value})
@@ -6028,18 +6271,6 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
         history = payload.get("history", [])
         explanation = f"Pixel({x_value},{y_value}) has {len(history)} recorded modifications in pixel history."
         return _ok(explanation=explanation, history=history[:20])
-
-    if action == "trace_resource_lifetime":
-        _require(args, "resource_id")
-        return await _dispatch_resource(
-            "get_history",
-            {
-                "session_id": session_id,
-                "resource_id": args["resource_id"],
-                "include_reads": args.get("include_reads", False),
-                "include_writes": True,
-            },
-        )
 
     if action == "resource_dependency_graph":
         event_tree_resp = await _dispatch_event("get_action_tree", {"session_id": session_id, "max_depth": 4})
@@ -6105,20 +6336,6 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
         search = await _dispatch_event("search_actions", {"session_id": session_id, "query": {"name_contains": "clear"}, "max_results": args.get("max_results", 200)})
         return search
 
-    if action == "find_nan_inf_in_targets":
-        texture_id = args.get("texture_id")
-        if texture_id is None:
-            focus_resource_id = str(snapshot.get("focus", {}).get("resource_id") or "").strip()
-            if focus_resource_id:
-                texture_id = focus_resource_id
-        if texture_id is None:
-            texture_id = await _resolve_texture_id(session_id, None, event_id=_active_event(session_id))
-        stats_resp = await _dispatch_texture("compute_stats", {"session_id": session_id, "texture_id": str(texture_id)})
-        payload = json.loads(stats_resp)
-        if not payload.get("success"):
-            return stats_resp
-        return _ok(result=payload.get("stats", {}))
-
     if action == "quick_triage_missing_draw":
         summary_resp = await _dispatch_macro("summarize_frame", {"session_id": session_id})
         diag_resp = await _dispatch_diag("scan_common_issues", {"session_id": session_id, "include_suggestions": True})
@@ -6151,50 +6368,6 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
         return _ok(replacement=repl_payload, before=json.loads(screenshot_before), after=json.loads(screenshot_after))
 
     return _err(f"Unsupported macro action: {action}")
-
-
-async def _dispatch_analysis(action: str, args: Dict[str, Any]) -> str:
-    _require(args, "session_id")
-    session_id = str(args["session_id"])
-    if action == "get_frame_stats":
-        summary_resp = await _dispatch_macro("summarize_frame", {"session_id": session_id, "frame_index": args.get("frame_index")})
-        payload = json.loads(summary_resp)
-        if not payload.get("success"):
-            return summary_resp
-        summary = payload.get("summary", {})
-        stats = {
-            "drawcalls": summary.get("draw_count", 0),
-            "markers": summary.get("marker_count", 0),
-            "resources": 0,
-            "warnings": [],
-        }
-        return _ok(stats=stats)
-    if action == "get_event_stats":
-        _require(args, "event_id")
-        detail_resp = await _dispatch_event("get_action_details", {"session_id": session_id, "event_id": args["event_id"]})
-        payload = json.loads(detail_resp)
-        if not payload.get("success"):
-            return detail_resp
-        action_obj = payload.get("action", {})
-        return _ok(event_stats={"event_id": action_obj.get("event_id"), "name": action_obj.get("name"), "flags": action_obj.get("flags")})
-    if action == "get_warnings":
-        diag_resp = await _dispatch_diag("scan_common_issues", {"session_id": session_id, "severity_min": args.get("severity_min", "warn"), "include_suggestions": True})
-        payload = json.loads(diag_resp)
-        if not payload.get("success"):
-            return diag_resp
-        return _ok(warnings=payload.get("issues", []))
-    if action == "estimate_overdraw":
-        target = _parse_target_like(args.get("target"))
-        texture_id = target.get("texture_id")
-        if texture_id is None:
-            texture_id = await _resolve_texture_id(session_id, None, event_id=_active_event(session_id))
-        hist_resp = await _dispatch_texture("get_histogram", {"session_id": session_id, "texture_id": str(texture_id), "channels": "a", "bins": 16})
-        payload = json.loads(hist_resp)
-        if not payload.get("success"):
-            return hist_resp
-        overdraw = {"avg": 1.0, "max": 1.0, "histogram": payload.get("histogram", {}).get("a", {}).get("bins", [])}
-        return _ok(overdraw=overdraw, heatmap_path=None)
-    return _err(f"Unsupported analysis action: {action}")
 
 
 async def _dispatch_util(action: str, args: Dict[str, Any]) -> str:
@@ -7047,29 +7220,6 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
             requires_remote_device=True,
         )
     return _err(f"Unsupported remote action: {action}")
-async def _dispatch_app(action: str, args: Dict[str, Any]) -> str:
-    connection = _as_dict(args.get("connection"), default={})
-    conn_key = json.dumps(connection, sort_keys=True, ensure_ascii=False)
-    if action == "is_available":
-        return _ok(available=False, detail={"requires_app_integration": True, "connection": connection})
-    if action in {"set_capture_option", "get_capture_options", "push_marker", "pop_marker", "set_marker", "start_frame_capture", "end_frame_capture", "trigger_capture"}:
-        if action == "set_capture_option":
-            _require(args, "option", "value")
-            options = _runtime.app_capture_options.setdefault(conn_key, {})
-            options[str(args["option"])] = args["value"]
-            return _ok()
-        if action == "get_capture_options":
-            return _ok(options=_runtime.app_capture_options.get(conn_key, {}))
-        return _capability_error(
-            "app_integration_required",
-            "App API requires in-process RenderDoc instrumentation",
-            capability="app_api",
-            reason="Requires in-process RenderDoc instrumentation.",
-            source="external_dependency",
-            optional=True,
-            requires_app_integration=True,
-        )
-    return _err(f"Unsupported app action: {action}")
 
 
 

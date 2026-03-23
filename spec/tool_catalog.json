@@ -1,23 +1,22 @@
 {
   "source_path": "spec/doc_extracted.txt",
-  "tool_count": 210,
-  "generated_at": "2026-03-16T10:13:19.621591Z",
+  "tool_count": 190,
+  "generated_at": "2026-03-23T12:36:53.984217Z",
   "groups": {
     "3.1，核心与环境管理 (Core & Environment)": 14,
     "3.2，捕获文件与 Replay Session (Capture & Replay)": 13,
     "3.3，事件导航与 API 检查 (Event Navigation & API Inspection)": 12,
     "3.4，管线状态查询 (Pipeline State Inspection)": 25,
     "3.5，资源探查 (Resource Inspection & History)": 13,
-    "3.6，纹理数据访问与分析 (Texture Data Access & Analysis)": 12,
-    "3.7，缓冲区与网格数据访问 (Buffer & Mesh Data Access)": 11,
+    "3.6，纹理数据访问与分析 (Texture Data Access & Analysis)": 11,
+    "3.7，缓冲区与网格数据访问 (Buffer & Mesh Data Access)": 9,
     "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)": 14,
     "3.9，Shader Debugger 与像素/顶点级调试 (Shader Debugging)": 13,
-    "3.10，性能与高级分析 (Performance & Advanced Analysis)": 10,
+    "3.10，性能与高级分析 (Performance & Advanced Analysis)": 6,
     "3.11，导出、报告与可复现打包 (Export & Reporting)": 12,
     "3.12，远程连接与自动化抓帧 (Remote Capture & Target Control)": 12,
-    "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)": 9,
     "3.14，诊断工具 (Diagnostics, Heuristic Checks)": 11,
-    "3.15，专家级宏工作流 (Expert Macro Workflows)": 14,
+    "3.15，专家级宏工作流 (Expert Macro Workflows)": 10,
     "3.16，通用辅助工具 (Utilities, Optional)": 6,
     "3.17，上下文快照工具 (Context Snapshot Tools)": 5,
     "3.18，VFS 导航工具 (VFS Navigation Tools)": 4
@@ -27,12 +26,11 @@
       "name": "rd.core.init",
       "group": "3.1，核心与环境管理 (Core & Environment)",
       "description": "初始化 RenderDoc Replay/Remote 运行时；建立对象池与临时目录；必须在首次使用前调用一次。",
-      "parameter_raw": "global_env (dict, 可选): 全局配置，例如 {temp_dir, artifact_dir, log_level, replay_cache_size_mb}<br>enable_remote (bool, 可选, 默认 true): 是否启用 rd.remote.*<br>enable_app_api (bool, 可选, 默认 false): 是否启用 rd.app.*（需要目标进程内集成 App API）",
+      "parameter_raw": "global_env (dict, 可选): 全局配置，例如 {temp_dir, artifact_dir, log_level, replay_cache_size_mb}<br>enable_remote (bool, 可选, 默认 true): 是否启用 rd.remote.*",
       "returns_raw": "ok (bool)<br>data (dict): {api_version, capabilities}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "global_env",
-        "enable_remote",
-        "enable_app_api"
+        "enable_remote"
       ],
       "prerequisites": []
     },
@@ -1677,33 +1675,6 @@
       ]
     },
     {
-      "name": "rd.texture.save_to_file",
-      "group": "3.6，纹理数据访问与分析 (Texture Data Access & Analysis)",
-      "description": "用于根据显示映射和通道选择，将纹理导出到文件 (支持 PNG/EXR/DDS 等格式)。此功能兼容 V3 版本。",
-      "parameter_raw": "session_id (str)<br>texture_id (str)<br>subresource (dict, 可选): 包含 {mip, slice, sample}<br>output_path (str)<br>file_format (str, 可选): 文件格式，可选 'png', 'exr', 'dds', 'jpg'<br>channels (str, 可选, 默认 'rgba')<br>remap (dict, 可选): 包含 {black_point, white_point, gamma, hdr_clamp?}<br>flip_y (bool, 可选, 默认 false)",
-      "returns_raw": "ok (bool)<br>data (dict): {saved_path}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "texture_id",
-        "subresource",
-        "output_path",
-        "file_format",
-        "channels",
-        "remap",
-        "flip_y"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
       "name": "rd.texture.save_mip_chain",
       "group": "3.6，纹理数据访问与分析 (Texture Data Access & Analysis)",
       "description": "用于批量导出 mip chain，可选择将每个 mip 保存为单独文件或合并到指定目录。",
@@ -1789,30 +1760,6 @@
         "offset",
         "count",
         "max_elements"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
-      "name": "rd.buffer.save_to_file",
-      "group": "3.7，缓冲区与网格数据访问 (Buffer & Mesh Data Access)",
-      "description": "将 buffer 内容导出到文件（raw/bin）。",
-      "parameter_raw": "session_id (str)<br>buffer_id (str)<br>output_path (str)<br>offset (int, 可选, 默认 0)<br>size (int, 可选)",
-      "returns_raw": "ok (bool)<br>data (dict): {saved_path}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "buffer_id",
-        "output_path",
-        "offset",
-        "size"
       ],
       "prerequisites": [
         {
@@ -1957,31 +1904,6 @@
       "param_names": [
         "session_id",
         "event_id"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
-      "name": "rd.mesh.export",
-      "group": "3.7，缓冲区与网格数据访问 (Buffer & Mesh Data Access)",
-      "description": "将指定 drawcall 的 mesh 导出为标准格式（OBJ/PLY/GLTF，视实现支持）。",
-      "parameter_raw": "session_id (str)<br>event_id (int, 可选)<br>format (str, 可选, 默认 'obj'): 'obj'|'ply'|'gltf'<br>output_path (str)<br>include_attributes (bool, 可选, 默认 true)<br>space (str, 可选, 默认 'postvs'): 'prevs'|'postvs'",
-      "returns_raw": "ok (bool)<br>data (dict): {saved_path}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "event_id",
-        "format",
-        "output_path",
-        "include_attributes",
-        "space"
       ],
       "prerequisites": [
         {
@@ -2743,93 +2665,6 @@
       ]
     },
     {
-      "name": "rd.analysis.get_frame_stats",
-      "group": "3.10，性能与高级分析 (Performance & Advanced Analysis)",
-      "description": "获取帧级统计与警告摘要。",
-      "parameter_raw": "session_id (str)<br>frame_index (int, 可选)",
-      "returns_raw": "ok (bool)<br>data (dict): {stats}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "frame_index"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
-      "name": "rd.analysis.get_event_stats",
-      "group": "3.10，性能与高级分析 (Performance & Advanced Analysis)",
-      "description": "获取指定 event 的统计摘要（draw 参数、绑定资源数、RT/DS 格式、shader 信息等）。",
-      "parameter_raw": "session_id (str)<br>event_id (int, 可选)",
-      "returns_raw": "ok (bool)<br>data (dict): {event_stats}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "event_id"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
-      "name": "rd.analysis.get_warnings",
-      "group": "3.10，性能与高级分析 (Performance & Advanced Analysis)",
-      "description": "获取 RenderDoc 在回放/验证期间产生的 warnings/errors（如 undefined behavior、API misuse）。",
-      "parameter_raw": "session_id (str)<br>severity_min (str, 可选, 默认 'warn')",
-      "returns_raw": "ok (bool)<br>data (dict): {warnings}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "severity_min"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
-      "name": "rd.analysis.estimate_overdraw",
-      "group": "3.10，性能与高级分析 (Performance & Advanced Analysis)",
-      "description": "估算 overdraw（实现可选：基于像素历史采样或 RenderDoc 内置 overdraw overlay）。",
-      "parameter_raw": "session_id (str)<br>target (dict, 可选): {texture_id?}<br>region (dict, 可选): {x,y,w,h}<br>sampling (dict, 可选): {stride, max_samples}<br>output_path (str, 可选): 输出 heatmap 图片",
-      "returns_raw": "ok (bool)<br>data (dict): {overdraw, heatmap_path}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "target",
-        "region",
-        "sampling",
-        "output_path"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
       "name": "rd.export.screenshot",
       "group": "3.11，导出、报告与可复现打包 (Export & Reporting)",
       "description": "导出当前 event 的输出截图（等价于 UI 的保存 framebuffer）。",
@@ -2858,8 +2693,8 @@
     {
       "name": "rd.export.texture",
       "group": "3.11，导出、报告与可复现打包 (Export & Reporting)",
-      "description": "导出纹理（快捷封装 rd.texture.save_to_file）。",
-      "parameter_raw": "session_id (str)<br>texture_id (str)<br>subresource (dict, 可选)<br>output_path (str)<br>file_format (str, 可选, 默认 'png')<br>remap (dict, 可选)",
+      "description": "将纹理导出到文件；这是统一的纹理落盘导出入口，支持子资源选择、显示映射与通道控制。",
+      "parameter_raw": "session_id (str)<br>texture_id (str)<br>subresource (dict, 可选): 包含 {mip, slice, sample}<br>output_path (str)<br>file_format (str, 可选): 文件格式，可选 'png', 'exr', 'dds', 'jpg'<br>channels (str, 可选, 默认 'rgba')<br>remap (dict, 可选): 包含 {black_point, white_point, gamma, hdr_clamp?}<br>flip_y (bool, 可选, 默认 false)",
       "returns_raw": "ok (bool)<br>data (dict): {saved_path}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
@@ -2867,7 +2702,9 @@
         "subresource",
         "output_path",
         "file_format",
-        "remap"
+        "channels",
+        "remap",
+        "flip_y"
       ],
       "prerequisites": [
         {
@@ -2883,7 +2720,7 @@
     {
       "name": "rd.export.buffer",
       "group": "3.11，导出、报告与可复现打包 (Export & Reporting)",
-      "description": "导出 buffer 到文件（快捷封装 rd.buffer.save_to_file）。",
+      "description": "将 buffer 内容导出到文件；这是统一的 buffer 落盘导出入口。",
       "parameter_raw": "session_id (str)<br>buffer_id (str)<br>output_path (str)<br>offset (int, 可选, 默认 0)<br>size (int, 可选)",
       "returns_raw": "ok (bool)<br>data (dict): {saved_path}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
@@ -2907,14 +2744,16 @@
     {
       "name": "rd.export.mesh",
       "group": "3.11，导出、报告与可复现打包 (Export & Reporting)",
-      "description": "导出当前 drawcall 的 mesh（快捷封装 rd.mesh.export）。",
-      "parameter_raw": "session_id (str)<br>event_id (int, 可选)<br>format (str, 可选, 默认 'obj')<br>output_path (str)",
+      "description": "将指定 drawcall 的 mesh 导出到文件；这是统一的 mesh 落盘导出入口。",
+      "parameter_raw": "session_id (str)<br>event_id (int, 可选)<br>format (str, 可选, 默认 'obj'): 'obj'|'ply'|'gltf'<br>output_path (str)<br>include_attributes (bool, 可选, 默认 true)<br>space (str, 可选, 默认 'postvs'): 'prevs'|'postvs'",
       "returns_raw": "ok (bool)<br>data (dict): {saved_path}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
         "event_id",
         "format",
-        "output_path"
+        "output_path",
+        "include_attributes",
+        "space"
       ],
       "prerequisites": [
         {
@@ -3436,185 +3275,6 @@
       ]
     },
     {
-      "name": "rd.app.is_available",
-      "group": "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)",
-      "description": "检查目标进程是否暴露 RenderDoc In-Application API（或该 MCP server 是否已与应用建立 IPC）。",
-      "parameter_raw": "connection (dict, 可选): {pid?, endpoint?, target_id?}",
-      "returns_raw": "ok (bool)<br>data (dict): {available, detail}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "connection"
-      ],
-      "prerequisites": [
-        {
-          "requires": "capability.app_api",
-          "via_tools": [
-            "rd.core.init"
-          ],
-          "reason": "In-process app tools require app API integration to be enabled."
-        }
-      ]
-    },
-    {
-      "name": "rd.app.start_frame_capture",
-      "group": "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)",
-      "description": "在应用侧开始捕获（等价于 renderdoc_app.h 的 StartFrameCapture）。",
-      "parameter_raw": "connection (dict): {pid? 或 endpoint?}<br>device (str, 可选): 设备/上下文标识（多 device 情况）",
-      "returns_raw": "ok (bool)<br>data (dict): tool-specific payload<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "connection",
-        "device"
-      ],
-      "prerequisites": [
-        {
-          "requires": "capability.app_api",
-          "via_tools": [
-            "rd.core.init"
-          ],
-          "reason": "In-process app tools require app API integration to be enabled."
-        }
-      ]
-    },
-    {
-      "name": "rd.app.end_frame_capture",
-      "group": "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)",
-      "description": "在应用侧结束捕获并生成 rdc 文件（等价于 EndFrameCapture）。",
-      "parameter_raw": "connection (dict): {pid? 或 endpoint?}<br>output_path (str, 可选): 捕获文件保存路径模板/目录",
-      "returns_raw": "ok (bool)<br>data (dict): {capture_path}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "connection",
-        "output_path"
-      ],
-      "prerequisites": [
-        {
-          "requires": "capability.app_api",
-          "via_tools": [
-            "rd.core.init"
-          ],
-          "reason": "In-process app tools require app API integration to be enabled."
-        }
-      ]
-    },
-    {
-      "name": "rd.app.trigger_capture",
-      "group": "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)",
-      "description": "在应用侧触发一次 capture（start+end 封装），可用于脚本化抓帧。",
-      "parameter_raw": "connection (dict)<br>num_frames (int, 可选, 默认 1)<br>output_path (str, 可选)",
-      "returns_raw": "ok (bool)<br>data (dict): {capture_paths}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "connection",
-        "num_frames",
-        "output_path"
-      ],
-      "prerequisites": [
-        {
-          "requires": "capability.app_api",
-          "via_tools": [
-            "rd.core.init"
-          ],
-          "reason": "In-process app tools require app API integration to be enabled."
-        }
-      ]
-    },
-    {
-      "name": "rd.app.set_capture_option",
-      "group": "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)",
-      "description": "设置应用侧 capture options（如 allow_vsync、ref_all_resources、debug_device 等）。",
-      "parameter_raw": "connection (dict)<br>option (str): 选项名<br>value (bool|int|float|str)",
-      "returns_raw": "ok (bool)<br>data (dict): tool-specific payload<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "connection",
-        "option",
-        "value"
-      ],
-      "prerequisites": [
-        {
-          "requires": "capability.app_api",
-          "via_tools": [
-            "rd.core.init"
-          ],
-          "reason": "In-process app tools require app API integration to be enabled."
-        }
-      ]
-    },
-    {
-      "name": "rd.app.get_capture_options",
-      "group": "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)",
-      "description": "读取应用侧当前 capture options。",
-      "parameter_raw": "connection (dict)",
-      "returns_raw": "ok (bool)<br>data (dict): {options}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "connection"
-      ],
-      "prerequisites": [
-        {
-          "requires": "capability.app_api",
-          "via_tools": [
-            "rd.core.init"
-          ],
-          "reason": "In-process app tools require app API integration to be enabled."
-        }
-      ]
-    },
-    {
-      "name": "rd.app.push_marker",
-      "group": "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)",
-      "description": "在应用侧 push marker/region（等价于 StartFrameCapture 之外的 marker API；用于让 event 树更可读）。",
-      "parameter_raw": "connection (dict)<br>name (str)",
-      "returns_raw": "ok (bool)<br>data (dict): tool-specific payload<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "connection",
-        "name"
-      ],
-      "prerequisites": [
-        {
-          "requires": "capability.app_api",
-          "via_tools": [
-            "rd.core.init"
-          ],
-          "reason": "In-process app tools require app API integration to be enabled."
-        }
-      ]
-    },
-    {
-      "name": "rd.app.pop_marker",
-      "group": "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)",
-      "description": "在应用侧 pop marker/region。",
-      "parameter_raw": "connection (dict)",
-      "returns_raw": "ok (bool)<br>data (dict): tool-specific payload<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "connection"
-      ],
-      "prerequisites": [
-        {
-          "requires": "capability.app_api",
-          "via_tools": [
-            "rd.core.init"
-          ],
-          "reason": "In-process app tools require app API integration to be enabled."
-        }
-      ]
-    },
-    {
-      "name": "rd.app.set_marker",
-      "group": "3.13，应用内接口抽象 (In-Application Instrumentation, Optional)",
-      "description": "在应用侧插入单点 marker（即时 marker）。",
-      "parameter_raw": "connection (dict)<br>name (str)",
-      "returns_raw": "ok (bool)<br>data (dict): tool-specific payload<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "connection",
-        "name"
-      ],
-      "prerequisites": [
-        {
-          "requires": "capability.app_api",
-          "via_tools": [
-            "rd.core.init"
-          ],
-          "reason": "In-process app tools require app API integration to be enabled."
-        }
-      ]
-    },
-    {
       "name": "rd.diag.scan_common_issues",
       "group": "3.14，诊断工具 (Diagnostics, Heuristic Checks)",
       "description": "对当前 active event 执行一组常见问题扫描（空绑定、viewport/scissor、depth/blend、格式不匹配等），输出结构化 issue 列表。",
@@ -3871,29 +3531,6 @@
       ]
     },
     {
-      "name": "rd.macro.generate_pass_summary",
-      "group": "3.15，专家级宏工作流 (Expert Macro Workflows)",
-      "description": "对指定 marker/pass 范围生成摘要（输出/输入资源、drawcall 列表、统计）。",
-      "parameter_raw": "session_id (str)<br>pass_range (dict): {begin_event_id, end_event_id}<br>include_resource_lists (bool, 可选, 默认 true)<br>include_state_changes (bool, 可选, 默认 false)",
-      "returns_raw": "ok (bool)<br>data (dict): {pass_summary}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "pass_range",
-        "include_resource_lists",
-        "include_state_changes"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
       "name": "rd.macro.find_pass_by_marker",
       "group": "3.15，专家级宏工作流 (Expert Macro Workflows)",
       "description": "按 marker 名称/regex 查找 pass，并返回对应 event 范围（适合快速定位某个渲染阶段）。",
@@ -3903,30 +3540,6 @@
         "session_id",
         "name_regex",
         "max_results"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
-      "name": "rd.macro.locate_draw_affecting_pixel",
-      "group": "3.15，专家级宏工作流 (Expert Macro Workflows)",
-      "description": "给定屏幕像素 (x,y)，定位影响该像素的 draw/dispatch 列表（排序：最近修改优先；可过滤通过 depth/stencil 的记录）。",
-      "parameter_raw": "session_id (str)<br>x (int)<br>y (int)<br>target (dict, 可选): {texture_id? , rt_index?}<br>policy (dict, 可选): {only_passed_tests?:bool, include_failed?:bool, max_items?:int}",
-      "returns_raw": "ok (bool)<br>data (dict): {candidates}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "x",
-        "y",
-        "target",
-        "policy"
       ],
       "prerequisites": [
         {
@@ -3951,30 +3564,6 @@
         "y",
         "target",
         "verbosity"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
-      "name": "rd.macro.trace_resource_lifetime",
-      "group": "3.15，专家级宏工作流 (Expert Macro Workflows)",
-      "description": "追踪资源生命周期：创建 -> 初始化 -> 关键写入 -> 关键读取（按 pass 归纳），用于定位“某资源何时被写坏”。",
-      "parameter_raw": "session_id (str)<br>resource_id (str)<br>include_reads (bool, 可选, 默认 false)<br>group_by_pass (bool, 可选, 默认 true)<br>max_events (int, 可选, 默认 50000)",
-      "returns_raw": "ok (bool)<br>data (dict): {lifetime}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "resource_id",
-        "include_reads",
-        "group_by_pass",
-        "max_events"
       ],
       "prerequisites": [
         {
@@ -4068,29 +3657,6 @@
         "session_id",
         "targets",
         "max_results"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
-      "name": "rd.macro.find_nan_inf_in_targets",
-      "group": "3.15，专家级宏工作流 (Expert Macro Workflows)",
-      "description": "在指定输出纹理中查找 NaN/Inf（可采样或全量扫描），输出命中坐标与局部截图。",
-      "parameter_raw": "session_id (str)<br>texture_id (str, 可选): 缺省为当前 RT0<br>scan (dict, 可选): {stride:int=4, max_hits:int=200, region?}<br>output_dir (str, 可选)",
-      "returns_raw": "ok (bool)<br>data (dict): {hits, artifacts}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "texture_id",
-        "scan",
-        "output_dir"
       ],
       "prerequisites": [
         {
@@ -4347,9 +3913,9 @@
     {
       "name": "rd.core.list_tools",
       "group": "3.1，核心与环境管理 (Core & Environment)",
-      "description": "按 namespace、group、capability、role、intent 等结构化条件列出可用 tool，避免一次性注入全部描述。",
+      "description": "按 namespace、group、capability、role、intent 等结构化条件列出可用 tool，默认仍以 canonical `rd.*` 主接口优先，其后才是 macro、session/context/core 元信息层与 navigation 辅助层。",
       "parameter_raw": "namespace (str, 可选)<br>group (str, 可选)<br>capability (str, 可选)<br>role (str, 可选): canonical|macro|navigation<br>intent (str, 可选)<br>mutates_state (bool, 可选)<br>detail_level (str, 可选, 默认 'summary'): summary|full",
-      "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools: discovery summaries with name, namespace, group, description, role, discovery_rank, capabilities, intents, prerequisites, supports_projection?, recommended_for?, not_primary_for?}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "namespace",
         "group",
@@ -4364,9 +3930,9 @@
     {
       "name": "rd.core.search_tools",
       "group": "3.1，核心与环境管理 (Core & Environment)",
-      "description": "按名称、描述、group、capability 与 intent 的结构化子串搜索 tool，返回适配 Agent 的轻量视图。",
+      "description": "按名称、描述、group、capability 与 intent 做轻量 discovery；默认仍以 canonical `rd.*` 主接口优先，但当 query 明确指向 browse/path/tree/vfs 或 table/tabular/tsv 时，会把 navigation 或 projection 相关结果提前。",
       "parameter_raw": "query (str, 可选)<br>namespace (str, 可选)<br>capability (str, 可选)<br>role (str, 可选): canonical|macro|navigation<br>intent (str, 可选)<br>detail_level (str, 可选, 默认 'summary'): summary|full",
-      "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools: discovery summaries with name, namespace, group, description, role, discovery_rank, capabilities, intents, prerequisites, supports_projection?, recommended_for?, not_primary_for?}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "query",
         "namespace",
@@ -4380,9 +3946,9 @@
     {
       "name": "rd.core.get_tool_graph",
       "group": "3.1，核心与环境管理 (Core & Environment)",
-      "description": "返回 tool 之间的 prerequisite 与 macro-to-canonical 依赖图，帮助 Agent 推断调用链与展开路径。",
+      "description": "返回 tool 之间的 prerequisite 与 macro-to-canonical 依赖图，图中 nodes 沿用 discovery summary 与默认排序，帮助 Agent 先看 canonical 主接口，再看 macro 和 navigation 辅助层。",
       "parameter_raw": "query (str, 可选)<br>namespace (str, 可选)<br>capability (str, 可选)<br>role (str, 可选): canonical|macro|navigation<br>intent (str, 可选)",
-      "returns_raw": "ok (bool)<br>data (dict): {tools, edges}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "returns_raw": "ok (bool)<br>data (dict): {tools: discovery summaries with name, namespace, group, description, role, discovery_rank, capabilities, intents, prerequisites, supports_projection?, recommended_for?, not_primary_for?, edges}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "query",
         "namespace",
@@ -4395,9 +3961,9 @@
     {
       "name": "rd.vfs.ls",
       "group": "3.18，VFS 导航工具 (VFS Navigation Tools)",
-      "description": "以 JSON-first 方式列出 read-only VFS 节点，用于探索 draws/passes/resources/context/artifacts 等路径空间。",
-      "parameter_raw": "path (str, 可选, 默认 '/'): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session<br>projection (dict, 可选): 当 kind='tabular' 时返回 entries 的统一表格摘要",
-      "returns_raw": "ok (bool)<br>data (dict): {path, node, entries}<br>projections.tabular (dict, 可选): {format_version, columns, rows, row_count, tsv_text?}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
+      "description": "以 JSON-first 方式列出 read-only VFS 节点，用于浏览 draws/passes/resources/pipeline/context/artifacts 结构；它是导航辅助层，不是第二套调试真相。",
+      "parameter_raw": "path (str, 可选, 默认 '/'): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session<br>projection (dict, 可选): 当 kind='tabular' 时返回 entries 的表格化摘要，用于提升扫描效率，不表示语义重要度排序",
+      "returns_raw": "ok (bool)<br>data (dict): {path, node, entries}<br>projections.tabular (dict, 可选): {format_version, columns, rows, row_count, tsv_text?} as a tabular summary for scan/readability only, not semantic ranking<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
       "param_names": [
         "path",
         "session_id",
@@ -4411,7 +3977,7 @@
     {
       "name": "rd.vfs.cat",
       "group": "3.18，VFS 导航工具 (VFS Navigation Tools)",
-      "description": "读取 read-only VFS 节点的 JSON 表示，不新增第二套平行真相，而是对底层 rd.* 能力的导航封装。",
+      "description": "读取 read-only VFS 节点的 JSON 表示，用于路径式浏览与导航；需要精确调试、导出或状态切换时仍应回到 canonical `rd.*` tools。",
       "parameter_raw": "path (str): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session",
       "returns_raw": "ok (bool)<br>data (dict): {path, node}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
       "param_names": [
@@ -4423,7 +3989,7 @@
     {
       "name": "rd.vfs.tree",
       "group": "3.18，VFS 导航工具 (VFS Navigation Tools)",
-      "description": "按照 VFS 路径返回树形 read-only 视图，默认以结构化 JSON 表示节点与 children。",
+      "description": "按 VFS 路径返回树形 read-only 视图，适合初步浏览 session 结构或向人展示层级视图；它是 browse-only 辅助层，不代替 canonical inspection tools。",
       "parameter_raw": "path (str, 可选, 默认 '/'): VFS 起点路径<br>depth (int, 可选, 默认 2): 递归深度<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session",
       "returns_raw": "ok (bool)<br>data (dict): {path, tree}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
       "param_names": [
@@ -4436,7 +4002,7 @@
     {
       "name": "rd.vfs.resolve",
       "group": "3.18，VFS 导航工具 (VFS Navigation Tools)",
-      "description": "解析 VFS 路径到对应节点元数据，用于判断 path 是否存在、是否需要 session 以及可使用哪类视图。",
+      "description": "解析 VFS 路径到对应节点元数据，用于判断 path 是否存在、是否需要 session 以及当前可用的 browse-only 视图，不代替 canonical debug/export/state APIs。",
       "parameter_raw": "path (str): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session",
       "returns_raw": "ok (bool)<br>data (dict): {path, node}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
       "param_names": [

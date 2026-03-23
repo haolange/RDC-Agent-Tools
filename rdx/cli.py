@@ -218,7 +218,6 @@ async def _cmd_capture_open(args: argparse.Namespace) -> int:
         {
             "global_env": {"artifact_dir": str(Path(args.artifact_dir).resolve())},
             "enable_remote": True,
-            "enable_app_api": True,
         },
         context=context,
     )

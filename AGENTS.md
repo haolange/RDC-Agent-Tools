@@ -67,7 +67,7 @@
 ## 协议与运行时契约
 
 - tool catalog 来源：`spec/tool_catalog.json`。
-- catalog 当前数量由 `spec/tool_catalog.json` 的 `tool_count` 定义；当前为 `202`。如后续继续增删，必须同步更新 validator、帮助输出、文档与测试口径。
+- catalog 当前数量由 `spec/tool_catalog.json` 的 `tool_count` 定义；当前为 `190`。如后续继续增删，必须同步更新 validator、帮助输出、文档与测试口径。
 - tool 名称为规范的 `rd.*` tool names。
 - 运行时响应遵循 `rdx/core/contracts.py` 中的共享契约：
   - 调试时优先检查 `ok` 与 `error_message`。

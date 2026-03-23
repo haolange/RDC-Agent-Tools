@@ -75,37 +75,37 @@ _MANUAL_TOOLS = [
     {
         "name": "rd.core.list_tools",
         "group": _CORE_GROUP,
-        "description": "\u6309 namespace\u3001group\u3001capability\u3001role\u3001intent \u7b49\u7ed3\u6784\u5316\u6761\u4ef6\u5217\u51fa\u53ef\u7528 tool\uff0c\u907f\u514d\u4e00\u6b21\u6027\u6ce8\u5165\u5168\u90e8\u63cf\u8ff0\u3002",
+        "description": "\u6309 namespace\u3001group\u3001capability\u3001role\u3001intent \u7b49\u7ed3\u6784\u5316\u6761\u4ef6\u5217\u51fa\u53ef\u7528 tool\uff0c\u9ed8\u8ba4\u4ecd\u4ee5 canonical `rd.*` \u4e3b\u63a5\u53e3\u4f18\u5148\uff0c\u5176\u540e\u624d\u662f macro\u3001session/context/core \u5143\u4fe1\u606f\u5c42\u4e0e navigation \u8f85\u52a9\u5c42\u3002",
         "parameter_raw": "namespace (str, \u53ef\u9009)<br>group (str, \u53ef\u9009)<br>capability (str, \u53ef\u9009)<br>role (str, \u53ef\u9009): canonical|macro|navigation<br>intent (str, \u53ef\u9009)<br>mutates_state (bool, \u53ef\u9009)<br>detail_level (str, \u53ef\u9009, \u9ed8\u8ba4 'summary'): summary|full",
-        "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools: discovery summaries with name, namespace, group, description, role, discovery_rank, capabilities, intents, prerequisites, supports_projection?, recommended_for?, not_primary_for?}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
     },
     {
         "name": "rd.core.search_tools",
         "group": _CORE_GROUP,
-        "description": "\u6309\u540d\u79f0\u3001\u63cf\u8ff0\u3001group\u3001capability \u4e0e intent \u7684\u7ed3\u6784\u5316\u5b50\u4e32\u641c\u7d22 tool\uff0c\u8fd4\u56de\u9002\u914d Agent \u7684\u8f7b\u91cf\u89c6\u56fe\u3002",
+        "description": "\u6309\u540d\u79f0\u3001\u63cf\u8ff0\u3001group\u3001capability \u4e0e intent \u505a\u8f7b\u91cf discovery\uff1b\u9ed8\u8ba4\u4ecd\u4ee5 canonical `rd.*` \u4e3b\u63a5\u53e3\u4f18\u5148\uff0c\u4f46\u5f53 query \u660e\u786e\u6307\u5411 browse/path/tree/vfs \u6216 table/tabular/tsv \u65f6\uff0c\u4f1a\u628a navigation \u6216 projection \u76f8\u5173\u7ed3\u679c\u63d0\u524d\u3002",
         "parameter_raw": "query (str, \u53ef\u9009)<br>namespace (str, \u53ef\u9009)<br>capability (str, \u53ef\u9009)<br>role (str, \u53ef\u9009): canonical|macro|navigation<br>intent (str, \u53ef\u9009)<br>detail_level (str, \u53ef\u9009, \u9ed8\u8ba4 'summary'): summary|full",
-        "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {tool_count, tools: discovery summaries with name, namespace, group, description, role, discovery_rank, capabilities, intents, prerequisites, supports_projection?, recommended_for?, not_primary_for?}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
     },
     {
         "name": "rd.core.get_tool_graph",
         "group": _CORE_GROUP,
-        "description": "\u8fd4\u56de tool \u4e4b\u95f4\u7684 prerequisite \u4e0e macro-to-canonical \u4f9d\u8d56\u56fe\uff0c\u5e2e\u52a9 Agent \u63a8\u65ad\u8c03\u7528\u94fe\u4e0e\u5c55\u5f00\u8def\u5f84\u3002",
+        "description": "\u8fd4\u56de tool \u4e4b\u95f4\u7684 prerequisite \u4e0e macro-to-canonical \u4f9d\u8d56\u56fe\uff0c\u56fe\u4e2d nodes \u6cbf\u7528 discovery summary \u4e0e\u9ed8\u8ba4\u6392\u5e8f\uff0c\u5e2e\u52a9 Agent \u5148\u770b canonical \u4e3b\u63a5\u53e3\uff0c\u518d\u770b macro \u548c navigation \u8f85\u52a9\u5c42\u3002",
         "parameter_raw": "query (str, \u53ef\u9009)<br>namespace (str, \u53ef\u9009)<br>capability (str, \u53ef\u9009)<br>role (str, \u53ef\u9009): canonical|macro|navigation<br>intent (str, \u53ef\u9009)",
-        "returns_raw": "ok (bool)<br>data (dict): {tools, edges}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {tools: discovery summaries with name, namespace, group, description, role, discovery_rank, capabilities, intents, prerequisites, supports_projection?, recommended_for?, not_primary_for?, edges}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
     },
     {
         "name": "rd.vfs.ls",
         "group": _VFS_GROUP,
-        "description": "\u4ee5 JSON-first \u65b9\u5f0f\u5217\u51fa read-only VFS \u8282\u70b9\uff0c\u7528\u4e8e\u63a2\u7d22 draws/passes/resources/context/artifacts \u7b49\u8def\u5f84\u7a7a\u95f4\u3002",
-        "parameter_raw": "path (str, \u53ef\u9009, \u9ed8\u8ba4 '/'): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session<br>projection (dict, \u53ef\u9009): \u5f53 kind='tabular' \u65f6\u8fd4\u56de entries \u7684\u7edf\u4e00\u8868\u683c\u6458\u8981",
-        "returns_raw": "ok (bool)<br>data (dict): {path, node, entries}<br>projections.tabular (dict, \u53ef\u9009): {format_version, columns, rows, row_count, tsv_text?}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
+        "description": "\u4ee5 JSON-first \u65b9\u5f0f\u5217\u51fa read-only VFS \u8282\u70b9\uff0c\u7528\u4e8e\u6d4f\u89c8 draws/passes/resources/pipeline/context/artifacts \u7ed3\u6784\uff1b\u5b83\u662f\u5bfc\u822a\u8f85\u52a9\u5c42\uff0c\u4e0d\u662f\u7b2c\u4e8c\u5957\u8c03\u8bd5\u771f\u76f8\u3002",
+        "parameter_raw": "path (str, \u53ef\u9009, \u9ed8\u8ba4 '/'): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session<br>projection (dict, \u53ef\u9009): \u5f53 kind='tabular' \u65f6\u8fd4\u56de entries \u7684\u8868\u683c\u5316\u6458\u8981\uff0c\u7528\u4e8e\u63d0\u9ad8\u626b\u63cf\u6548\u7387\uff0c\u4e0d\u8868\u793a\u8bed\u4e49\u91cd\u8981\u5ea6\u6392\u5e8f",
+        "returns_raw": "ok (bool)<br>data (dict): {path, node, entries}<br>projections.tabular (dict, \u53ef\u9009): {format_version, columns, rows, row_count, tsv_text?} as a tabular summary for scan/readability only, not semantic ranking<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
         "supports_projection": {"tabular": True},
         "prerequisites": [],
     },
     {
         "name": "rd.vfs.cat",
         "group": _VFS_GROUP,
-        "description": "\u8bfb\u53d6 read-only VFS \u8282\u70b9\u7684 JSON \u8868\u793a\uff0c\u4e0d\u65b0\u589e\u7b2c\u4e8c\u5957\u5e73\u884c\u771f\u76f8\uff0c\u800c\u662f\u5bf9\u5e95\u5c42 rd.* \u80fd\u529b\u7684\u5bfc\u822a\u5c01\u88c5\u3002",
+        "description": "\u8bfb\u53d6 read-only VFS \u8282\u70b9\u7684 JSON \u8868\u793a\uff0c\u7528\u4e8e\u8def\u5f84\u5f0f\u6d4f\u89c8\u4e0e\u5bfc\u822a\uff1b\u9700\u8981\u7cbe\u786e\u8c03\u8bd5\u3001\u5bfc\u51fa\u6216\u72b6\u6001\u5207\u6362\u65f6\u4ecd\u5e94\u56de\u5230 canonical `rd.*` tools\u3002",
         "parameter_raw": "path (str): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
         "returns_raw": "ok (bool)<br>data (dict): {path, node}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
         "prerequisites": [],
@@ -113,7 +113,7 @@ _MANUAL_TOOLS = [
     {
         "name": "rd.vfs.tree",
         "group": _VFS_GROUP,
-        "description": "\u6309\u7167 VFS \u8def\u5f84\u8fd4\u56de\u6811\u5f62 read-only \u89c6\u56fe\uff0c\u9ed8\u8ba4\u4ee5\u7ed3\u6784\u5316 JSON \u8868\u793a\u8282\u70b9\u4e0e children\u3002",
+        "description": "\u6309 VFS \u8def\u5f84\u8fd4\u56de\u6811\u5f62 read-only \u89c6\u56fe\uff0c\u9002\u5408\u521d\u6b65\u6d4f\u89c8 session \u7ed3\u6784\u6216\u5411\u4eba\u5c55\u793a\u5c42\u7ea7\u89c6\u56fe\uff1b\u5b83\u662f browse-only \u8f85\u52a9\u5c42\uff0c\u4e0d\u4ee3\u66ff canonical inspection tools\u3002",
         "parameter_raw": "path (str, \u53ef\u9009, \u9ed8\u8ba4 '/'): VFS \u8d77\u70b9\u8def\u5f84<br>depth (int, \u53ef\u9009, \u9ed8\u8ba4 2): \u9012\u5f52\u6df1\u5ea6<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
         "returns_raw": "ok (bool)<br>data (dict): {path, tree}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
         "prerequisites": [],
@@ -121,7 +121,7 @@ _MANUAL_TOOLS = [
     {
         "name": "rd.vfs.resolve",
         "group": _VFS_GROUP,
-        "description": "\u89e3\u6790 VFS \u8def\u5f84\u5230\u5bf9\u5e94\u8282\u70b9\u5143\u6570\u636e\uff0c\u7528\u4e8e\u5224\u65ad path \u662f\u5426\u5b58\u5728\u3001\u662f\u5426\u9700\u8981 session \u4ee5\u53ca\u53ef\u4f7f\u7528\u54ea\u7c7b\u89c6\u56fe\u3002",
+        "description": "\u89e3\u6790 VFS \u8def\u5f84\u5230\u5bf9\u5e94\u8282\u70b9\u5143\u6570\u636e\uff0c\u7528\u4e8e\u5224\u65ad path \u662f\u5426\u5b58\u5728\u3001\u662f\u5426\u9700\u8981 session \u4ee5\u53ca\u5f53\u524d\u53ef\u7528\u7684 browse-only \u89c6\u56fe\uff0c\u4e0d\u4ee3\u66ff canonical debug/export/state APIs\u3002",
         "parameter_raw": "path (str): VFS \u8def\u5f84<br>session_id (str, \u53ef\u9009): \u5f53 path \u6307\u5411 replay \u76f8\u5173\u57df\u65f6\u7528\u4e8e\u89e3\u6790\u5f53\u524d session",
         "returns_raw": "ok (bool)<br>data (dict): {path, node}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
         "prerequisites": [],
@@ -329,14 +329,6 @@ def _infer_prerequisites(tool_name: str, param_names: List[str]) -> List[Dict[st
                 "requires": "capability.remote",
                 "via_tools": ["rd.core.init"],
                 "reason": "Remote tools require remote capability to be enabled for the current runtime.",
-            }
-        )
-    if tool_name.startswith("rd.app."):
-        prerequisites.append(
-            {
-                "requires": "capability.app_api",
-                "via_tools": ["rd.core.init"],
-                "reason": "In-process app tools require app API integration to be enabled.",
             }
         )
     unique: List[Dict[str, Any]] = []

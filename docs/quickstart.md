@@ -2,6 +2,8 @@
 
 本文只覆盖“最短上手路径”，帮助你确认 `rdx-tools` 的入口可用，并把一份 `.rdc` 变成可操作的 session。更完整的状态模型见 [session-model.md](session-model.md)。
 
+仓库默认公开的能力面聚焦于 `.rdc` 离线 replay / 调试 / 导出，不包含 app-side integration 控制链路。
+
 ## 1. 先验证入口
 
 在仓库根目录执行：
@@ -71,7 +73,9 @@ rdx call rd.session.resume --format json
 
 当前平台会优先按持久化索引自动恢复本地 `.rdc` session；remote session 不会自动重连。
 
-如果想用只读路径式方式快速探索当前 frame，也可以直接查看：
+### 可选：用 `VFS` 快速浏览当前 session
+
+如果想用只读路径式方式快速探索当前 frame，也可以执行：
 
 ```bat
 rdx vfs ls --path / --format json
@@ -81,6 +85,7 @@ rdx vfs cat --path /pipeline --format json
 ```
 
 `rd.vfs.*` / `rdx vfs *` 只负责导航与读取；真正的修改、导出、切换与 context 更新仍继续走原有 `rd.*` tools。
+其中 `--format tsv` 只是对结构化结果的表格化摘要，用于更快扫描列表，不表示语义重要度排序。
 
 ### 结束与清理
 

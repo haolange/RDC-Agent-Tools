@@ -7,8 +7,6 @@ from typing import Any, Awaitable, Callable, Dict, List
 from rdx import server_runtime
 from rdx.core.operation_registry import OperationRegistry
 from rdx.handlers import (
-    analysis,
-    app,
     buffer,
     capture,
     core,
@@ -33,8 +31,6 @@ from rdx.handlers import (
 OperationHandler = Callable[[str, Dict[str, Any], Dict[str, Any]], Awaitable[Any]]
 
 _DOMAIN_HANDLERS: Dict[str, Callable[[str, Dict[str, Any], Dict[str, Any]], Awaitable[Any]]] = {
-    "analysis": analysis.handle,
-    "app": app.handle,
     "buffer": buffer.handle,
     "capture": capture.handle,
     "core": core.handle,
@@ -109,8 +105,6 @@ def _has_prerequisite(requirement: str, args: Dict[str, Any]) -> bool:
         return event_id > 0
     if requirement == "capability.remote":
         return bool(server_runtime._runtime.enable_remote)
-    if requirement == "capability.app_api":
-        return bool(server_runtime._runtime.enable_app_api)
     return True
 
 

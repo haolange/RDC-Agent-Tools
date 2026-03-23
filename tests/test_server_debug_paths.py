@@ -204,7 +204,8 @@ def test_debug_start_synthetic_fallback_unlocks_debug_chain(monkeypatch) -> None
 
 def test_capabilities_and_compile_error_are_structured() -> None:
     caps = asyncio.run(server._core_capabilities(detail="full"))
-    for key in ("remote", "app_api", "shader_debug", "mesh_post_transform", "shader_binary_export", "shader_compile", "counters"):
+    assert "app_api" not in caps
+    for key in ("remote", "shader_debug", "mesh_post_transform", "shader_binary_export", "shader_compile", "counters"):
         entry = caps[key]
         assert set(("available", "reason", "optional", "source")).issubset(entry.keys())
 

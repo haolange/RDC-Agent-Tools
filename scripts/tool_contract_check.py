@@ -37,8 +37,6 @@ SESSION_ERROR_SNIPPETS = (
 )
 REMOTE_APP_DEPENDENCY_SNIPPETS = (
     "requires_remote_device",
-    "requires_app_integration",
-    "App API requires in-process RenderDoc instrumentation",
     "Remote target interaction requires a live RenderDoc remote endpoint",
 )
 
@@ -170,14 +168,14 @@ def _scope_skip_classification(
     capability = str(details.get("capability") or "").strip().lower()
     optional = bool(details.get("optional", False))
 
-    if "unknown remote_id" in lower_msg or _is_remote_app_dependency_error(message, code) or tool.startswith("rd.app."):
+    if "unknown remote_id" in lower_msg or _is_remote_app_dependency_error(message, code):
         return (
             "scope_skip",
-            message or "remote/app dependency insufficient",
-            code or "remote_app_dependency",
-            "remote_app_dependency",
-            "Keep app/remote dependency gaps as scope_skip in local smoke runs",
-            "only affects app/remote dependency path",
+            message or "remote dependency insufficient",
+            code or "remote_dependency",
+            "remote_dependency",
+            "Keep remote dependency gaps as scope_skip in local smoke runs",
+            "only affects remote dependency path",
         )
 
     if _is_sample_compatibility_error(message, code):
@@ -583,7 +581,6 @@ async def _ensure_context(
         {
             "global_env": {"artifact_dir": str(files["artifacts"])},
             "enable_remote": True,
-            "enable_app_api": True,
         },
         timeout_s=25.0,
     )
@@ -1360,8 +1357,12 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
                 args[param] = str(files["zip_out"])
             elif tool == "rd.util.diff_images":
                 args[param] = str(files["artifacts"] / f"{state.matrix}_image_diff.png")
-            elif tool == "rd.texture.save_to_file":
+            elif tool == "rd.export.texture":
                 args[param] = str(files["artifacts"] / f"{state.matrix}_texture_out.png")
+            elif tool == "rd.export.buffer":
+                args[param] = str(files["artifacts"] / f"{state.matrix}_buffer_out.bin")
+            elif tool == "rd.export.mesh":
+                args[param] = str(files["artifacts"] / f"{state.matrix}_mesh_out.obj")
             else:
                 args[param] = str(files["artifacts"] / f"{state.matrix}_{tool.replace('.', '_')}.out")
         elif param == "paths":

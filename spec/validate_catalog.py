@@ -24,7 +24,6 @@ _ALLOWED_PREREQS = {
     "remote_id",
     "active_event_id",
     "capability.remote",
-    "capability.app_api",
 }
 _ALLOWED_WHEN = {
     "",

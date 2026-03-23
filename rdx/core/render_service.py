@@ -427,6 +427,16 @@ class RenderService:
         tex_display = rd.TextureDisplay()
         tex_display.resourceId = tex_id
         tex_display.subresource = rd.Subresource()
+        subresource = source_config.get("subresource") or view_config.get("subresource") or {}
+        tex_display.subresource.mip = int(subresource.get("mip", 0))
+        try:
+            tex_display.subresource.slice = max(0, int(subresource.get("slice", 0)))
+        except Exception:
+            tex_display.subresource.slice = 0
+        try:
+            tex_display.subresource.sample = max(0, int(subresource.get("sample", 0)))
+        except Exception:
+            tex_display.subresource.sample = 0
 
         # Scale: 0 = fit to output window.
         tex_display.scale = float(view_config.get("scale", 0))
@@ -481,6 +491,11 @@ class RenderService:
             "width": width,
             "height": height,
             "format": actual_fmt,
+            "subresource": {
+                "mip": int(getattr(tex_display.subresource, "mip", 0)),
+                "slice": int(getattr(tex_display.subresource, "slice", 0)),
+                "sample": int(getattr(tex_display.subresource, "sample", 0)),
+            },
             "overlay": overlay_name,
             "channels": {
                 "r": tex_display.red,

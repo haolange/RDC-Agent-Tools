@@ -1,6 +1,8 @@
 ﻿# tool catalog 入口
 
-`rdx-tools` 当前暴露 catalog 定义的 `210` 个规范 `rd.*` tools。
+`rdx-tools` 当前暴露的规范 `rd.*` tools 以 [spec/tool_catalog.json](../spec/tool_catalog.json) 为准。
+
+当前公开 catalog 的能力边界是“打开 `.rdc` 后做离线 replay / 调试 / 导出”；不提供 `rd.app.*` 一类 app-side integration 控制面，也不暗示可控制任意 app。
 
 本文只承担 catalog 入口职责，不承担使用教程。如何建立 session、如何理解 `context` 与 daemon、如何给 Agent 写平台说明，请分别参考：
 
@@ -18,6 +20,13 @@
 - 规范定义以 `spec/tool_catalog.json` 为准。
 - catalog 现在包含结构化 `prerequisites`；它是 Agent 做静态前置推理的第一入口，不应再把 tool 顺序知识隐藏在文档段落或运行时报错里。
 
+当前分类边界补充如下：
+
+- `rd.export.*` 是唯一的文件导出分类面；纹理、buffer、mesh 的落盘导出统一从这里进入。
+- `rd.texture.*` / `rd.buffer.*` / `rd.mesh.*` 负责资源读取、检查、结构化解析与预览，不再额外暴露平行的导出 public surface。
+- `rd.macro.*` 只保留多步工作流与高阶报告入口，不再保留一跳 passthrough 式 macro。
+- `rd.analysis.*` 已收敛移除；分析入口通过 retained `rd.macro.*`、`rd.diag.*` 与少量 canonical inspection tools 组合完成。
+
 补充一条入口边界：
 
 - `CLI` 是 daemon-backed 本地命令入口。
@@ -25,7 +34,23 @@
 - `MCP` 是把 catalog 能力桥接给外部宿主的协议入口。
 - catalog 本身不偏向 `CLI` 或 `MCP`；两者都依赖同一 daemon-owned runtime / context。
 
-## 当前新增入口
+## 能力定位优先级
+
+默认推荐顺序固定为：
+
+1. canonical `rd.*` 是主接口
+2. `rd.macro.*` 是高阶工作流
+3. `rd.session.*` / `rd.core.*` 负责 context、恢复与 discovery
+4. `rd.vfs.*` 是导航辅助层
+5. `tabular/tsv projection` 是展示投影，不是独立能力面
+
+补充说明：
+
+- 主调试接口始终是 canonical `rd.*`。
+- `rd.vfs.*` 适合浏览结构、探索路径、快速查看当前 session 的层级视图。
+- `tabular/tsv projection` 是对结构化结果的表格化摘要，目的是提升扫描效率，不表示经过语义重要度排序。
+
+## 当前公开辅助入口
 
 当前公开 catalog 已包含：
 
@@ -47,9 +72,10 @@
 其中 `rd.vfs.*` 的定位是：
 
 - 只读探索层，主要服务人类与 Agent 的路径式浏览。
-- canonical truth 仍然是结构化 JSON；其中 `rd.vfs.ls` 可额外请求统一 tabular projection 作为 entries 摘要。
+- canonical truth 仍然是结构化 JSON；其中 `rd.vfs.ls` 可额外请求统一 tabular projection 作为 entries 摘要，但这只是展示投影，不构成独立能力面。
 - `rd.vfs.*` 只负责导航、解析和读取，不负责修改 runtime、切换 event、导出资源或更新 context。
 - 真正的 canonical tools 仍然是原有 `rd.*` 结构化接口；`rd.vfs.*` 会把这些 canonical tools 作为节点元数据暴露出来。
+- 需要精确读取字段、切换 event、导出证据、写自动化链路时，应回到 canonical `rd.*`。
 
 其中 `rd.session.*` 用于暴露 context snapshot：
 
@@ -62,8 +88,8 @@
 其中新增 `rd.core.*` discovery / observability 入口用于：
 
 - 读取 trace-linked 操作历史与当前 runtime 自监控指标。
-- 按 `namespace`、`group`、`capability`、`role`、`intent` 做轻量 tool discovery。
-- 显式返回 prerequisite 与 macro-to-canonical 依赖图，而不是要求 Agent 自己从 210 个 tool 描述中猜调用链。
+- 按 `namespace`、`group`、`capability`、`role`、`intent` 做轻量 tool discovery，并默认优先推荐 canonical `rd.*`，再是 macro、context/core 元信息层与 navigation 层。
+- 显式返回 prerequisite 与 macro-to-canonical 依赖图，而不是要求 Agent 自己从完整 catalog 描述中猜调用链。
 
 ## Event 语义
 

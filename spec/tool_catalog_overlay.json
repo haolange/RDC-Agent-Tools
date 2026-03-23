@@ -42,13 +42,13 @@
       ]
     },
     "rd.vfs.ls": {
-      "parameter_raw": "path (str, 可选, 默认 '/'): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session<br>projection (dict, 可选): 当 kind='tabular' 时返回 entries 的统一表格摘要",
+      "parameter_raw": "path (str, 可选, 默认 '/'): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session<br>projection (dict, 可选): 当 kind='tabular' 时返回 entries 的表格化摘要，用于提升扫描效率，不表示语义重要度排序",
       "param_names": [
         "path",
         "session_id",
         "projection"
       ],
-      "returns_raw": "ok (bool)<br>data (dict): {path, node, entries}<br>projections.tabular (dict, 可选): {format_version, columns, rows, row_count, tsv_text?}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
+      "returns_raw": "ok (bool)<br>data (dict): {path, node, entries}<br>projections.tabular (dict, 可选): {format_version, columns, rows, row_count, tsv_text?} as a tabular summary for scan/readability only, not semantic ranking<br>artifacts (list)<br>error (dict|null)<br>meta (dict)",
       "prerequisites": [],
       "supports_projection": {
         "tabular": true

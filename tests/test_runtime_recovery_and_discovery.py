@@ -113,6 +113,7 @@ def test_tool_discovery_and_graph_surface_macro_guidance() -> None:
     core_names = {tool["name"] for tool in listed["data"]["tools"]}
     assert "rd.core.get_runtime_metrics" in core_names
     assert "rd.core.search_tools" in core_names
+    assert not any(name.startswith("rd.app.") for name in core_names)
 
     searched = asyncio.run(
         server.dispatch_operation(
@@ -122,9 +123,12 @@ def test_tool_discovery_and_graph_surface_macro_guidance() -> None:
         )
     )
     assert searched["ok"] is True
-    search_names = {tool["name"] for tool in searched["data"]["tools"]}
+    ordered_search_names = [tool["name"] for tool in searched["data"]["tools"]]
+    search_names = set(ordered_search_names)
     assert "rd.macro.explain_pixel" in search_names
     assert "rd.debug.pixel_history" in search_names
+    assert ordered_search_names.index("rd.debug.pixel_history") < ordered_search_names.index("rd.macro.explain_pixel")
+    assert not any(name.startswith("rd.app.") for name in search_names)
 
     graph = asyncio.run(
         server.dispatch_operation(
@@ -135,6 +139,89 @@ def test_tool_discovery_and_graph_surface_macro_guidance() -> None:
     )
     assert graph["ok"] is True
     assert any(edge["type"] == "macro_expands_to" and edge["from"] == "rd.macro.explain_pixel" and edge["to"] == "rd.debug.pixel_history" for edge in graph["data"]["edges"])
+    assert not any(tool["name"].startswith("rd.app.") for tool in graph["data"]["tools"])
+    graph_names = [tool["name"] for tool in graph["data"]["tools"]]
+    assert graph_names.index("rd.debug.pixel_history") < graph_names.index("rd.macro.explain_pixel")
+
+
+def test_tool_discovery_intents_follow_export_and_analysis_boundaries() -> None:
+    export_list = asyncio.run(
+        server.dispatch_operation(
+            "rd.core.list_tools",
+            {"intent": "export", "detail_level": "summary"},
+            transport="test",
+        )
+    )
+    assert export_list["ok"] is True
+    export_names = {tool["name"] for tool in export_list["data"]["tools"]}
+    assert {"rd.export.texture", "rd.export.buffer", "rd.export.mesh"} <= export_names
+    assert "rd.texture.save_to_file" not in export_names
+    assert "rd.buffer.save_to_file" not in export_names
+    assert "rd.mesh.export" not in export_names
+
+    analysis_list = asyncio.run(
+        server.dispatch_operation(
+            "rd.core.list_tools",
+            {"intent": "analysis", "detail_level": "summary"},
+            transport="test",
+        )
+    )
+    assert analysis_list["ok"] is True
+    analysis_names = {tool["name"] for tool in analysis_list["data"]["tools"]}
+    assert {"rd.macro.explain_pixel", "rd.debug.pixel_history", "rd.diag.scan_common_issues", "rd.texture.compute_stats"} <= analysis_names
+    assert not any(name.startswith("rd.analysis.") for name in analysis_names)
+
+
+def test_tool_discovery_default_priority_and_navigation_projection_hints() -> None:
+    listed = asyncio.run(
+        server.dispatch_operation(
+            "rd.core.list_tools",
+            {"detail_level": "summary"},
+            transport="test",
+        )
+    )
+    assert listed["ok"] is True
+    tools = listed["data"]["tools"]
+    ordered_names = [tool["name"] for tool in tools]
+    assert ordered_names.index("rd.capture.open_file") < ordered_names.index("rd.macro.explain_pixel")
+    assert ordered_names.index("rd.macro.explain_pixel") < ordered_names.index("rd.session.get_context")
+    assert ordered_names.index("rd.session.get_context") < ordered_names.index("rd.vfs.ls")
+
+    vfs_list = asyncio.run(
+        server.dispatch_operation(
+            "rd.core.list_tools",
+            {"role": "navigation", "detail_level": "summary"},
+            transport="test",
+        )
+    )
+    assert vfs_list["ok"] is True
+    vfs_tool = next(tool for tool in vfs_list["data"]["tools"] if tool["name"] == "rd.vfs.ls")
+    assert vfs_tool["role"] == "navigation"
+    assert isinstance(vfs_tool["discovery_rank"], int)
+    assert vfs_tool["supports_projection"] == {"tabular": True}
+    assert vfs_tool["recommended_for"] == ["browse_only"]
+    assert vfs_tool["not_primary_for"] == ["precise_debug", "export", "state_mutation", "automation"]
+
+    browse_search = asyncio.run(
+        server.dispatch_operation(
+            "rd.core.search_tools",
+            {"query": "browse", "detail_level": "summary"},
+            transport="test",
+        )
+    )
+    assert browse_search["ok"] is True
+    assert browse_search["data"]["tools"][0]["name"].startswith("rd.vfs.")
+
+    tsv_search = asyncio.run(
+        server.dispatch_operation(
+            "rd.core.search_tools",
+            {"query": "tsv", "detail_level": "summary"},
+            transport="test",
+        )
+    )
+    assert tsv_search["ok"] is True
+    assert tsv_search["data"]["tools"][0]["name"] == "rd.vfs.ls"
+    assert tsv_search["data"]["tools"][0]["supports_projection"] == {"tabular": True}
 
 
 def test_session_resume_restores_persisted_local_session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

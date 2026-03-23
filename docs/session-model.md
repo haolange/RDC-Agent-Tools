@@ -2,6 +2,8 @@
 
 本文说明 `rdx-tools` 的平台使用模型：怎样把一份 `.rdc` 变成可操作的 session，以及 `context`、daemon、artifact、context snapshot 分别承担什么职责。
 
+本文讨论的公开能力边界仅限于 `.rdc` 离线 replay / 调试 / 导出，不包含应用侧集成或任意 app 控制语义。
+
 本文不讨论上层业务 workflow。shader debug、reverse、analysis、optimize 等任务策略应由上层 skills、system prompt、reference docs 决定。
 
 ## 1. 最小对象链路

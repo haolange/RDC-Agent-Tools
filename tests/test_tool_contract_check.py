@@ -83,6 +83,28 @@ def test_build_args_uses_debug_pc_for_run_to_and_breakpoints(tmp_path: Path) -> 
     assert breakpoint_args["breakpoints"] == [{"pc": 12}]
 
 
+def test_build_args_for_export_texture_uses_png_output_path(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="local", rdc_path=tmp_path / "sample.rdc")
+    files = {
+        "artifacts": tmp_path / "artifacts",
+        "sample": tmp_path / "sample.bin",
+        "text_a": tmp_path / "a.txt",
+        "text_b": tmp_path / "b.txt",
+        "png_a": tmp_path / "a.png",
+        "png_b": tmp_path / "b.png",
+        "zip_out": tmp_path / "bundle.zip",
+    }
+
+    args = tool_contract_check._build_args(
+        "rd.export.texture",
+        ["session_id", "texture_id", "output_path"],
+        state,
+        files,
+    )
+
+    assert str(args["output_path"]).endswith("_texture_out.png")
+
+
 def test_parse_args_requires_local_rdc(monkeypatch, tmp_path: Path) -> None:
     out_json = tmp_path / "tool_contract_report.json"
     out_md = tmp_path / "tool_contract_report.md"

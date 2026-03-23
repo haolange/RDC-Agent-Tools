@@ -2,6 +2,8 @@
 
 `rdx-tools` 是面向 `RenderDoc` 的本地工具集，用于暴露稳定的 `rd.*` tool 能力、管理 `.rdc` 到 replay session 的运行时链路，并为 daemon-backed 本地入口与协议桥接提供统一入口。
 
+本仓库的默认公开能力边界聚焦于“打开 `.rdc` 后做离线 replay / 调试 / 导出”，不把任意 app 控制或 app-side integration 作为默认主能力面。
+
 本仓库关注“平台层使用模型”：
 
 - 提供 `CLI`、`MCP`、tool catalog 与 runtime 约束。
@@ -13,6 +15,23 @@
 - 不描述 shader debug、reverse、analysis、optimize 等任务策略。
 - 不替代上层 skills、system prompt、reference docs。
 - 不规定 Agent 必须按哪条业务链路组合 tools。
+
+## 默认能力介绍顺序
+
+对外介绍 `rdx-tools` 时，默认应按以下顺序理解能力面：
+
+1. 把 `.rdc` 建成可操作的 `capture/replay/session`。
+2. 通过 canonical `rd.*` tools 做事件、管线、资源、纹理、shader、debug、export 等结构化读取与操作。
+3. 用 `rd.macro.*` 承载常见高阶分析工作流。
+4. 用 `rd.session.*` / `rd.core.*` 管理 context、恢复与 discovery。
+5. 用 `rd.vfs.*` 做只读浏览与路径式导航。
+6. 用 `tabular/tsv projection` 提供表格化摘要输出。
+
+补充口径：
+
+- 主调试接口始终是 canonical `rd.*`。
+- `rd.vfs.*` 是只读导航层，用于浏览结构，不替代正式调试接口。
+- `tabular/tsv projection` 是结果展示投影，用于提升扫描效率，不是新的规范能力面，也不表示语义重要度排序。
 
 ## 规范源优先级
 
@@ -56,8 +75,8 @@ daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问
 
 `MCP` server 入口，适合无法直接进入本地环境的外部宿主，或用户明确要求按 `MCP` 接入的场景。
 
-- 暴露 catalog 当前定义的全部 `rd.*` tools；当前 `tool_count` 为 `210`。
-- 新增只读 `rd.vfs.*` 入口，用于以 JSON-first 方式探索 draw/pass/resource/pipeline/context 结构。
+- 暴露 catalog 当前定义的全部 `rd.*` tools；数量以 `spec/tool_catalog.json` 的 `tool_count` 为准。
+- 新增只读 `rd.vfs.*` 导航层，用于以 JSON-first 方式探索 draw/pass/resource/pipeline/context 结构。
 - 已公开包含 `rd.session.get_context`、`rd.session.update_context`、`rd.session.list_sessions`、`rd.session.select_session`、`rd.session.resume`。
 - 已公开包含 `rd.core.get_operation_history`、`rd.core.get_runtime_metrics`、`rd.core.list_tools`、`rd.core.search_tools`、`rd.core.get_tool_graph`。
 - catalog 现已为 tool 提供结构化 `prerequisites`，上层 Agent 应在调用前优先做静态前置检查，而不是依赖试错。
@@ -137,7 +156,7 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 ## 关键约束
 
 - tool catalog 的权威来源是 `spec/tool_catalog.json`。
-- catalog 当前数量以 `tool_count` 字段为准；当前为 `210`，后续变更必须同步更新 validator、help 输出与文档口径。
+- catalog 当前数量以 `tool_count` 字段为准；后续变更必须同步更新 validator、help 输出与文档口径。
 - 运行时响应遵循共享契约；调试时优先检查 `ok` 与 `error.message`，必要时继续看 `error.details`。
 - 默认参考根目录由 `rdx.bat` 或脚本自身位置推导；`RDX_TOOLS_ROOT` 仅用于覆盖默认值。
 - `rd.event.set_active` 若收到不可解析的 `event_id`，必须失败且保持现有 runtime / context 状态不变。

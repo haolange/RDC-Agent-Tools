@@ -2,6 +2,8 @@
 
 本文面向上层 Agent / framework，说明 `rdx-tools` 应如何被安全使用，以及为什么“只给一份 tools 清单”通常不够。
 
+上层应默认把本仓库理解为 `.rdc` 离线 replay / 调试 / 导出平台，而不是应用侧控制平台。
+
 本文只描述平台约束，不描述具体业务策略。
 
 ## 1. 规范源优先级
@@ -78,6 +80,9 @@
   - `rd.core.list_tools` 适合按 `namespace`、`group`、`capability`、`role` 做结构化枚举。
   - `rd.core.search_tools` 适合按当前任务关键词做轻量筛选。
   - `rd.core.get_tool_graph` 适合查看 prerequisite 与 macro-to-canonical 依赖图，而不是让模型自己猜工具调用链。
+  - 默认推荐顺序应理解为：canonical `rd.*` 主接口 -> `rd.macro.*` -> `rd.session.*` / `rd.core.*` 元信息层 -> `rd.vfs.*` 导航层。
+  - 只有当任务明确在问“怎么浏览”“有哪些路径可看”“怎么快速看结构”时，才应把 `rd.vfs.*` 提前。
+  - `tabular/tsv projection` 只是结构化结果的表格化摘要，用于更快扫描与复制，不表示语义重要度排序。
 - 只把可 round-trip 的 canonical `event_id` 当作后续 `rd.event.set_active` 候选。
   - `rd.resource.get_usage` / `rd.resource.get_history` 返回的 `raw_event_id` 仅用于诊断，不应默认直接传回 `rd.event.*`。
 - 把 handle 当作短生命周期引用。
