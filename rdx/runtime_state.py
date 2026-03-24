@@ -163,9 +163,45 @@ def _normalize_capture_record(capture_file_id: str, value: Any) -> Dict[str, Any
     }
 
 
+def _normalize_remote_session_record(value: Any) -> Dict[str, Any]:
+    item = dict(value or {}) if isinstance(value, dict) else {}
+    bootstrap = item.get("bootstrap") if isinstance(item.get("bootstrap"), dict) else {}
+    requested = item.get("requested") if isinstance(item.get("requested"), dict) else {}
+    options = item.get("options") if isinstance(item.get("options"), dict) else {}
+    return {
+        "transport": str(item.get("transport") or "renderdoc").strip() or "renderdoc",
+        "host": str(item.get("host") or "").strip(),
+        "port": _normalize_int(item.get("port")),
+        "endpoint": str(item.get("endpoint") or "").strip(),
+        "origin_remote_id": str(item.get("origin_remote_id") or "").strip(),
+        "ownership_state": str(item.get("ownership_state") or "session_owned").strip() or "session_owned",
+        "device_serial": str(item.get("device_serial") or bootstrap.get("device_serial") or "").strip(),
+        "requested": {
+            "host": str(requested.get("host") or "").strip(),
+            "port": _normalize_int(requested.get("port")),
+        },
+        "options": {
+            "install_apk": bool(options.get("install_apk", True)),
+            "push_config": bool(options.get("push_config", True)),
+            "local_port": _normalize_int(options.get("local_port")),
+            "remote_port": _normalize_int(
+                options.get("remote_port") or bootstrap.get("remote_port")
+            ),
+        },
+        "bootstrap": {
+            "package_name": str(bootstrap.get("package_name") or "").strip(),
+            "activity_name": str(bootstrap.get("activity_name") or "").strip(),
+            "abi": str(bootstrap.get("abi") or "").strip(),
+            "remote_port": _normalize_int(bootstrap.get("remote_port")),
+            "config_remote_path": str(bootstrap.get("config_remote_path") or "").strip(),
+        },
+    }
+
+
 def _normalize_session_record(session_id: str, value: Any) -> Dict[str, Any]:
     item = dict(value or {}) if isinstance(value, dict) else {}
     recovery = item.get("recovery") if isinstance(item.get("recovery"), dict) else {}
+    remote = item.get("remote") if isinstance(item.get("remote"), dict) else {}
     return {
         "session_id": str(item.get("session_id") or session_id or "").strip(),
         "capture_file_id": str(item.get("capture_file_id") or "").strip(),
@@ -179,6 +215,7 @@ def _normalize_session_record(session_id: str, value: Any) -> Dict[str, Any]:
         "is_live": bool(item.get("is_live", True)),
         "last_error": str(item.get("last_error") or "").strip(),
         "updated_at_ms": _normalize_int(item.get("updated_at_ms"), _now_ms()),
+        "remote": _normalize_remote_session_record(remote) if remote else {},
         "recovery": {
             "status": str(recovery.get("status") or "idle").strip() or "idle",
             "last_attempt_ms": _normalize_int(recovery.get("last_attempt_ms")),

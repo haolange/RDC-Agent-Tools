@@ -94,6 +94,11 @@ def _to_rd_stage(stage: ShaderStage) -> Any:
     return rd.ShaderStage(idx)
 
 
+def _shader_id_str(shader_id: Any) -> str:
+    """将 ``renderdoc.ResourceId`` 或兼容对象稳定转换为字符串。"""
+    return str(shader_id or "")
+
+
 # ---------------------------------------------------------------------------
 # PatchRecord
 # ---------------------------------------------------------------------------
@@ -181,13 +186,33 @@ class PatchEngine:
                         f"No shader bound at stage {stage.value} "
                         f"for event {event_id}"
                     ),
+                    error_code="shader_not_bound",
+                    error_category="runtime",
+                    error_details={
+                        "event_id": int(event_id),
+                        "stage": stage.value.upper(),
+                        "session_id": str(session_id),
+                    },
                 )
 
             # 3 -- 以最佳可编辑编码进行反汇编
             encoding, disasm_target = self._get_best_encoding(
                 controller, session_id,
             )
-            source = controller.DisassembleShader(pipe, refl, disasm_target)
+            rd = _get_rd()
+            pipeline_obj = rd.ResourceId()
+            try:
+                if stage == ShaderStage.CS:
+                    pipeline_obj = pipe.GetComputePipelineObject()
+                else:
+                    pipeline_obj = pipe.GetGraphicsPipelineObject()
+            except Exception:
+                pipeline_obj = rd.ResourceId()
+            source = controller.DisassembleShader(
+                pipeline_obj,
+                refl,
+                disasm_target,
+            )
 
             if not source:
                 return PatchResult(
@@ -197,12 +222,21 @@ class PatchEngine:
                         f"Disassembly returned empty source for "
                         f"target '{disasm_target}'"
                     ),
+                    error_code="shader_disassembly_unavailable",
+                    error_category="runtime",
+                    error_details={
+                        "event_id": int(event_id),
+                        "stage": stage.value.upper(),
+                        "session_id": str(session_id),
+                        "disassembly_target": str(disasm_target),
+                    },
                 )
 
             original_hash = hashlib.sha256(
                 source.encode("utf-8"),
             ).hexdigest()
             encoding_name = self._encoding_name(encoding)
+            messages: List[str] = []
 
             # 4 -- 顺序应用每个 PatchOp
             modified = source
@@ -215,18 +249,44 @@ class PatchEngine:
                     "source (stage=%s, event=%d)",
                     patch_spec.patch_id, stage.value, event_id,
                 )
+                messages.append(
+                    "Patch operations produced no source changes before recompilation.",
+                )
 
             # 5 -- 编译修改后的源码
-            rd = _get_rd()
             entry_point = refl.entryPoint if refl.entryPoint else "main"
             source_bytes = modified.encode("utf-8")
-            new_id, errors = controller.BuildTargetShader(
-                entry_point,
-                encoding,
-                source_bytes,
-                [],          # compile flags
-                rd_stage,
-            )
+            compile_flags = self._build_compile_flags(refl)
+            compile_flag_payload = self._compile_flag_payload(compile_flags)
+            try:
+                new_id, errors = controller.BuildTargetShader(
+                    entry_point,
+                    encoding,
+                    source_bytes,
+                    compile_flags,
+                    rd_stage,
+                )
+            except Exception as exc:
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    original_shader_hash=original_hash,
+                    success=False,
+                    error_message=f"BuildTargetShader failed: {exc}",
+                    error_code="shader_build_runtime_error",
+                    error_category="runtime",
+                    error_details={
+                        "event_id": int(event_id),
+                        "stage": stage.value.upper(),
+                        "session_id": str(session_id),
+                        "shader_id": _shader_id_str(shader_id),
+                        "entry_point": str(entry_point),
+                        "encoding": encoding_name,
+                        "disassembly_target": str(disasm_target),
+                        "compile_flags": compile_flag_payload,
+                        "exception_type": type(exc).__name__,
+                    },
+                    messages=messages,
+                )
 
             if errors:
                 # 区分硬失败（null resource）与仅有警告
@@ -238,15 +298,59 @@ class PatchEngine:
                         original_shader_hash=original_hash,
                         success=False,
                         error_message=f"Shader build failed: {errors}",
+                        error_code="shader_build_failed",
+                        error_category="runtime",
+                        error_details={
+                            "event_id": int(event_id),
+                            "stage": stage.value.upper(),
+                            "session_id": str(session_id),
+                            "shader_id": _shader_id_str(shader_id),
+                            "entry_point": str(entry_point),
+                            "encoding": encoding_name,
+                            "disassembly_target": str(disasm_target),
+                            "compile_flags": compile_flag_payload,
+                            "compiler_output": str(errors),
+                        },
+                        messages=messages,
                     )
                 # 非致命警告 —— 记录日志并继续。
                 logger.warning(
                     "Shader build for patch %s produced warnings: %s",
                     patch_spec.patch_id, errors,
                 )
+                messages.append(str(errors))
 
             # 6 -- 热替换资源
-            controller.ReplaceResource(shader_id, new_id)
+            try:
+                controller.ReplaceResource(shader_id, new_id)
+            except Exception as exc:
+                try:
+                    controller.FreeTargetResource(new_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to free replacement resource after ReplaceResource failure",
+                        exc_info=True,
+                    )
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    original_shader_hash=original_hash,
+                    success=False,
+                    error_message=f"ReplaceResource failed: {exc}",
+                    error_code="shader_replace_apply_failed",
+                    error_category="runtime",
+                    error_details={
+                        "event_id": int(event_id),
+                        "stage": stage.value.upper(),
+                        "session_id": str(session_id),
+                        "shader_id": _shader_id_str(shader_id),
+                        "replacement_shader_id": _shader_id_str(new_id),
+                        "entry_point": str(entry_point),
+                        "encoding": encoding_name,
+                        "compile_flags": compile_flag_payload,
+                        "exception_type": type(exc).__name__,
+                    },
+                    messages=messages,
+                )
 
             applied_hash = hashlib.sha256(
                 modified.encode("utf-8"),
@@ -275,6 +379,7 @@ class PatchEngine:
                 applied_to_shader_hash=applied_hash,
                 original_shader_hash=original_hash,
                 success=True,
+                messages=messages,
             )
 
         except Exception as exc:
@@ -285,6 +390,14 @@ class PatchEngine:
                 patch_id=patch_spec.patch_id,
                 success=False,
                 error_message=str(exc),
+                error_code="shader_replace_runtime_error",
+                error_category="runtime",
+                error_details={
+                    "event_id": int(event_id),
+                    "stage": stage.value.upper(),
+                    "patch_id": patch_spec.patch_id,
+                    "exception_type": type(exc).__name__,
+                },
             )
 
     async def revert_patch(
@@ -630,6 +743,47 @@ class PatchEngine:
             f"Disassembly targets={targets!r}, "
             f"Encodings={[str(e) for e in encodings]!r}"
         )
+
+    @staticmethod
+    def _build_compile_flags(refl: Any) -> Any:
+        """构造 ``BuildTargetShader`` 需要的真实 ``ShaderCompileFlags`` 对象。"""
+        rd = _get_rd()
+        compile_flags = rd.ShaderCompileFlags()
+        debug_info = getattr(refl, "debugInfo", None)
+        raw_flags = getattr(debug_info, "compileFlags", None) if debug_info is not None else None
+        if raw_flags is None:
+            return compile_flags
+        try:
+            cloned_flags = []
+            for item in list(raw_flags):
+                flag = rd.ShaderCompileFlag()
+                flag.name = str(getattr(item, "name", "") or "")
+                flag.value = str(getattr(item, "value", "") or "")
+                cloned_flags.append(flag)
+            compile_flags.flags = cloned_flags
+        except Exception:
+            logger.warning("Failed to clone shader compile flags from reflection", exc_info=True)
+        return compile_flags
+
+    @staticmethod
+    def _compile_flag_payload(compile_flags: Any) -> List[Dict[str, str]]:
+        """将 ``ShaderCompileFlags`` 转成诊断友好的结构化载荷。"""
+        raw_flags = getattr(compile_flags, "flags", None)
+        if raw_flags is None:
+            return []
+        try:
+            values = list(raw_flags)
+        except Exception:
+            return []
+        payload: List[Dict[str, str]] = []
+        for item in values:
+            payload.append(
+                {
+                    "name": str(getattr(item, "name", "") or ""),
+                    "value": str(getattr(item, "value", "") or ""),
+                }
+            )
+        return payload
 
     @staticmethod
     def _encoding_name(encoding: Any) -> str:

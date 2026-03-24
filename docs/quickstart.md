@@ -78,7 +78,7 @@ rdx call rd.session.get_context --format json
 rdx call rd.session.resume --format json
 ```
 
-当前平台会优先按持久化索引自动恢复本地 `.rdc` session；remote session 不会自动重连。
+当前平台会优先按持久化索引恢复本地与可恢复 remote session，并尽量复用原 `session_id`。如果 remote endpoint 真断开、bootstrap 失败或恢复元数据缺失，恢复会显式进入 `degraded` / error，而不是把上层调用静默打成新的未知 session。
 
 ### 可选：用 `VFS` 快速浏览当前 session
 
@@ -180,7 +180,8 @@ rdx.bat --non-interactive cli --daemon-context smoke daemon status
 - `rd.remote.connect` 会负责 Android `adb` bootstrap：选择设备、选择仓库内 APK、启动 `RenderDocCmd`、push `renderdoc.conf`、建立 `adb forward`。
 - 如果 `rd.remote.connect` 失败，不应继续盲跑依赖 `remote_id` 的后续链路。
 - 如果 `rd.capture.open_replay(options.remote_id=...)` 成功，原 `remote_id` 会被消费；如需新的 live handle，必须重新 `rd.remote.connect`。
-- 如果 daemon 之后重启，remote session 不会自动恢复；应重新 `rd.remote.connect` 并重新建立 remote replay 链路。
+- daemon / worker 重启后，平台会优先使用持久化 remote 元数据恢复同一个 `session_id`；只有 endpoint 真断开、bootstrap 失败或恢复元数据不足时，才需要重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay`。
+- 对 event-bound 链路，优先显式传入 `event_id`，并检查返回里的 `resolved_event_id`；`rd.shader.debug_start`、`rd.export.shader_bundle`、`rd.pipeline.get_shader`、`rd.shader.get_reflection`、`rd.shader.get_disassembly`、`rd.texture.get_pixel_value` 都不应再静默回退到别的 event。
 
 如果后续要把资源追踪结果再喂回事件链路，请额外注意：
 

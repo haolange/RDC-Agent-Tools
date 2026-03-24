@@ -341,6 +341,10 @@ class PatchResult(BaseModel):
     original_shader_hash: str = ""
     success: bool = True
     error_message: str = ""
+    error_code: str = ""
+    error_category: str = ""
+    error_details: Dict[str, Any] = Field(default_factory=dict)
+    messages: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

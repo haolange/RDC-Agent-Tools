@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 from rdx import server
+from rdx.core.session_manager import _map_graphics_api
 from rdx.context_snapshot import clear_context_snapshot
 
 
@@ -37,6 +38,7 @@ class FakeSessionManager:
     def __init__(self) -> None:
         self.backend_config: dict[str, object] | None = None
         self.closed: list[str] = []
+        self.controller = FakeController()
 
     async def create_session(self, *, backend_config: dict[str, object], replay_config: dict[str, object]) -> SimpleNamespace:
         self.backend_config = dict(backend_config)
@@ -47,6 +49,9 @@ class FakeSessionManager:
 
     async def close_session(self, session_id: str) -> None:
         self.closed.append(session_id)
+
+    def get_controller(self, session_id: str) -> FakeController:
+        return self.controller
 
 
 def test_dispatch_remote_connect_returns_live_handle_and_server_info(monkeypatch) -> None:
@@ -123,11 +128,12 @@ def test_dispatch_capture_open_replay_consumes_remote_handle(monkeypatch) -> Non
     async def _inline_offload(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
-    async def _fake_get_controller(session_id: str) -> FakeController:
-        return FakeController()
-
     monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
-    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(
+        server.server_runtime,
+        "_get_controller",
+        lambda session_id: (_ for _ in ()).throw(AssertionError("_dispatch_capture.open_replay should use SessionManager.get_controller directly")),
+    )
 
     server.server_runtime._session_manager = fake_manager
     server._runtime.captures = {
@@ -201,3 +207,7 @@ def test_consumed_remote_handle_reports_lifecycle_error() -> None:
         assert payload["details"]["consumed_by_session_id"] == "sess_demo"
     finally:
         server._runtime.consumed_remotes = original_consumed
+
+
+def test_session_manager_maps_numeric_graphics_api_values() -> None:
+    assert _map_graphics_api(SimpleNamespace(pipelineType=3)).value == "Vulkan"

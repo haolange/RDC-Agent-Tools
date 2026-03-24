@@ -57,11 +57,12 @@ from rdx.core.renderdoc_status import (
 from rdx.progress import ProgressReporter
 from rdx.timeout_policy import remote_connect_timeout_ms
 from rdx.core.event_graph import EventGraphService
+from rdx.core.patch_engine import PatchEngine
 from rdx.core.perf_service import PerfService
 from rdx.core.pipeline_service import PipelineService
 from rdx.core.render_service import RenderService
 from rdx.core.session_manager import SessionError, SessionManager
-from rdx.models import _new_id
+from rdx.models import PatchSpec, ShaderStage, _new_id
 from rdx.remote_bootstrap import (
     AndroidBootstrapOptions,
     AndroidRemoteBootstrapError,
@@ -129,6 +130,9 @@ class RemoteHandle:
     bootstrap: Dict[str, Any] = field(default_factory=dict)
     bootstrap_result: Any = None
     leased_session_id: str = ""
+    requested_host: str = ""
+    requested_port: int = 0
+    device_serial: str = ""
     detail: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -187,6 +191,7 @@ _render_service: Optional[RenderService] = None
 _pipeline_service: Optional[PipelineService] = None
 _perf_service: Optional[PerfService] = None
 _artifact_store: Optional[ArtifactStore] = None
+_patch_engine: Optional[PatchEngine] = None
 _runtime: RuntimeState = RuntimeState()
 _runtime_bootstrapped: bool = False
 
@@ -876,6 +881,20 @@ def _context_snapshot(context_id: Optional[str] = None) -> Dict[str, Any]:
     if remote_state == "live_handle" and (not remote_id or remote_id not in _runtime.remotes):
         snapshot["remote"] = default_context_snapshot(ctx).get("remote", {})
     elif remote_state == "session_owned" and owned_session_id not in _runtime.session_owned_remotes:
+        state_session = sessions.get(owned_session_id) if isinstance(sessions, dict) else None
+        state_remote = _session_record_remote_metadata(state_session) if isinstance(state_session, dict) else {}
+        state_endpoint = str(state_remote.get("endpoint") or "")
+        state_origin_remote_id = str(state_remote.get("origin_remote_id") or "")
+        if state_remote and str(state_session.get("backend_type") or "") == "remote":
+            snapshot["remote"] = {
+                "state": "session_owned",
+                "remote_id": "",
+                "origin_remote_id": state_origin_remote_id or str(remote_payload.get("origin_remote_id") or ""),
+                "endpoint": state_endpoint or str(remote_payload.get("endpoint") or ""),
+                "consumed_by_session_id": owned_session_id,
+            }
+            _runtime.context_snapshots[ctx] = snapshot
+            return snapshot
         origin_remote_id = str(remote_payload.get("origin_remote_id") or "")
         if origin_remote_id and origin_remote_id in _runtime.consumed_remotes:
             tombstone = _runtime.consumed_remotes[origin_remote_id]
@@ -919,6 +938,7 @@ def _set_context_runtime_session(
     backend_type: str,
     frame_index: int,
     active_event_id: int,
+    remote_metadata: Optional[Dict[str, Any]] = None,
     context_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     ctx = normalize_context_id(context_id or _runtime_context_id())
@@ -939,6 +959,7 @@ def _set_context_runtime_session(
         "is_live": True,
         "last_error": "",
         "updated_at_ms": _now_ms(),
+        "remote": dict(remote_metadata or existing.get("remote") or {}),
         "recovery": {
             "status": "ready",
             "last_attempt_ms": int(existing.get("recovery", {}).get("last_attempt_ms") if isinstance(existing.get("recovery"), dict) else 0 or 0),
@@ -1571,6 +1592,88 @@ def _resource_keys(resource_id: Any) -> List[str]:
     return keys
 
 
+def _is_null_resource_id(resource_id: Any) -> bool:
+    rd = _get_rd()
+    try:
+        return resource_id == rd.ResourceId()
+    except Exception:
+        return resource_id is None
+
+
+def _parse_remote_endpoint(endpoint: str) -> Tuple[str, int]:
+    text = str(endpoint or "").strip()
+    if not text:
+        return "", 0
+    if ":" not in text:
+        return text, 0
+    host, raw_port = text.rsplit(":", 1)
+    return host.strip(), _as_int(raw_port, 0)
+
+
+def _remote_session_metadata(
+    handle: RemoteHandle,
+    *,
+    remote_id: str,
+    endpoint: str,
+) -> Dict[str, Any]:
+    requested_host = str(handle.requested_host or handle.host or "").strip()
+    requested_port = int(handle.requested_port or handle.port or 0)
+    bootstrap = dict(handle.bootstrap or {})
+    return {
+        "transport": str(handle.transport or "renderdoc"),
+        "host": str(handle.host or "").strip(),
+        "port": int(handle.port or 0),
+        "endpoint": str(endpoint or _remote_url(handle.host, handle.port)),
+        "origin_remote_id": str(remote_id or handle.remote_id or "").strip(),
+        "ownership_state": "session_owned",
+        "device_serial": str(
+            handle.device_serial
+            or bootstrap.get("device_serial")
+            or ""
+        ).strip(),
+        "requested": {
+            "host": requested_host,
+            "port": requested_port,
+        },
+        "options": {
+            "install_apk": _as_bool(bootstrap.get("installed_apk"), True),
+            "push_config": _as_bool(bootstrap.get("pushed_config"), True),
+            "local_port": int(handle.port or 0),
+            "remote_port": _as_int(bootstrap.get("remote_port"), requested_port),
+        },
+        "bootstrap": {
+            "package_name": str(bootstrap.get("package_name") or "").strip(),
+            "activity_name": str(bootstrap.get("activity_name") or "").strip(),
+            "abi": str(bootstrap.get("abi") or "").strip(),
+            "remote_port": _as_int(bootstrap.get("remote_port"), requested_port),
+            "config_remote_path": str(bootstrap.get("config_remote_path") or "").strip(),
+        },
+    }
+
+
+def _session_record_remote_metadata(session_record: Dict[str, Any]) -> Dict[str, Any]:
+    remote = session_record.get("remote")
+    return dict(remote or {}) if isinstance(remote, dict) else {}
+
+
+def _session_replace_capability(session_id: str, controller: Any) -> Tuple[bool, str]:
+    try:
+        state = _session_manager.get_state(session_id)
+    except Exception:
+        state = None
+    methods = ("BuildTargetShader", "ReplaceResource", "RemoveReplacement", "FreeTargetResource")
+    missing = [name for name in methods if not hasattr(controller, name)]
+    supported = not missing
+    reason = (
+        "Replay controller exposes runtime shader replacement APIs."
+        if supported
+        else f"Replay controller is missing runtime shader replacement APIs: {', '.join(missing)}"
+    )
+    if state is not None:
+        state.capabilities.patch_supported = supported
+    return supported, reason
+
+
 _FILE_SUFFIX_MAP: Dict[str, str] = {
     "png": ".png",
     "jpg": ".jpg",
@@ -1945,9 +2048,38 @@ def _stage_candidates() -> List[str]:
     return ["vs", "hs", "ds", "gs", "ps", "cs", "ms", "as"]
 
 
+async def _ensure_live_session(session_id: str) -> ReplayHandle:
+    assert _session_manager is not None
+    replay = _runtime.replays.get(str(session_id))
+    if replay is not None:
+        try:
+            _session_manager.get_controller(str(session_id))
+            _session_manager.get_output(str(session_id))
+            return replay
+        except SessionError:
+            pass
+    await _recover_single_session_from_state(_runtime_context_id(), str(session_id))
+    replay = _runtime.replays.get(str(session_id))
+    if replay is None:
+        raise CoreError(
+            code="session_resume_failed",
+            message=f"Session could not be resumed: {session_id}",
+            category="runtime",
+            details={"session_id": str(session_id)},
+        )
+    return replay
+
+
 async def _get_controller(session_id: str) -> Any:
     assert _session_manager is not None
+    await _ensure_live_session(session_id)
     return _session_manager.get_controller(session_id)
+
+
+async def _get_output(session_id: str) -> Any:
+    assert _session_manager is not None
+    await _ensure_live_session(session_id)
+    return _session_manager.get_output(session_id)
 
 
 def _get_replay_handle(session_id: str) -> ReplayHandle:
@@ -2199,7 +2331,7 @@ async def _configure_texture_output_for_target(
     display.typeCast = rd.CompType.Typeless
     display.overlay = rd.DebugOverlay.NoOverlay
 
-    output = _session_manager.get_output(session_id)
+    output = await _get_output(session_id)
     await _offload(output.SetTextureDisplay, display)
     try:
         await _offload(output.Display)
@@ -2217,7 +2349,7 @@ def _subresource_to_dict(sub: Any) -> Dict[str, int]:
 
 
 async def _refresh_pixel_context(session_id: str, x: int, y: int) -> None:
-    output = _session_manager.get_output(session_id)
+    output = await _get_output(session_id)
     try:
         await _offload(output.SetPixelContextLocation, x, y)
     except Exception:
@@ -2374,6 +2506,323 @@ async def _restore_capture_handle_from_state(
     return handle
 
 
+async def _restore_remote_handle_from_session_record(
+    session_id: str,
+    session_record: Dict[str, Any],
+) -> RemoteHandle:
+    remote_record = _session_record_remote_metadata(session_record)
+    transport = str(remote_record.get("transport") or "renderdoc").strip() or "renderdoc"
+    endpoint = str(remote_record.get("endpoint") or "").strip()
+    endpoint_host = str(remote_record.get("host") or "").strip()
+    endpoint_port = _as_int(remote_record.get("port"), 0)
+    origin_remote_id = str(remote_record.get("origin_remote_id") or "").strip()
+    requested = _as_dict(remote_record.get("requested"), default={})
+    requested_host = str(requested.get("host") or endpoint_host or "127.0.0.1").strip() or "127.0.0.1"
+    requested_port = _as_int(
+        requested.get("port"),
+        _as_int(_as_dict(remote_record.get("bootstrap"), default={}).get("remote_port"), endpoint_port or 38920),
+    )
+    device_serial = str(remote_record.get("device_serial") or "").strip()
+    options = _as_dict(remote_record.get("options"), default={})
+    bootstrap_result = None
+    bootstrap_detail = _as_dict(remote_record.get("bootstrap"), default={})
+
+    if transport == "adb_android":
+        bootstrap_result = await _offload(
+            bootstrap_android_remote,
+            remote_port=_as_int(
+                options.get("remote_port"),
+                _as_int(bootstrap_detail.get("remote_port"), requested_port or 38920),
+            ),
+            options=AndroidBootstrapOptions(
+                device_serial=device_serial,
+                local_port=_as_int(options.get("local_port"), 0),
+                install_apk=_as_bool(options.get("install_apk"), True),
+                push_config=_as_bool(options.get("push_config"), True),
+            ),
+        )
+        bootstrap_detail = describe_android_remote(bootstrap_result)
+        endpoint_host = str(bootstrap_result.host)
+        endpoint_port = int(bootstrap_result.port)
+        requested_host = "127.0.0.1"
+        requested_port = _as_int(bootstrap_detail.get("remote_port"), requested_port or 38920)
+    else:
+        if (not endpoint_host or endpoint_port <= 0) and endpoint:
+            endpoint_host, endpoint_port = _parse_remote_endpoint(endpoint)
+        if not endpoint_host:
+            endpoint_host = requested_host
+        if endpoint_port <= 0:
+            endpoint_port = requested_port
+
+    if not endpoint_host or endpoint_port <= 0:
+        if bootstrap_result is not None:
+            try:
+                await _offload(cleanup_android_remote, bootstrap_result)
+            except Exception:
+                pass
+        raise RuntimeToolError(
+            "Remote recovery metadata is incomplete",
+            details={
+                "session_id": session_id,
+                "remote": remote_record,
+            },
+        )
+
+    url = _remote_url(endpoint_host, endpoint_port)
+    try:
+        await _offload(_wait_for_remote_endpoint, url, remote_connect_timeout_ms({}))
+        remote_server = await _offload(_create_remote_server_connection, url)
+        ping_status = await _offload(remote_server.Ping)
+        if not _status_ok(ping_status):
+            raise RuntimeToolError(
+                f"RemoteServer.Ping({url}) failed: {_status_text(ping_status)}",
+                details=build_renderdoc_error_details(
+                    ping_status,
+                    operation=f"RemoteServer.Ping({url})",
+                    source_layer="renderdoc_status",
+                    backend_type="remote",
+                    capture_context={"session_id": session_id, "endpoint": url},
+                    classification="remote_endpoint",
+                    fix_hint="Reconnect or re-bootstrap the remote endpoint before retrying recovery.",
+                ),
+            )
+        server_info = await _offload(
+            _collect_remote_server_info,
+            remote_server,
+            host=endpoint_host,
+            port=endpoint_port,
+            transport=transport,
+            bootstrap=bootstrap_detail,
+        )
+    except Exception:
+        if bootstrap_result is not None:
+            try:
+                await _offload(cleanup_android_remote, bootstrap_result)
+            except Exception:
+                pass
+        raise
+
+    return RemoteHandle(
+        remote_id=origin_remote_id or _new_id("remote"),
+        host=endpoint_host,
+        port=endpoint_port,
+        connected=True,
+        transport=transport,
+        remote_server=remote_server,
+        server_info=server_info,
+        bootstrap=bootstrap_detail,
+        bootstrap_result=bootstrap_result,
+        leased_session_id=str(session_id or ""),
+        requested_host=requested_host,
+        requested_port=requested_port,
+        device_serial=device_serial,
+        detail={
+            "connected": True,
+            "transport": transport,
+            "endpoint": url,
+            "requires_remote_device": transport == "adb_android",
+            "bootstrap": dict(bootstrap_detail) if bootstrap_detail else {},
+        },
+    )
+
+
+async def _recover_single_session_from_state(
+    context_id: str,
+    session_id: str,
+    *,
+    trace_id: str = "",
+) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id)
+    state = _context_state(ctx)
+    sessions = state.setdefault("sessions", {})
+    captures = state.setdefault("captures", {})
+    session_record = dict(sessions.get(str(session_id)) or {})
+    if not session_record:
+        raise CoreError(
+            code="session_not_found",
+            message=f"Unknown session_id: {session_id}",
+            category="not_found",
+            details={"session_id": str(session_id)},
+        )
+    if str(session_record.get("backend_type") or "local") == "remote" and not _session_record_remote_metadata(session_record):
+        raise RuntimeToolError(
+            "Remote session recovery metadata is missing",
+            details={"session_id": str(session_id)},
+        )
+
+    try:
+        existing = _session_manager.get_state(str(session_id))
+    except Exception:
+        existing = None
+    if existing is not None:
+        try:
+            await _session_manager.close_session(str(session_id))
+        except Exception:
+            pass
+
+    capture_file_id = str(session_record.get("capture_file_id") or "")
+    capture_record = captures.get(capture_file_id) if capture_file_id else None
+    capture_path = str(session_record.get("rdc_path") or (capture_record or {}).get("file_path") or "").strip()
+    capture_meta = _capture_file_metadata(capture_path)
+    if not capture_meta.get("file_path") or not Path(str(capture_meta.get("file_path"))).is_file():
+        raise RuntimeToolError(
+            "capture file missing",
+            details={"session_id": str(session_id), "capture_path": capture_path},
+        )
+
+    if not capture_file_id:
+        capture_file_id = _new_id("capf")
+        session_record["capture_file_id"] = capture_file_id
+
+    capture_handle = await _restore_capture_handle_from_state(
+        ctx,
+        capture_file_id,
+        {
+            "capture_file_id": capture_file_id,
+            "file_path": str(capture_meta.get("file_path") or capture_path),
+            "read_only": True,
+            "driver": str((capture_record or {}).get("driver") or ""),
+        },
+    )
+    if capture_handle is None:
+        raise RuntimeToolError(
+            "capture handle restore failed",
+            details={"session_id": str(session_id), "capture_file_id": capture_file_id},
+        )
+
+    backend_type = str(session_record.get("backend_type") or "local")
+    backend_config: Dict[str, Any] = {"type": "local"}
+    remote_handle_for_session: Optional[RemoteHandle] = None
+    remote_endpoint = ""
+    if backend_type == "remote":
+        remote_handle_for_session = await _restore_remote_handle_from_session_record(
+            str(session_id),
+            session_record,
+        )
+        remote_endpoint = str(remote_handle_for_session.detail.get("endpoint") or _remote_url(remote_handle_for_session.host, remote_handle_for_session.port))
+        backend_config = {
+            "type": "remote",
+            "host": remote_handle_for_session.host,
+            "port": remote_handle_for_session.port,
+            "transport": remote_handle_for_session.transport,
+            "remote_id": remote_handle_for_session.remote_id,
+            "remote_server": remote_handle_for_session.remote_server,
+        }
+
+    if trace_id:
+        _record_operation_stage(
+            ctx,
+            trace_id=trace_id,
+            stage="resume_session",
+            message=f"Reopening {backend_type} session {session_id}",
+            details={"session_id": session_id, "capture_file_id": capture_file_id, "backend_type": backend_type},
+        )
+
+    try:
+        await _session_manager.create_session(
+            backend_config=backend_config,
+            replay_config={},
+            preferred_session_id=str(session_id),
+        )
+        await _session_manager.open_capture(str(session_id), str(capture_handle.file_path))
+        controller = _session_manager.get_controller(str(session_id))
+        roots = await _offload(controller.GetRootActions)
+        _, by_event = _build_action_index(roots)
+        desired_event_id = int(session_record.get("active_event_id") or 0)
+        if desired_event_id <= 0 or desired_event_id not in by_event:
+            desired_event_id = _pick_default_event_id(roots)
+        if desired_event_id > 0:
+            await _offload(controller.SetFrameEvent, desired_event_id, True)
+        replay = ReplayHandle(
+            session_id=str(session_id),
+            capture_file_id=str(capture_file_id),
+            frame_index=int(session_record.get("frame_index") or 0),
+            active_event_id=int(desired_event_id or 0),
+        )
+        _runtime.replays[str(session_id)] = replay
+        captures[str(capture_file_id)] = _capture_record_from_runtime(str(capture_file_id))
+        remote_metadata: Dict[str, Any] = {}
+        if remote_handle_for_session is not None:
+            origin_remote_id = str(_session_record_remote_metadata(session_record).get("origin_remote_id") or remote_handle_for_session.remote_id or _new_id("remote"))
+            _runtime.session_owned_remotes[str(session_id)] = remote_handle_for_session
+            _runtime.consumed_remotes[origin_remote_id] = ConsumedRemoteHandle(
+                remote_id=origin_remote_id,
+                endpoint=remote_endpoint,
+                transport=remote_handle_for_session.transport,
+                consumed_by_session_id=str(session_id),
+                server_info=dict(remote_handle_for_session.server_info),
+            )
+            _set_context_remote_session_owned(origin_remote_id, str(session_id), remote_endpoint, context_id=ctx)
+            remote_metadata = _remote_session_metadata(
+                remote_handle_for_session,
+                remote_id=origin_remote_id,
+                endpoint=remote_endpoint,
+            )
+        session_record["rdc_path"] = str(capture_handle.file_path)
+        session_record["file_fingerprint"] = str(capture_meta.get("file_fingerprint") or "")
+        session_record["file_size_bytes"] = int(capture_meta.get("file_size_bytes") or 0)
+        session_record["active_event_id"] = int(desired_event_id or 0)
+        session_record["state"] = "active"
+        session_record["is_live"] = True
+        session_record["last_error"] = ""
+        session_record["updated_at_ms"] = _now_ms()
+        if remote_metadata:
+            session_record["remote"] = remote_metadata
+        session_record["recovery"] = {
+            **dict(session_record.get("recovery") or {}),
+            "status": "recovered",
+            "last_attempt_ms": _now_ms(),
+            "last_success_ms": _now_ms(),
+            "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
+            "last_error": "",
+        }
+        sessions[str(session_id)] = session_record
+        state["captures"] = captures
+        state["sessions"] = sessions
+        state = _select_session_from_state(state, session_id=str(session_id), capture_file_id=str(capture_file_id))
+        _store_context_state(state, ctx)
+        _sync_context_metrics(ctx)
+        _set_context_runtime_session(
+            str(session_id),
+            capture_file_id=str(capture_file_id),
+            backend_type=backend_type,
+            frame_index=int(session_record.get("frame_index") or 0),
+            active_event_id=int(desired_event_id or 0),
+            remote_metadata=session_record.get("remote") if isinstance(session_record.get("remote"), dict) else {},
+            context_id=ctx,
+        )
+        return sessions[str(session_id)]
+    except Exception as exc:
+        try:
+            await _session_manager.close_session(str(session_id))
+        except Exception:
+            pass
+        _runtime.replays.pop(str(session_id), None)
+        if remote_handle_for_session is not None:
+            _runtime.session_owned_remotes.pop(str(session_id), None)
+            try:
+                await _offload(_disconnect_remote_handle_sync, remote_handle_for_session)
+            except Exception:
+                pass
+        session_record["state"] = "degraded"
+        session_record["is_live"] = False
+        session_record["last_error"] = str(exc)
+        session_record["updated_at_ms"] = _now_ms()
+        session_record["recovery"] = {
+            **dict(session_record.get("recovery") or {}),
+            "status": "degraded",
+            "last_attempt_ms": _now_ms(),
+            "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
+            "last_error": str(exc),
+        }
+        sessions[str(session_id)] = session_record
+        state["sessions"] = sessions
+        _store_context_state(state, ctx)
+        _sync_context_metrics(ctx)
+        _sync_context_snapshot_from_state(ctx)
+        raise
+
+
 async def _recover_context_sessions(context_id: str) -> Dict[str, Any]:
     ctx = normalize_context_id(context_id)
     state = _context_state(ctx)
@@ -2426,132 +2875,20 @@ async def _recover_context_sessions(context_id: str) -> Dict[str, Any]:
             sessions[str(session_id)] = session_record
             degraded.append(str(session_id))
             continue
-        if str(session_record.get("backend_type") or "local") != "local":
-            session_record["state"] = "degraded"
-            session_record["is_live"] = False
-            session_record["last_error"] = "remote sessions require explicit reconnect"
-            session_record["recovery"] = {
-                **dict(session_record.get("recovery") or {}),
-                "status": "degraded",
-                "last_attempt_ms": _now_ms(),
-                "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
-                "last_error": "remote sessions require explicit reconnect",
-            }
-            sessions[str(session_id)] = session_record
-            degraded.append(str(session_id))
-            continue
         if session_id in _runtime.replays:
             recovered.append(str(session_id))
             continue
-        capture_file_id = str(session_record.get("capture_file_id") or "")
-        capture_record = captures.get(capture_file_id) if capture_file_id else None
-        capture_path = str(session_record.get("rdc_path") or (capture_record or {}).get("file_path") or "").strip()
-        capture_meta = _capture_file_metadata(capture_path)
-        if not capture_meta.get("file_path") or not Path(str(capture_meta.get("file_path"))).is_file():
-            session_record["state"] = "degraded"
-            session_record["is_live"] = False
-            session_record["last_error"] = "capture file missing"
-            session_record["recovery"] = {
-                **dict(session_record.get("recovery") or {}),
-                "status": "degraded",
-                "last_attempt_ms": _now_ms(),
-                "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
-                "last_error": "capture file missing",
-            }
-            sessions[str(session_id)] = session_record
-            degraded.append(str(session_id))
-            continue
-        if not capture_file_id:
-            capture_file_id = _new_id("capf")
-            session_record["capture_file_id"] = capture_file_id
-        capture_handle = await _restore_capture_handle_from_state(
-            ctx,
-            capture_file_id,
-            {
-                "capture_file_id": capture_file_id,
-                "file_path": str(capture_meta.get("file_path") or capture_path),
-                "read_only": True,
-                "driver": str((capture_record or {}).get("driver") or ""),
-                "file_size_bytes": int(capture_meta.get("file_size_bytes") or 0),
-                "file_mtime_ms": int(capture_meta.get("file_mtime_ms") or 0),
-                "file_fingerprint": str(capture_meta.get("file_fingerprint") or ""),
-            },
-        )
-        if capture_handle is None:
-            session_record["state"] = "degraded"
-            session_record["is_live"] = False
-            session_record["last_error"] = "capture handle restore failed"
-            sessions[str(session_id)] = session_record
-            degraded.append(str(session_id))
-            continue
-        captures[str(capture_file_id)] = _capture_record_from_runtime(capture_file_id)
         try:
-            assert _session_manager is not None
-            _record_operation_stage(
+            updated_record = await _recover_single_session_from_state(
                 ctx,
+                str(session_id),
                 trace_id=trace_id,
-                stage="resume_session",
-                message=f"Reopening local session {session_id}",
-                details={"session_id": session_id, "capture_file_id": capture_file_id},
             )
-            await _session_manager.create_session(
-                backend_config={"type": "local"},
-                replay_config={},
-                preferred_session_id=str(session_id),
-            )
-            await _session_manager.open_capture(str(session_id), str(capture_handle.file_path))
-            controller = await _get_controller(str(session_id))
-            roots = await _offload(controller.GetRootActions)
-            _, by_event = _build_action_index(roots)
-            desired_event_id = int(session_record.get("active_event_id") or 0)
-            if desired_event_id <= 0 or desired_event_id not in by_event:
-                desired_event_id = _pick_default_event_id(roots)
-            if desired_event_id > 0:
-                await _offload(controller.SetFrameEvent, desired_event_id, True)
-            replay = ReplayHandle(
-                session_id=str(session_id),
-                capture_file_id=str(capture_file_id),
-                frame_index=int(session_record.get("frame_index") or 0),
-                active_event_id=int(desired_event_id or 0),
-            )
-            _runtime.replays[str(session_id)] = replay
-            session_record["rdc_path"] = str(capture_handle.file_path)
-            session_record["file_fingerprint"] = str(capture_meta.get("file_fingerprint") or "")
-            session_record["file_size_bytes"] = int(capture_meta.get("file_size_bytes") or 0)
-            session_record["active_event_id"] = int(desired_event_id or 0)
-            session_record["state"] = "active"
-            session_record["is_live"] = True
-            session_record["last_error"] = ""
-            session_record["updated_at_ms"] = _now_ms()
-            session_record["recovery"] = {
-                **dict(session_record.get("recovery") or {}),
-                "status": "recovered",
-                "last_attempt_ms": _now_ms(),
-                "last_success_ms": _now_ms(),
-                "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
-                "last_error": "",
-            }
-            sessions[str(session_id)] = session_record
+            sessions[str(session_id)] = updated_record
             live_count += 1
             recovered.append(str(session_id))
         except Exception as exc:
-            try:
-                await _session_manager.close_session(str(session_id))
-            except Exception:
-                pass
-            _runtime.replays.pop(str(session_id), None)
-            session_record["state"] = "degraded"
-            session_record["is_live"] = False
-            session_record["last_error"] = str(exc)
-            session_record["updated_at_ms"] = _now_ms()
-            session_record["recovery"] = {
-                **dict(session_record.get("recovery") or {}),
-                "status": "degraded",
-                "last_attempt_ms": _now_ms(),
-                "attempt_count": int(dict(session_record.get("recovery") or {}).get("attempt_count") or 0) + 1,
-                "last_error": str(exc),
-            }
-            sessions[str(session_id)] = session_record
+            sessions[str(session_id)] = dict(state.get("sessions", {}).get(str(session_id)) or session_record)
             degraded.append(str(session_id))
 
     recovery = dict(state.get("recovery") or {})
@@ -2595,7 +2932,7 @@ async def ensure_context_ready(context_id: Optional[str] = None) -> Dict[str, An
 
 async def runtime_startup() -> None:
     global _config, _session_manager, _event_graph_service, _render_service
-    global _pipeline_service, _perf_service
+    global _pipeline_service, _perf_service, _patch_engine
     global _artifact_store, _runtime_bootstrapped
     if _runtime_bootstrapped:
         return
@@ -2619,6 +2956,7 @@ async def runtime_startup() -> None:
     _render_service = RenderService()
     _pipeline_service = PipelineService()
     _perf_service = PerfService()
+    _patch_engine = PatchEngine()
 
     _runtime.config = _serialize_runtime_config()
     _runtime.initialized = False
@@ -2642,6 +2980,13 @@ async def runtime_shutdown() -> None:
             except Exception:
                 pass
     if _session_manager is not None:
+        if _patch_engine is not None:
+            for session_id in list(_runtime.replays.keys()):
+                try:
+                    await _patch_engine.revert_all(session_id, _session_manager)
+                except Exception:
+                    pass
+        _runtime.shader_replacements.clear()
         for info in list(_session_manager.list_sessions()):
             try:
                 await _session_manager.close_session(info.session_id)
@@ -2689,6 +3034,13 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
             "remote_connections": len(_runtime.remotes) + len(_runtime.session_owned_remotes),
             "shader_debugs": len(_runtime.shader_debugs),
         }
+        if _patch_engine is not None:
+            for sid in list(_runtime.replays.keys()):
+                try:
+                    await _patch_engine.revert_all(sid, _session_manager)
+                except Exception:
+                    pass
+        _runtime.shader_replacements.clear()
         for sid in list(_runtime.replays.keys()):
             try:
                 await _session_manager.close_session(sid)
@@ -2895,6 +3247,12 @@ async def _core_capabilities(*, detail: str) -> Dict[str, Any]:
         "shader_debug": _capability_entry(
             True,
             reason="Requires an opened replay session whose API reports shader debugging support.",
+            optional=True,
+            source="renderdoc_runtime",
+        ),
+        "shader_replace": _capability_entry(
+            True,
+            reason="Requires an opened replay session whose replay backend exposes runtime shader replacement APIs.",
             optional=True,
             source="renderdoc_runtime",
         ),
@@ -3659,7 +4017,11 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
         try:
             cap_info = await _session_manager.open_capture(session_info.session_id, handle.file_path)
             _progress("capture_open_done", "Capture opened for replay", progress_pct=0.82, details={"session_id": session_info.session_id})
-            controller = await _get_controller(session_info.session_id)
+            # The session already exists in SessionManager after open_capture().
+            # Avoid recovery-aware helpers until _runtime.replays/context state is
+            # populated for the first time, otherwise a fresh session can be
+            # misclassified as missing and surface as session_not_found.
+            controller = _session_manager.get_controller(session_info.session_id)
             roots = await _offload(controller.GetRootActions)
             active_event_id = int(getattr(roots[0], "eventId", 0)) if roots else 0
             _progress("root_actions_loaded", "Frame actions loaded", progress_pct=0.91, details={"active_event_id": active_event_id})
@@ -3671,6 +4033,7 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
             )
             if remote_handle_for_session is not None:
                 _runtime.remotes.pop(remote_id, None)
+                remote_handle_for_session.leased_session_id = session_info.session_id
                 _runtime.session_owned_remotes[session_info.session_id] = remote_handle_for_session
                 _runtime.consumed_remotes[remote_id] = ConsumedRemoteHandle(
                     remote_id=remote_id,
@@ -3686,6 +4049,15 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                 backend_type=backend_type,
                 frame_index=0,
                 active_event_id=active_event_id,
+                remote_metadata=(
+                    _remote_session_metadata(
+                        remote_handle_for_session,
+                        remote_id=remote_id,
+                        endpoint=remote_endpoint,
+                    )
+                    if remote_handle_for_session is not None
+                    else {}
+                ),
             )
             _progress("context_synced", "Replay context synchronized", progress_pct=1.0, details={"session_id": session_info.session_id, "capture_file_id": capture_file_id})
             api_properties = {}
@@ -3719,6 +4091,12 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
         _require(args, "session_id")
         session_id = str(args["session_id"])
         owned_remote = _runtime.session_owned_remotes.pop(session_id, None)
+        if _patch_engine is not None:
+            try:
+                await _patch_engine.revert_all(session_id, _session_manager)
+            except Exception:
+                pass
+        _runtime.shader_replacements.pop(session_id, None)
         _runtime.replays.pop(session_id, None)
         await _session_manager.close_session(session_id)
         if owned_remote is not None:
@@ -3738,6 +4116,7 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
 async def _dispatch_replay(action: str, args: Dict[str, Any]) -> str:
     _require(args, "session_id")
     session_id = str(args["session_id"])
+    await _ensure_live_session(session_id)
     replay = _get_replay_handle(session_id)
     controller = await _get_controller(session_id)
 
@@ -4090,9 +4469,11 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
     if resolved_event_id > 0:
         await _offload(controller.SetFrameEvent, resolved_event_id, True)
     pipe = await _offload(controller.GetPipelineState)
+    def _pipeline_ok(**fields: Any) -> str:
+        return _ok(resolved_event_id=int(resolved_event_id), **fields)
 
     if action == "get_state":
-        return _ok(pipeline_state=snapshot_dict)
+        return _pipeline_ok(pipeline_state=snapshot_dict)
     if action == "get_state_summary":
         summary = {
             "api": snapshot_dict.get("api"),
@@ -4102,7 +4483,7 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
             "topology": snapshot_dict.get("topology", ""),
             "viewport": snapshot_dict.get("viewport", {}),
         }
-        return _ok(summary=summary)
+        return _pipeline_ok(summary=summary)
     if action == "get_stage_state":
         rd_stage = _rd_stage(stage)
         shader_id = await _offload(pipe.GetShader, rd_stage)
@@ -4115,9 +4496,9 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
             "samplers": [],
             "constant_blocks": [],
         }
-        return _ok(stage_state=state)
+        return _pipeline_ok(stage_state=state)
     if action == "get_vertex_input":
-        return _ok(ia={"topology": snapshot_dict.get("topology"), "vertex_buffers": snapshot_dict.get("bindings", [])})
+        return _pipeline_ok(ia={"topology": snapshot_dict.get("topology"), "vertex_buffers": snapshot_dict.get("bindings", [])})
     if action == "get_vertex_buffers":
         vbs = []
         try:
@@ -4133,7 +4514,7 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
                 )
         except Exception:
             pass
-        return _ok(vertex_buffers=vbs)
+        return _pipeline_ok(vertex_buffers=vbs)
     if action == "get_index_buffer":
         index_buffer = {}
         try:
@@ -4145,49 +4526,56 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
             }
         except Exception:
             index_buffer = {}
-        return _ok(index_buffer=index_buffer)
+        return _pipeline_ok(index_buffer=index_buffer)
     if action == "get_primitive_topology":
-        return _ok(topology={"topology": snapshot_dict.get("topology", "")})
+        return _pipeline_ok(topology={"topology": snapshot_dict.get("topology", "")})
     if action == "get_viewports_scissors":
-        return _ok(viewports=[snapshot_dict.get("viewport", {})], scissors=[snapshot_dict.get("scissor", {})])
+        return _pipeline_ok(viewports=[snapshot_dict.get("viewport", {})], scissors=[snapshot_dict.get("scissor", {})])
     if action == "get_rasterizer_state":
-        return _ok(rasterizer={})
+        return _pipeline_ok(rasterizer={})
     if action == "get_multisample_state":
-        return _ok(multisample={})
+        return _pipeline_ok(multisample={})
     if action == "get_blend_state":
-        return _ok(blend={"states": snapshot_dict.get("blend_states", [])})
+        return _pipeline_ok(blend={"states": snapshot_dict.get("blend_states", [])})
     if action == "get_depth_stencil_state":
-        return _ok(depth_stencil=snapshot_dict.get("depth_stencil", {}))
+        return _pipeline_ok(depth_stencil=snapshot_dict.get("depth_stencil", {}))
     if action == "get_output_targets":
-        return _ok(framebuffer={"render_targets": snapshot_dict.get("render_targets", []), "depth_target": snapshot_dict.get("depth_target")})
+        return _pipeline_ok(framebuffer={"render_targets": snapshot_dict.get("render_targets", []), "depth_target": snapshot_dict.get("depth_target")})
     if action == "get_render_targets":
-        return _ok(render_targets=snapshot_dict.get("render_targets", []))
+        return _pipeline_ok(render_targets=snapshot_dict.get("render_targets", []))
     if action == "get_depth_target":
-        return _ok(depth_target=snapshot_dict.get("depth_target"))
+        return _pipeline_ok(depth_target=snapshot_dict.get("depth_target"))
     if action == "get_resource_bindings":
         bindings = await _pipeline_service.get_resource_bindings(session_id, resolved_event_id, _session_manager)
-        return _ok(bindings=[b.model_dump(mode="json") for b in bindings])
+        return _pipeline_ok(bindings=[b.model_dump(mode="json") for b in bindings])
     if action == "get_uav_bindings":
         all_bindings = await _pipeline_service.get_resource_bindings(session_id, resolved_event_id, _session_manager)
         uavs = [b.model_dump(mode="json") for b in all_bindings if b.type.upper() == "UAV"]
-        return _ok(uavs=uavs)
+        return _pipeline_ok(uavs=uavs)
     if action == "get_sampler_bindings":
-        return _ok(samplers=[])
+        return _pipeline_ok(samplers=[])
     if action == "get_constant_buffers":
-        return _ok(constant_buffers=[])
+        return _pipeline_ok(constant_buffers=[])
     if action == "get_push_constants":
-        return _ok(push_constants=[])
+        return _pipeline_ok(push_constants=[])
     if action == "get_dynamic_state":
-        return _ok(dynamic_state={})
+        return _pipeline_ok(dynamic_state={})
     if action == "get_root_signature":
-        return _ok(root_signature={})
+        return _pipeline_ok(root_signature={})
     if action == "get_descriptor_heaps":
-        return _ok(descriptor_heaps=[])
+        return _pipeline_ok(descriptor_heaps=[])
     if action == "get_resource_states":
-        return _ok(resource_states=[])
+        return _pipeline_ok(resource_states=[])
     if action == "get_shader":
         rd_stage = _rd_stage(stage)
         shader_id = await _offload(pipe.GetShader, rd_stage)
+        if _is_null_resource_id(shader_id):
+            return _err(
+                f"No shader bound at stage {stage.upper()} for event {int(resolved_event_id)}",
+                code="shader_not_bound",
+                category="runtime",
+                details={"session_id": session_id, "resolved_event_id": int(resolved_event_id), "stage": stage.upper()},
+            )
         reflection = await _offload(pipe.GetShaderReflection, rd_stage)
         shader = {
             "stage": stage.upper(),
@@ -4195,7 +4583,7 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
             "entry": str(getattr(reflection, "entryPoint", "")) if reflection else "",
             "encoding": str(getattr(reflection, "encoding", "")) if reflection else "",
         }
-        return _ok(shader=shader)
+        return _pipeline_ok(shader=shader)
     return _err(f"Unsupported pipeline action: {action}")
 
 
@@ -4854,10 +5242,20 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
     session_id = str(args["session_id"])
     assert _render_service is not None
 
-    async def read_npz(texture_id: Any, subresource: Optional[Dict[str, Any]], region: Optional[Dict[str, Any]]) -> Tuple[Any, Dict[str, Any], Optional[str]]:
-        event_id = _active_event(session_id)
-        if event_id <= 0:
-            event_id = await _ensure_event(session_id, None)
+    async def read_npz(
+        texture_id: Any,
+        subresource: Optional[Dict[str, Any]],
+        region: Optional[Dict[str, Any]],
+        *,
+        event_id_override: Optional[int] = None,
+    ) -> Tuple[Any, Dict[str, Any], Optional[str], int]:
+        requested_event = _as_int(event_id_override, 0) if event_id_override is not None else 0
+        if requested_event > 0:
+            event_id = await _ensure_event(session_id, requested_event)
+        else:
+            event_id = _active_event(session_id)
+            if event_id <= 0:
+                event_id = await _ensure_event(session_id, None)
         rid = await _resolve_texture_id(session_id, texture_id, event_id=event_id)
         artifact_ref, stats = await _render_service.readback_texture(
             session_id=session_id,
@@ -4868,7 +5266,7 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
             subresource=subresource,
             region=region,
         )
-        return artifact_ref, stats, _artifact_path(artifact_ref)
+        return artifact_ref, stats, _artifact_path(artifact_ref), int(event_id)
 
     if action in {"get_data", "get_subresource_data"}:
         _require(args, "texture_id")
@@ -4879,13 +5277,19 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
                 "slice": _as_int(args.get("slice"), subresource.get("slice", 0)),
                 "sample": _as_int(args.get("sample"), subresource.get("sample", 0)),
             }
-        artifact_ref, stats, artifact_path = await read_npz(args.get("texture_id"), subresource, None)
+        artifact_ref, stats, artifact_path, resolved_event_id = await read_npz(
+            args.get("texture_id"),
+            subresource,
+            None,
+            event_id_override=_as_int(args.get("event_id"), 0) if args.get("event_id") is not None else None,
+        )
         if artifact_path is None:
             return _err("Failed to store texture data artifact")
         result: Dict[str, Any] = {
             "artifact_path": artifact_path,
             "stats": stats,
             "byte_size": int(getattr(artifact_ref, "bytes", 0)),
+            "resolved_event_id": int(resolved_event_id),
         }
         if _as_bool(args.get("as_base64"), False):
             import base64
@@ -4901,7 +5305,10 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
 
     if action == "get_pixel_value":
         _require(args, "texture_id", "x", "y")
-        event_id = await _ensure_event(session_id, None)
+        event_id = await _ensure_event(
+            session_id,
+            _as_int(args.get("event_id"), 0) if args.get("event_id") is not None else None,
+        )
         rid = await _resolve_texture_id(session_id, args["texture_id"], event_id=event_id)
         pixel = await _render_service.pick_pixel(
             session_id=session_id,
@@ -4911,7 +5318,7 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
             y=_as_int(args["y"]),
             session_manager=_session_manager,
         )
-        return _ok(pixel=pixel)
+        return _ok(pixel=pixel, resolved_event_id=int(event_id))
 
     if action == "get_region_values":
         _require(args, "texture_id", "rect")
@@ -4922,12 +5329,20 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
             "slice": _as_int(args.get("slice"), 0),
             "sample": _as_int(args.get("sample"), 0),
         }
-        artifact_ref, stats, artifact_path = await read_npz(args["texture_id"], subresource, region)
-        return _ok(values_path=artifact_path, stats=stats)
+        artifact_ref, stats, artifact_path, resolved_event_id = await read_npz(
+            args["texture_id"],
+            subresource,
+            region,
+            event_id_override=_as_int(args.get("event_id"), 0) if args.get("event_id") is not None else None,
+        )
+        return _ok(values_path=artifact_path, stats=stats, resolved_event_id=int(resolved_event_id))
 
     if action == "get_min_max":
         _require(args, "texture_id")
-        event_id = await _ensure_event(session_id, None)
+        event_id = await _ensure_event(
+            session_id,
+            _as_int(args.get("event_id"), 0) if args.get("event_id") is not None else None,
+        )
         rid = await _resolve_texture_id(session_id, args["texture_id"], event_id=event_id)
         stats = await _render_service.get_texture_stats(
             session_id=session_id,
@@ -4935,7 +5350,7 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
             texture_id=rid,
             session_manager=_session_manager,
         )
-        return _ok(min_max=stats)
+        return _ok(min_max=stats, resolved_event_id=int(event_id))
 
     if action == "get_histogram":
         _require(args, "texture_id")
@@ -4944,7 +5359,12 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
         except Exception as exc:
             return _err(f"numpy unavailable: {exc}")
         subresource = {"mip": _as_int(args.get("mip"), 0), "slice": _as_int(args.get("slice"), 0), "sample": 0}
-        artifact_ref, stats, artifact_path = await read_npz(args["texture_id"], subresource, None)
+        artifact_ref, stats, artifact_path, resolved_event_id = await read_npz(
+            args["texture_id"],
+            subresource,
+            None,
+            event_id_override=_as_int(args.get("event_id"), 0) if args.get("event_id") is not None else None,
+        )
         if artifact_path is None:
             return _err("Failed to generate histogram input")
         with np.load(artifact_path) as payload:
@@ -4964,12 +5384,15 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
             high = _as_float(rng.get("max"), float(channel_data.max()))
             hist, edges = np.histogram(channel_data, bins=bins, range=(low, high))
             out[c] = {"bins": hist.tolist(), "edges": edges.tolist()}
-        return _ok(histogram=out)
+        return _ok(histogram=out, resolved_event_id=int(resolved_event_id))
 
     if action == "get_pixel_history":
         _require(args, "texture_id", "x", "y")
         controller = await _get_controller(session_id)
-        event_id = await _ensure_event(session_id, None)
+        event_id = await _ensure_event(
+            session_id,
+            _as_int(args.get("event_id"), 0) if args.get("event_id") is not None else None,
+        )
         rid = await _resolve_texture_id(session_id, args["texture_id"], event_id=event_id)
         rd = _get_rd()
         sub = rd.Subresource()
@@ -4987,7 +5410,7 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
         except Exception as exc:
             return _err(f"PixelHistory unavailable: {exc}")
         history = [_pixel_history_item_payload(item) for item in history_raw]
-        return _ok(history=history)
+        return _ok(history=history, resolved_event_id=int(event_id))
 
     if action == "render_overlay":
         event_id = _as_int(args.get("event_id"), _active_event(session_id))
@@ -5087,8 +5510,8 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
             _require(args, "tex_a", "tex_b")
             tex_a = _as_dict(args["tex_a"])
             tex_b = _as_dict(args["tex_b"])
-            art_a, _, path_a = await read_npz(tex_a.get("texture_id"), _as_dict(tex_a.get("subresource"), default={}), None)
-            art_b, _, path_b = await read_npz(tex_b.get("texture_id"), _as_dict(tex_b.get("subresource"), default={}), None)
+            art_a, _, path_a, _ = await read_npz(tex_a.get("texture_id"), _as_dict(tex_a.get("subresource"), default={}), None)
+            art_b, _, path_b, _ = await read_npz(tex_b.get("texture_id"), _as_dict(tex_b.get("subresource"), default={}), None)
             if not path_a or not path_b:
                 return _err("Could not read textures for diff")
             with np.load(path_a) as p1, np.load(path_b) as p2:
@@ -5105,8 +5528,16 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
             metrics = {"mse": mse, "max_abs": max_abs, "psnr": psnr}
             return _ok(diff=metrics)
         _require(args, "texture_id")
-        _, stats, _ = await read_npz(args["texture_id"], {"mip": _as_int(args.get("mip"), 0), "slice": _as_int(args.get("slice"), 0), "sample": _as_int(args.get("sample"), 0)}, None)
-        return _ok(stats=stats)
+        _, stats, _, resolved_event_id = await read_npz(
+            args["texture_id"],
+            {"mip": _as_int(args.get("mip"), 0), "slice": _as_int(args.get("slice"), 0), "sample": _as_int(args.get("sample"), 0)},
+            None,
+            event_id_override=_as_int(args.get("event_id"), 0) if args.get("event_id") is not None else None,
+        )
+        return _ok(
+            stats={**dict(stats or {}), "event_id": int(resolved_event_id)},
+            resolved_event_id=int(resolved_event_id),
+        )
 
     return _err(f"Unsupported texture action: {action}")
 
@@ -5196,9 +5627,14 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             "viable_hit_count": 0,
             "primitive_ids": [],
         }
-        synthetic_context: Optional[Dict[str, Any]] = None
-        synthetic_history_summary: Dict[str, Any] = {}
-        synthetic_target_source = ""
+        target_config_failures = 0
+        configured_target_count = 0
+        debug_attempt_count = 0
+        debug_exception_count = 0
+        invalid_trace_count = 0
+        cross_event_rejections = 0
+        debugger_missing_count = 0
+        matched_event_hit_seen = False
 
         for target_source, target_candidate in target_candidates:
             try:
@@ -5210,6 +5646,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 )
                 await _refresh_pixel_context(session_id, x, y)
             except Exception as exc:
+                target_config_failures += 1
                 attempts_log.append(
                     {
                         "target_source": target_source,
@@ -5221,10 +5658,12 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                             "target": dict(target_candidate),
                         },
                         "error": f"Failed to configure debug target: {exc}",
+                        "exception_type": type(exc).__name__,
                     },
                 )
                 continue
 
+            configured_target_count += 1
             resolved_target = {
                 "texture_id": str(target_rid),
                 "subresource": _subresource_to_dict(target_sub),
@@ -5258,33 +5697,10 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             history_summary["target_source"] = target_source
             history_summary["target"] = resolved_target
             last_history_summary = history_summary
+            if int(history_summary.get("matched_event_hit_count", 0)) > 0:
+                matched_event_hit_seen = True
             default_sample = sample_override if sample_override is not None else _subresource_to_dict(target_sub)["sample"]
             default_view = view_override if view_override is not None else 0
-            if synthetic_context is None:
-                for item in history_items:
-                    if not bool(item.get("passed")):
-                        continue
-                    if bool(item.get("shader_discarded")) or bool(item.get("unbound_ps")):
-                        continue
-                    primitive_value = item.get("primitive_id")
-                    synthetic_context = {
-                        "event_id": int(item.get("event_id") or event_id),
-                        "x": int(x),
-                        "y": int(y),
-                        "sample": int(default_sample),
-                        "view": int(default_view),
-                        "primitive": int(primitive_value) if primitive_value is not None else None,
-                        "target": dict(resolved_target),
-                        "debug_backend": "synthetic",
-                    }
-                    synthetic_history_summary = _pixel_history_summary(
-                        history_items,
-                        int(synthetic_context["event_id"]),
-                    )
-                    synthetic_history_summary["target_source"] = target_source
-                    synthetic_history_summary["target"] = dict(resolved_target)
-                    synthetic_target_source = target_source
-                    break
 
             attempts: List[Tuple[str, str, int, Optional[int], Optional[int], Optional[int]]] = []
             seen_attempts: set[Tuple[str, int, Optional[int], Optional[int], Optional[int]]] = set()
@@ -5314,6 +5730,18 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 candidate_event = int(item.get("event_id") or 0)
                 if candidate_event <= 0:
                     continue
+                if candidate_event != int(event_id):
+                    cross_event_rejections += 1
+                    attempts_log.append(
+                        {
+                            "target_source": target_source,
+                            "label": "pixel_history_match",
+                            "origin": "pixel_history",
+                            "event_id": int(candidate_event),
+                            "error": "Cross-event shader debug fallback is not allowed for rd.shader.debug_start",
+                        },
+                    )
+                    continue
                 raw_primitive = item.get("primitive_id")
                 candidate_primitive = int(raw_primitive) if raw_primitive is not None else -1
                 if candidate_primitive < 0:
@@ -5329,32 +5757,17 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
 
             for label, origin, attempt_event, attempt_sample, attempt_view, attempt_primitive in attempts:
                 if int(attempt_event) != int(last_context.get("event_id", event_id)):
-                    try:
-                        await _ensure_event(session_id, int(attempt_event))
-                        target_rid, _, target_sub = await _configure_texture_output_for_target(
-                            session_id,
-                            target_candidate,
-                            event_id=int(attempt_event),
-                            sample_override=attempt_sample,
-                        )
-                        await _refresh_pixel_context(session_id, x, y)
-                        resolved_target = {
-                            "texture_id": str(target_rid),
-                            "subresource": _subresource_to_dict(target_sub),
-                        }
-                        if "rt_index" in target_candidate:
-                            resolved_target["rt_index"] = _as_int(target_candidate.get("rt_index"), 0)
-                    except Exception as exc:
-                        attempts_log.append(
-                            {
-                                "target_source": target_source,
-                                "label": label,
-                                "origin": origin,
-                                "event_id": int(attempt_event),
-                                "error": f"Failed to switch debug event: {exc}",
-                            },
-                        )
-                        continue
+                    cross_event_rejections += 1
+                    attempts_log.append(
+                        {
+                            "target_source": target_source,
+                            "label": label,
+                            "origin": origin,
+                            "event_id": int(attempt_event),
+                            "error": "Cross-event shader debug fallback is not supported",
+                        },
+                    )
+                    continue
                 inputs = rd.DebugPixelInputs()
                 if attempt_sample is not None:
                     inputs.sample = int(attempt_sample)
@@ -5362,7 +5775,34 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     inputs.view = int(attempt_view)
                 if attempt_primitive is not None:
                     inputs.primitive = int(attempt_primitive)
-                trace = await _offload(controller.DebugPixel, x, y, inputs)
+                debug_attempt_count += 1
+                try:
+                    trace = await _offload(controller.DebugPixel, x, y, inputs)
+                except Exception as exc:
+                    debug_exception_count += 1
+                    attempts_log.append(
+                        {
+                            "target_source": target_source,
+                            "label": label,
+                            "origin": origin,
+                            "event_id": int(attempt_event),
+                            "resolved_context": {
+                                "event_id": int(attempt_event),
+                                "x": int(x),
+                                "y": int(y),
+                                "sample": int(attempt_sample if attempt_sample is not None else resolved_target["subresource"]["sample"]),
+                                "view": int(attempt_view if attempt_view is not None else 0),
+                                "primitive": int(attempt_primitive) if attempt_primitive is not None else None,
+                                "target": resolved_target,
+                            },
+                            "pixel_history_hit_count": int(history_summary.get("hit_count", 0)),
+                            "matched_event_hit_count": int(history_summary.get("matched_event_hit_count", 0)),
+                            "stage": "debug_pixel",
+                            "error": f"DebugPixel failed: {exc}",
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+                    continue
                 effective_context = {
                     "event_id": int(attempt_event),
                     "x": int(x),
@@ -5373,6 +5813,13 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     "target": resolved_target,
                 }
                 valid = bool(trace is not None and getattr(trace, "valid", False))
+                missing_debugger_handle = bool(
+                    trace is not None and getattr(trace, "debugger", None) is None
+                )
+                if missing_debugger_handle:
+                    debugger_missing_count += 1
+                if valid and missing_debugger_handle:
+                    valid = False
                 attempts_log.append(
                     {
                         "target_source": target_source,
@@ -5383,12 +5830,19 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                         "pixel_history_hit_count": int(history_summary.get("hit_count", 0)),
                         "matched_event_hit_count": int(history_summary.get("matched_event_hit_count", 0)),
                         "trace_valid": valid,
+                        "stage": "debug_pixel",
                     },
                 )
+                if not valid and missing_debugger_handle:
+                    attempts_log[-1]["failure_stage"] = "trace_state"
+                    attempts_log[-1]["error"] = "Debug trace was created without a debugger handle"
+                if not valid and trace is None:
+                    invalid_trace_count += 1
                 last_context = effective_context
                 if valid:
                     break
                 if trace is not None:
+                    invalid_trace_count += 1
                     try:
                         await _offload(controller.FreeTrace, trace)
                     except Exception:
@@ -5398,42 +5852,68 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 break
 
         if trace is None or not getattr(trace, "valid", False):
-            if synthetic_context is not None:
-                shader_debug_id = _new_id("sdbg")
-                synthetic_states = _build_synthetic_debug_states(synthetic_context, synthetic_history_summary)
-                _runtime.shader_debugs[shader_debug_id] = ShaderDebugHandle(
-                    shader_debug_id=shader_debug_id,
-                    session_id=session_id,
-                    mode=mode,
-                    event_id=int(synthetic_context.get("event_id") or event_id),
-                    trace=None,
-                    debugger=None,
-                    current_state=synthetic_states[0] if synthetic_states else None,
-                    resolved_context=dict(synthetic_context),
-                    selected_target_source=synthetic_target_source,
-                    pixel_history_summary=dict(synthetic_history_summary),
-                    synthetic=True,
-                    synthetic_states=synthetic_states,
-                    synthetic_index=0,
+            failure_stage = "debug_pixel"
+            failure_reason = "invalid_trace"
+            error_code = "shader_debug_event_binding_unavailable"
+            error_category = "capability"
+            error_message = "Precise event-bound shader debug is unavailable for the requested event"
+
+            if configured_target_count == 0 and target_config_failures > 0:
+                failure_stage = "configure_target"
+                failure_reason = "all_targets_failed"
+                error_code = "shader_debug_target_config_failed"
+                error_category = "runtime"
+                error_message = "Failed to configure any shader debug target for the requested event"
+            elif debug_exception_count > 0 and debug_attempt_count == debug_exception_count:
+                failure_stage = "debug_pixel"
+                failure_reason = "debug_pixel_exception"
+                error_code = "shader_debug_start_failed"
+                error_category = "runtime"
+                error_message = "Shader debug startup failed while requesting the backend trace"
+            elif debugger_missing_count > 0:
+                failure_stage = "trace_state"
+                failure_reason = "debugger_handle_missing"
+                error_code = "shader_debug_start_failed"
+                error_category = "runtime"
+                error_message = "Shader debug trace was created without a usable debugger handle"
+            elif not matched_event_hit_seen and cross_event_rejections > 0:
+                failure_stage = "pixel_history"
+                failure_reason = "cross_event_only"
+            elif invalid_trace_count > 0:
+                failure_stage = "debug_pixel"
+                failure_reason = "invalid_trace"
+
+            details = {
+                "resolved_context": last_context,
+                "pixel_history_summary": last_history_summary,
+                "attempts": attempts_log,
+                "selected_target_source": last_target_source,
+                "failure_stage": failure_stage,
+                "failure_reason": failure_reason,
+                "target_config_failures": int(target_config_failures),
+                "configured_target_count": int(configured_target_count),
+                "debug_attempt_count": int(debug_attempt_count),
+                "debug_exception_count": int(debug_exception_count),
+                "invalid_trace_count": int(invalid_trace_count),
+                "cross_event_rejections": int(cross_event_rejections),
+                "matched_event_hit_seen": bool(matched_event_hit_seen),
+                "debugger_missing_count": int(debugger_missing_count),
+            }
+            if error_category == "runtime":
+                return _err(
+                    error_message,
+                    code=error_code,
+                    category=error_category,
+                    details=details,
                 )
-                return _ok(
-                    shader_debug_id=shader_debug_id,
-                    initial_state={"pc": 0},
-                    resolved_context=dict(synthetic_context),
-                    selected_target_source=synthetic_target_source,
-                    pixel_history_summary=dict(synthetic_history_summary),
-                    synthetic_debug=True,
-                )
-            return _err(
-                "DebugPixel returned invalid trace",
-                code="sample_compatibility",
-                category="runtime",
-                details={
-                    "resolved_context": last_context,
-                    "pixel_history_summary": last_history_summary,
-                    "attempts": attempts_log,
-                    "selected_target_source": last_target_source,
-                },
+            return _capability_error(
+                error_code,
+                error_message,
+                capability="shader_debug",
+                reason="The replay backend could not provide a valid debug trace without leaving the requested event.",
+                source="renderdoc_runtime",
+                action=action,
+                **details,
             )
         shader_debug_id = _new_id("sdbg")
         resolved_context = dict(last_context)
@@ -5454,6 +5934,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             shader_debug_id=shader_debug_id,
             initial_state={"pc": 0},
             resolved_context=resolved_context,
+            resolved_event_id=resolved_event_id,
             selected_target_source=last_target_source,
             pixel_history_summary=last_history_summary,
         )
@@ -5474,6 +5955,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         payload = {"pc": int(getattr(state, "stepIndex", 0)) if state is not None else 0}
         return _ok(
             state=payload,
+            resolved_event_id=int(handle.event_id or 0),
             resolved_context=handle.resolved_context,
             selected_target_source=handle.selected_target_source,
             pixel_history_summary=handle.pixel_history_summary,
@@ -5487,20 +5969,130 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         _require(args, "replacement_id")
         replacement_id = str(args["replacement_id"])
         repl = _runtime.shader_replacements.get(session_id, [])
+        if _patch_engine is None:
+            return _err("Shader patch engine is not initialized", code="shader_replace_unavailable", category="runtime")
+        reverted = await _patch_engine.revert_patch(session_id, replacement_id, _session_manager)
+        if not reverted:
+            return _err(
+                f"Unknown replacement_id: {replacement_id}",
+                code="replacement_not_found",
+                category="not_found",
+                details={"replacement_id": replacement_id, "session_id": session_id},
+            )
         _runtime.shader_replacements[session_id] = [r for r in repl if str(r.get("replacement_id")) != replacement_id]
-        return _ok()
+        return _ok(replacement_id=replacement_id, reverted=True)
 
     if action == "edit_and_replace":
         stage = _parse_stage(args.get("stage"))
+        if _patch_engine is None:
+            return _capability_error(
+                "shader_replace_unavailable",
+                "Runtime shader replacement is not initialized",
+                capability="shader_replace",
+                reason="Shader patch engine is not initialized.",
+                source="runtime_build",
+                action=action,
+            )
+        patch_supported, patch_reason = _session_replace_capability(session_id, controller)
+        if not patch_supported:
+            return _capability_error(
+                "shader_replace_backend_unsupported",
+                "Runtime shader replacement is unavailable for this replay backend",
+                capability="shader_replace",
+                reason=patch_reason,
+                source="renderdoc_runtime",
+                action=action,
+                session_id=session_id,
+                resolved_event_id=int(event_id),
+            )
+        ops_payload = _as_list(args.get("ops"), default=[])
+        if not ops_payload:
+            return _err(
+                "rd.shader.edit_and_replace requires a non-empty ops list",
+                code="validation_error",
+                category="validation",
+            )
+        shader_id = str(args.get("shader_id", "")).strip()
+        if shader_id:
+            bound_stage = await _find_stage_by_shader(shader_id)
+            if bound_stage is None:
+                return _err(
+                    f"Shader not bound at current event: {shader_id}",
+                    code="shader_not_bound",
+                    category="runtime",
+                    details={"session_id": session_id, "resolved_event_id": int(event_id), "shader_id": shader_id},
+                )
+            if bound_stage != stage:
+                return _err(
+                    f"Shader stage mismatch for {shader_id}: expected {stage}, got {bound_stage}",
+                    code="shader_stage_mismatch",
+                    category="validation",
+                    details={"session_id": session_id, "resolved_event_id": int(event_id), "shader_id": shader_id, "expected_stage": stage, "bound_stage": bound_stage},
+                )
+        else:
+            rd_stage = _rd_stage(stage)
+            shader_obj = await _offload(pipe.GetShader, rd_stage)
+            if _is_null_resource_id(shader_obj):
+                return _err(
+                    f"No shader bound at stage {stage.upper()} for event {int(event_id)}",
+                    code="shader_not_bound",
+                    category="runtime",
+                    details={"session_id": session_id, "resolved_event_id": int(event_id), "stage": stage.upper()},
+                )
+            shader_id = str(shader_obj)
+        patch_spec = PatchSpec.model_validate(
+            {
+                "patch_id": str(args.get("replacement_id") or _new_id("repl")),
+                "target_event_id": int(event_id),
+                "target_stage": ShaderStage(stage),
+                "target_shader_id": shader_id,
+                "intent": str(args.get("intent") or "shader_replace"),
+                "ops": ops_payload,
+                "max_diff_ops": _as_int(args.get("max_diff_ops"), 20),
+                "preserve_outputs": _as_bool(args.get("preserve_outputs"), True),
+            }
+        )
+        patch_result = await _patch_engine.apply_patch(
+            session_id=session_id,
+            event_id=int(event_id),
+            stage=ShaderStage(stage),
+            session_manager=_session_manager,
+            patch_spec=patch_spec,
+        )
+        if not patch_result.success:
+            error_details = {
+                "session_id": session_id,
+                "resolved_event_id": int(event_id),
+                "stage": stage.upper(),
+                "shader_id": shader_id,
+                "replacement_id": patch_spec.patch_id,
+            }
+            if patch_result.error_details:
+                error_details.update(dict(patch_result.error_details))
+            return _err(
+                patch_result.error_message or "Shader replacement failed",
+                code=patch_result.error_code or "shader_replace_failed",
+                category=patch_result.error_category or "runtime",
+                details=error_details,
+            )
         replacement = {
-            "replacement_id": _new_id("repl"),
+            "replacement_id": patch_spec.patch_id,
             "stage": stage.upper(),
-            "original_shader_id": str(args.get("shader_id", "")),
-            "status": "mock_applied",
-            "messages": ["Runtime replacement API is not exposed in this build; recorded as logical replacement only."],
+            "resolved_event_id": int(event_id),
+            "original_shader_id": shader_id,
+            "status": "applied",
+            "messages": list(patch_result.messages or []),
+            "applied_to_shader_hash": patch_result.applied_to_shader_hash,
+            "original_shader_hash": patch_result.original_shader_hash,
         }
         _runtime.shader_replacements.setdefault(session_id, []).append(replacement)
-        return _ok(replacement_id=replacement["replacement_id"], status=replacement["status"], messages=replacement["messages"])
+        return _ok(
+            replacement_id=replacement["replacement_id"],
+            status=replacement["status"],
+            resolved_event_id=int(event_id),
+            messages=replacement["messages"],
+            replacement=replacement,
+        )
 
     if action == "get_messages":
         severity_min = str(args.get("severity_min", "info"))
@@ -5551,18 +6143,35 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         return _ok(cbuffer={"vars": out})
 
     if action in {"list_entry_points", "get_bindpoint_mapping", "get_constant_block_layout", "get_reflection", "get_disassembly"}:
-        _require(args, "shader_id")
-        shader_id = str(args["shader_id"])
-        stage = await _find_stage_by_shader(shader_id)
-        if stage is None:
-            return _err(f"Shader not bound at current event: {shader_id}")
+        shader_id = str(args.get("shader_id", "")).strip()
+        stage = _parse_stage(args.get("stage"))
+        if shader_id:
+            stage = await _find_stage_by_shader(shader_id)
+            if stage is None:
+                return _err(
+                    f"Shader not bound at current event: {shader_id}",
+                    code="shader_not_bound",
+                    category="runtime",
+                    details={"session_id": session_id, "resolved_event_id": int(event_id), "shader_id": shader_id},
+                )
+        else:
+            rd_stage_explicit = _rd_stage(stage)
+            bound_shader = await _offload(pipe.GetShader, rd_stage_explicit)
+            if _is_null_resource_id(bound_shader):
+                return _err(
+                    f"No shader bound at stage {stage.upper()} for event {int(event_id)}",
+                    code="shader_not_bound",
+                    category="runtime",
+                    details={"session_id": session_id, "resolved_event_id": int(event_id), "stage": stage.upper()},
+                )
+            shader_id = str(bound_shader)
         rd_stage = _rd_stage(stage)
         reflection = await _offload(pipe.GetShaderReflection, rd_stage)
         if action == "list_entry_points":
             entries = []
             if reflection is not None:
                 entries.append({"name": str(getattr(reflection, "entryPoint", "main")), "stage": stage.upper()})
-            return _ok(entry_points=entries)
+            return _ok(entry_points=entries, shader_id=shader_id, resolved_event_id=int(event_id))
         if action == "get_bindpoint_mapping":
             mapping = []
             if reflection is not None:
@@ -5570,7 +6179,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     mapping.append({"resource_name": str(getattr(ro, "name", "")), "bindpoint": int(getattr(ro, "bindPoint", 0)), "type": "SRV", "stage": stage.upper()})
                 for rw in getattr(reflection, "readWriteResources", []) or []:
                     mapping.append({"resource_name": str(getattr(rw, "name", "")), "bindpoint": int(getattr(rw, "bindPoint", 0)), "type": "UAV", "stage": stage.upper()})
-            return _ok(mapping=mapping)
+            return _ok(mapping=mapping, shader_id=shader_id, resolved_event_id=int(event_id))
         if action == "get_constant_block_layout":
             block_name_or_index = args.get("block_name_or_index")
             blocks = getattr(reflection, "constantBlocks", []) or []
@@ -5587,7 +6196,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             if selected is None and blocks:
                 selected = blocks[0]
             if selected is None:
-                return _ok(layout={})
+                return _ok(layout={}, shader_id=shader_id, resolved_event_id=int(event_id))
             layout = {
                 "name": str(getattr(selected, "name", "")),
                 "byte_size": int(getattr(selected, "byteSize", 0)),
@@ -5600,7 +6209,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     for v in (getattr(selected, "variables", []) or [])
                 ],
             }
-            return _ok(layout=layout)
+            return _ok(layout=layout, shader_id=shader_id, resolved_event_id=int(event_id))
         if action == "get_reflection":
             refl = {
                 "entry_points": [str(getattr(reflection, "entryPoint", "main"))] if reflection else [],
@@ -5615,17 +6224,17 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     refl["resources"].append({"name": str(getattr(ro, "name", "")), "bindpoint": int(getattr(ro, "bindPoint", 0)), "type": "SRV"})
                 for cb in getattr(reflection, "constantBlocks", []) or []:
                     refl["constant_blocks"].append({"name": str(getattr(cb, "name", "")), "byte_size": int(getattr(cb, "byteSize", 0))})
-            return _ok(reflection=refl)
+            return _ok(reflection=refl, shader_id=shader_id, resolved_event_id=int(event_id))
         if action == "get_disassembly":
             targets = await _offload(controller.GetDisassemblyTargets, True)
             target = str(args.get("target", "auto"))
             if target == "auto":
                 target = targets[0] if targets else ""
             if not target:
-                return _ok(disassembly="", target="")
+                return _ok(disassembly="", target="", shader_id=shader_id, resolved_event_id=int(event_id))
             pipeline_obj = await _offload(pipe.GetComputePipelineObject) if stage == "cs" else await _offload(pipe.GetGraphicsPipelineObject)
             text = await _offload(controller.DisassembleShader, pipeline_obj, reflection, target)
-            return _ok(disassembly=str(text), target=target)
+            return _ok(disassembly=str(text), target=target, shader_id=shader_id, resolved_event_id=int(event_id))
 
     return _err(f"Unsupported shader action: {action}")
 
@@ -6049,17 +6658,44 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
         return _ok(saved_path=str(out))
     if action == "shader_bundle":
         _require(args, "event_id", "output_dir")
+        resolved_event_id = await _ensure_event(session_id, _as_int(args.get("event_id"), 0))
         output_dir = Path(str(args["output_dir"]))
         output_dir.mkdir(parents=True, exist_ok=True)
         stage_payloads = []
         for stage in _stage_candidates():
-            shader_resp = await _dispatch_pipeline("get_shader", {"session_id": session_id, "stage": stage})
+            shader_resp = await _dispatch_pipeline(
+                "get_shader",
+                {"session_id": session_id, "stage": stage, "event_id": resolved_event_id},
+            )
             shader_payload = json.loads(shader_resp)
             if shader_payload.get("success") and shader_payload.get("shader", {}).get("shader_id"):
-                stage_payloads.append(shader_payload["shader"])
+                stage_payloads.append(
+                    {
+                        **dict(shader_payload["shader"]),
+                        "resolved_event_id": int(shader_payload.get("resolved_event_id") or resolved_event_id),
+                    }
+                )
+        if not stage_payloads:
+            return _err(
+                f"No bound shaders available for event {int(resolved_event_id)}",
+                code="shader_bundle_empty",
+                category="runtime",
+                details={"session_id": session_id, "resolved_event_id": int(resolved_event_id)},
+            )
         bundle_json = output_dir / "shader_bundle.json"
-        bundle_json.write_text(json.dumps(stage_payloads, ensure_ascii=False, indent=2), encoding="utf-8")
-        return _ok(output_dir=str(output_dir), bundle_path=str(bundle_json))
+        bundle_json.write_text(
+            json.dumps(
+                {
+                    "requested_event_id": _as_int(args.get("event_id"), 0),
+                    "resolved_event_id": int(resolved_event_id),
+                    "shaders": stage_payloads,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return _ok(output_dir=str(output_dir), bundle_path=str(bundle_json), resolved_event_id=int(resolved_event_id))
     if action == "cbuffer_dump":
         _require(args, "output_dir")
         output_dir = Path(str(args["output_dir"]))
@@ -6359,12 +6995,27 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
 
     if action == "shader_hotfix_validate":
         _require(args, "replacement")
-        repl_resp = await _dispatch_shader("edit_and_replace", {"session_id": session_id, **_as_dict(args["replacement"])})
+        replacement_args = _as_dict(args["replacement"])
+        screenshot_before = await _dispatch_export(
+            "screenshot",
+            {
+                "session_id": session_id,
+                "event_id": replacement_args.get("event_id"),
+                "output_path": str(artifacts_dir() / "before_hotfix.png"),
+            },
+        )
+        repl_resp = await _dispatch_shader("edit_and_replace", {"session_id": session_id, **replacement_args})
         repl_payload = json.loads(repl_resp)
         if not repl_payload.get("success"):
             return repl_resp
-        screenshot_before = await _dispatch_export("screenshot", {"session_id": session_id, "output_path": str(artifacts_dir() / "before_hotfix.png")})
-        screenshot_after = await _dispatch_export("screenshot", {"session_id": session_id, "output_path": str(artifacts_dir() / "after_hotfix.png")})
+        screenshot_after = await _dispatch_export(
+            "screenshot",
+            {
+                "session_id": session_id,
+                "event_id": replacement_args.get("event_id"),
+                "output_path": str(artifacts_dir() / "after_hotfix.png"),
+            },
+        )
         return _ok(replacement=repl_payload, before=json.loads(screenshot_before), after=json.loads(screenshot_after))
 
     return _err(f"Unsupported macro action: {action}")
@@ -7108,6 +7759,9 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
             server_info=server_info,
             bootstrap=bootstrap_detail,
             bootstrap_result=bootstrap_result,
+            requested_host=host,
+            requested_port=port,
+            device_serial=str(options.get("device_serial") or ""),
             detail=detail,
         )
         _set_context_remote_live(remote_id, detail["endpoint"])

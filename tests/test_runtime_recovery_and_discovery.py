@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from rdx import server
+from rdx.core.errors import map_exception
+from rdx.core.session_manager import SessionError
 from rdx.context_snapshot import clear_context_snapshot
 from rdx.runtime_state import clear_context_state, save_context_state
 
@@ -24,14 +26,17 @@ class _FakeRecoveryController:
 
 
 class _FakeRecoverySessionManager:
-    def __init__(self) -> None:
+    def __init__(self, controller: _FakeRecoveryController | None = None) -> None:
         self.created: list[str] = []
         self.opened: list[tuple[str, str]] = []
         self.closed: list[str] = []
+        self.backend_configs: list[dict[str, object]] = []
+        self.controller = controller or _FakeRecoveryController([101])
 
     async def create_session(self, *, backend_config: dict[str, object], replay_config: dict[str, object], preferred_session_id: str | None = None) -> SimpleNamespace:
         session_id = str(preferred_session_id or "sess_recovered")
         self.created.append(session_id)
+        self.backend_configs.append(dict(backend_config))
         return SimpleNamespace(session_id=session_id)
 
     async def open_capture(self, session_id: str, path: str) -> SimpleNamespace:
@@ -40,6 +45,15 @@ class _FakeRecoverySessionManager:
 
     async def close_session(self, session_id: str) -> None:
         self.closed.append(str(session_id))
+
+    def get_controller(self, session_id: str) -> _FakeRecoveryController:
+        return self.controller
+
+    def get_output(self, session_id: str) -> SimpleNamespace:
+        return SimpleNamespace()
+
+    def get_state(self, session_id: str) -> None:
+        raise SessionError(code="session_not_found", message=f"Unknown session_id: {session_id}")
 
 
 @pytest.fixture(autouse=True)
@@ -262,19 +276,14 @@ def test_session_resume_restores_persisted_local_session(monkeypatch: pytest.Mon
         },
         "default",
     )
-    fake_manager = _FakeRecoverySessionManager()
     fake_controller = _FakeRecoveryController([101, 202, 303])
+    fake_manager = _FakeRecoverySessionManager(controller=fake_controller)
 
     async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
         return fn(*args, **kwargs)
 
-    async def _fake_get_controller(session_id: str) -> _FakeRecoveryController:
-        assert session_id == "sess_resume"
-        return fake_controller
-
     asyncio.run(server.server_runtime.runtime_startup())
     monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
-    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
     server.server_runtime._session_manager = fake_manager
 
     payload = asyncio.run(server.dispatch_operation("rd.session.get_context", {}, transport="test"))
@@ -285,6 +294,270 @@ def test_session_resume_restores_persisted_local_session(monkeypatch: pytest.Mon
     assert fake_manager.created == ["sess_resume"]
     assert fake_manager.opened == [("sess_resume", str(capture_path))]
     assert fake_controller.set_calls == [202]
+
+
+def test_session_resume_restores_persisted_remote_session_and_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    capture_path = tmp_path / "remote_resume.rdc"
+    capture_path.write_text("rdc", encoding="utf-8")
+    save_context_state(
+        {
+            "context_id": "default",
+            "current_capture_file_id": "capf_remote",
+            "current_session_id": "sess_remote",
+            "captures": {
+                "capf_remote": {
+                    "capture_file_id": "capf_remote",
+                    "file_path": str(capture_path),
+                    "read_only": True,
+                    "driver": "Vulkan",
+                    "file_size_bytes": int(capture_path.stat().st_size),
+                    "file_mtime_ms": int(capture_path.stat().st_mtime * 1000),
+                    "file_fingerprint": f"{int(capture_path.stat().st_size)}:{int(capture_path.stat().st_mtime * 1000)}",
+                }
+            },
+            "sessions": {
+                "sess_remote": {
+                    "session_id": "sess_remote",
+                    "capture_file_id": "capf_remote",
+                    "rdc_path": str(capture_path),
+                    "file_fingerprint": f"{int(capture_path.stat().st_size)}:{int(capture_path.stat().st_mtime * 1000)}",
+                    "file_size_bytes": int(capture_path.stat().st_size),
+                    "frame_index": 0,
+                    "active_event_id": 202,
+                    "backend_type": "remote",
+                    "state": "degraded",
+                    "is_live": False,
+                    "last_error": "remote runtime was recycled",
+                    "remote": {
+                        "transport": "adb_android",
+                        "host": "127.0.0.1",
+                        "port": 62417,
+                        "endpoint": "127.0.0.1:62417",
+                        "origin_remote_id": "remote_origin",
+                        "ownership_state": "session_owned",
+                        "device_serial": "e38b8019",
+                        "requested": {"host": "127.0.0.1", "port": 38920},
+                        "options": {
+                            "install_apk": True,
+                            "push_config": True,
+                            "local_port": 62417,
+                            "remote_port": 38920,
+                        },
+                        "bootstrap": {
+                            "package_name": "org.renderdoc.renderdoccmd.arm64",
+                            "activity_name": "",
+                            "abi": "arm64-v8a",
+                            "remote_port": 38920,
+                            "config_remote_path": "/data/local/tmp/renderdoc.conf",
+                        },
+                    },
+                    "recovery": {
+                        "status": "degraded",
+                        "attempt_count": 2,
+                        "last_error": "remote runtime was recycled",
+                    },
+                }
+            },
+        },
+        "default",
+    )
+    fake_controller = _FakeRecoveryController([101, 202, 303])
+    fake_manager = _FakeRecoverySessionManager(controller=fake_controller)
+    fake_remote = server.RemoteHandle(
+        remote_id="remote_origin",
+        host="127.0.0.1",
+        port=62417,
+        connected=True,
+        transport="adb_android",
+        remote_server=SimpleNamespace(),
+        server_info={"driver_name": "Android Vulkan"},
+        bootstrap={
+            "package_name": "org.renderdoc.renderdoccmd.arm64",
+            "remote_port": 38920,
+            "abi": "arm64-v8a",
+        },
+        requested_host="127.0.0.1",
+        requested_port=38920,
+        device_serial="e38b8019",
+        detail={"endpoint": "127.0.0.1:62417"},
+    )
+
+    async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return fn(*args, **kwargs)
+
+    async def _fake_restore_remote(session_id: str, session_record: dict[str, object]) -> server.RemoteHandle:
+        assert session_id == "sess_remote"
+        assert session_record["remote"]["origin_remote_id"] == "remote_origin"
+        return fake_remote
+
+    asyncio.run(server.server_runtime.runtime_startup())
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_restore_remote_handle_from_session_record", _fake_restore_remote)
+    server.server_runtime._session_manager = fake_manager
+
+    payload = asyncio.run(server.dispatch_operation("rd.session.resume", {"session_id": "sess_remote"}, transport="test"))
+
+    assert payload["ok"] is True
+    assert payload["data"]["current_session_id"] == "sess_remote"
+    assert payload["data"]["runtime"]["session_id"] == "sess_remote"
+    assert payload["data"]["remote"]["state"] == "session_owned"
+    assert payload["data"]["remote"]["origin_remote_id"] == "remote_origin"
+    assert fake_manager.created == ["sess_remote"]
+    assert fake_manager.opened == [("sess_remote", str(capture_path))]
+    assert fake_manager.backend_configs == [
+        {
+            "type": "remote",
+            "host": "127.0.0.1",
+            "port": 62417,
+            "transport": "adb_android",
+            "remote_id": "remote_origin",
+            "remote_server": fake_remote.remote_server,
+        }
+    ]
+    assert fake_controller.set_calls == [202]
+    assert server._runtime.session_owned_remotes["sess_remote"].device_serial == "e38b8019"
+    assert server._runtime.consumed_remotes["remote_origin"].consumed_by_session_id == "sess_remote"
+    state = server.server_runtime._context_state("default")
+    assert state["sessions"]["sess_remote"]["remote"]["device_serial"] == "e38b8019"
+    assert state["sessions"]["sess_remote"]["remote"]["origin_remote_id"] == "remote_origin"
+
+
+def test_context_snapshot_preserves_remote_session_recovery_metadata(tmp_path: Path) -> None:
+    capture_path = tmp_path / "snapshot_remote.rdc"
+    capture_path.write_text("rdc", encoding="utf-8")
+    save_context_state(
+        {
+            "context_id": "default",
+            "current_capture_file_id": "capf_remote",
+            "current_session_id": "sess_remote",
+            "captures": {
+                "capf_remote": {
+                    "capture_file_id": "capf_remote",
+                    "file_path": str(capture_path),
+                    "read_only": True,
+                    "driver": "Vulkan",
+                    "file_size_bytes": int(capture_path.stat().st_size),
+                    "file_mtime_ms": int(capture_path.stat().st_mtime * 1000),
+                    "file_fingerprint": f"{int(capture_path.stat().st_size)}:{int(capture_path.stat().st_mtime * 1000)}",
+                }
+            },
+            "sessions": {
+                "sess_remote": {
+                    "session_id": "sess_remote",
+                    "capture_file_id": "capf_remote",
+                    "rdc_path": str(capture_path),
+                    "file_fingerprint": f"{int(capture_path.stat().st_size)}:{int(capture_path.stat().st_mtime * 1000)}",
+                    "file_size_bytes": int(capture_path.stat().st_size),
+                    "frame_index": 0,
+                    "active_event_id": 303,
+                    "backend_type": "remote",
+                    "state": "degraded",
+                    "is_live": False,
+                    "last_error": "worker restarted",
+                    "remote": {
+                        "transport": "adb_android",
+                        "host": "127.0.0.1",
+                        "port": 62417,
+                        "endpoint": "127.0.0.1:62417",
+                        "origin_remote_id": "remote_origin",
+                        "ownership_state": "session_owned",
+                        "device_serial": "e38b8019",
+                        "requested": {"host": "127.0.0.1", "port": 38920},
+                        "options": {
+                            "install_apk": True,
+                            "push_config": True,
+                            "local_port": 62417,
+                            "remote_port": 38920,
+                        },
+                        "bootstrap": {
+                            "package_name": "org.renderdoc.renderdoccmd.arm64",
+                            "activity_name": "",
+                            "abi": "arm64-v8a",
+                            "remote_port": 38920,
+                            "config_remote_path": "/data/local/tmp/renderdoc.conf",
+                        },
+                    },
+                    "recovery": {
+                        "status": "degraded",
+                        "attempt_count": 1,
+                        "last_error": "worker restarted",
+                    },
+                }
+            },
+        },
+        "default",
+    )
+    server._runtime.context_snapshots["default"] = {
+        "context_id": "default",
+        "runtime": {
+            "session_id": "sess_remote",
+            "capture_file_id": "capf_remote",
+            "frame_index": 0,
+            "active_event_id": 303,
+            "backend_type": "remote",
+        },
+        "remote": {
+            "state": "session_owned",
+            "remote_id": "",
+            "origin_remote_id": "remote_origin",
+            "endpoint": "127.0.0.1:62417",
+            "consumed_by_session_id": "sess_remote",
+        },
+        "focus": {},
+        "last_artifacts": [],
+        "updated_at_ms": 0,
+    }
+
+    snapshot = server._context_snapshot()
+
+    assert snapshot["runtime"]["session_id"] == "sess_remote"
+    assert snapshot["remote"] == {
+        "state": "session_owned",
+        "remote_id": "",
+        "origin_remote_id": "remote_origin",
+        "endpoint": "127.0.0.1:62417",
+        "consumed_by_session_id": "sess_remote",
+    }
+
+
+def test_dispatch_operation_preserves_session_error_details(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BoomEngine:
+        async def execute(self, operation: str, args: dict[str, object], context: object) -> dict[str, object]:
+            raise SessionError(
+                code="renderdoc_error",
+                message="remote.OpenCapture failed with status: Network I/O operation failed",
+                details={
+                    "renderdoc_status": {"status_text": "Network I/O operation failed"},
+                    "capture_context": {
+                        "session_id": "sess_remote",
+                        "capture_path": "C:/capture.rdc",
+                        "remote_capture_path": "/remote/capture.rdc",
+                    },
+                },
+            )
+
+    async def _fake_ensure_context_ready(context_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(server.server_runtime, "ensure_context_ready", _fake_ensure_context_ready)
+    monkeypatch.setattr(server, "_core_engine", _BoomEngine())
+
+    payload = asyncio.run(
+        server.dispatch_operation(
+            "rd.capture.open_replay",
+            {"capture_file_id": "capf_remote"},
+            transport="test",
+        )
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "renderdoc_error"
+    assert payload["error"]["category"] == "runtime"
+    assert payload["error"]["details"]["renderdoc_status"]["status_text"] == "Network I/O operation failed"
+    assert payload["error"]["details"]["capture_context"]["remote_capture_path"] == "/remote/capture.rdc"
 
 
 def test_session_select_switches_pointer_without_dropping_other_sessions(tmp_path: Path) -> None:

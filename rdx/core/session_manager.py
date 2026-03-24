@@ -37,10 +37,25 @@ _GRAPHICS_API_MAP: Dict[str, GraphicsAPI] = {
 
 
 def _map_graphics_api(api_props: Any) -> GraphicsAPI:
+    raw_value = None
     try:
-        raw = str(api_props.pipelineType).lower()
+        raw_value = getattr(api_props, "pipelineType")
     except (AttributeError, TypeError):
         return GraphicsAPI.UNKNOWN
+    try:
+        raw_int = int(raw_value)
+    except (TypeError, ValueError):
+        raw_int = None
+    if raw_int is not None:
+        numeric_map: Dict[int, GraphicsAPI] = {
+            0: GraphicsAPI.D3D11,
+            1: GraphicsAPI.D3D12,
+            2: GraphicsAPI.OPENGL,
+            3: GraphicsAPI.VULKAN,
+        }
+        if raw_int in numeric_map:
+            return numeric_map[raw_int]
+    raw = str(raw_value).lower()
     for key, value in _GRAPHICS_API_MAP.items():
         if key in raw:
             return value
@@ -55,6 +70,11 @@ def _count_actions(actions: Any) -> int:
         if children:
             total += _count_actions(children)
     return total
+
+
+def _controller_patch_supported(controller: Any) -> bool:
+    required = ("BuildTargetShader", "ReplaceResource", "RemoveReplacement", "FreeTargetResource")
+    return all(hasattr(controller, name) for name in required)
 
 
 def _status_ok(status: Any) -> bool:
@@ -198,6 +218,7 @@ class SessionManager:
             state.capabilities.api = _map_graphics_api(props)
             state.capabilities.remote = state.backend_type == BackendType.REMOTE
             state.capabilities.shader_debug_supported = bool(getattr(props, "shaderDebugging", False)) if props is not None else False
+            state.capabilities.patch_supported = _controller_patch_supported(controller)
             state.capabilities.counters_supported = True
 
             try:
@@ -239,6 +260,15 @@ class SessionManager:
 
     def get_state(self, session_id: str) -> SessionState:
         return self._require_state(session_id)
+
+    async def get_session(self, session_id: str) -> SessionInfo:
+        state = self._require_state(session_id)
+        return SessionInfo(
+            session_id=state.session_id,
+            backend_type=state.backend_type,
+            capabilities=state.capabilities,
+            created_at=state.created_at,
+        )
 
     def list_sessions(self) -> List[SessionInfo]:
         return [

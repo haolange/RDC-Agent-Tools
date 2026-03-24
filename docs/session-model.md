@@ -46,6 +46,7 @@ remote endpoint
   - `rd.capture.open_replay` 若要进入 remote backend，必须通过 `options.remote_id` 显式引用它。
   - 一旦 remote `open_replay` 成功，该 `remote_id` 会被对应 `session_id` 消费；之后它不再是 live handle，如需新的 remote handle，必须重新 `rd.remote.connect`。
   - 如果复用了已经失效的 `remote_id`，预期生命周期错误码应为 `remote_handle_consumed`。
+  - 当 remote replay session 建成后，平台会把 `transport`、endpoint、`origin_remote_id`、Android `device_serial`、bootstrap 摘要等恢复元数据写入持久化 session record，用于后续恢复同一个 `session_id`。
   - 它同样是运行时句柄，不应被视为长期稳定标识。
 - `frame_index`
   - 当前 replay 所选帧。
@@ -57,7 +58,7 @@ remote endpoint
   - 它汇总当前 runtime 选中的 `session_id`、`capture_file_id`、remote 生命周期、focus 与 recent artifacts，供 Agent 长链调用复用。
 - `persistent context state`
   - daemon-backed 持久化索引，保存当前 context 的 `captures`、`sessions`、`current_session_id`、`recovery`、`limits` 与 `recent_operations`。
-  - daemon 重启后，本地 `.rdc` session 的恢复以它为准；`context snapshot` 只是当前视角投影。
+  - daemon 重启后，本地与可恢复 remote session 的恢复都以它为准；`context snapshot` 只是当前视角投影。
 
 ## 2. `rd.session.*` 的职责边界
 
@@ -83,7 +84,8 @@ remote endpoint
 - `rd.session.select_session`
   - 只切换当前 context 的 current session 指针，不销毁其他 session 记录。
 - `rd.session.resume`
-  - 基于持久化索引恢复本地 `.rdc` session；remote session 不会自动重连。
+  - 基于持久化索引恢复当前 context 的本地与可恢复 remote session，并优先复用原 `session_id`。
+  - 若 remote endpoint 真断开、Android bootstrap 失败或恢复元数据缺失，会显式返回 `degraded` / error，而不是把上层链路静默切到别的 session。
 
 因此，`rd.session.*` 不是“伪 session 管理器”，而是“context 状态读取、session 选择与恢复入口”。
 
@@ -127,6 +129,9 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 
 - runtime / context 中保存的 `active_event_id` 是 canonical action event。
 - `rd.resource.get_usage` / `rd.resource.get_history` 里的 `raw_event_id` 只是底层记录值，不保证能被 `rd.event.*` 直接 round-trip。
+- event-bound `rd.pipeline.*`、`rd.shader.*`、`rd.texture.get_pixel_value`、`rd.export.shader_bundle` 与 `rd.shader.debug_start` 现在都应把最终使用的 event 通过 `resolved_event_id` 回传给上层；如果 backend 不能精确绑定请求 event，应显式返回 capability/runtime 失败。
+- `rd.shader.edit_and_replace` 的成功不再是“逻辑记录”，而是绑定到真实 runtime replacement；若替换链路在 `BuildTargetShader`、编译诊断或 `ReplaceResource` 任一步失败，session/context 应保留结构化失败细节，而不是写入伪成功 replacement。
+- `rd.shader.debug_start` 若失败，也应把 `failure_stage` / `failure_reason`、`attempts`、`pixel_history_summary` 与 `resolved_context` 作为本次 event-bound debug 的真实诊断面保留下来，供同一 `session_id` 后续排查复用。
 - cleanup 顺序按 `rd.capture.close_replay -> rd.capture.close_file` 理解；若 replay 仍活着，`rd.capture.close_file` 会拒绝关闭对应 `capture_file_id`。
 
 理解状态时应按这个顺序思考：

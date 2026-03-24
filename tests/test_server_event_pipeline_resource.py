@@ -368,6 +368,36 @@ def test_pipeline_dispatch_uses_one_resolved_event_context(monkeypatch: pytest.M
     assert pipeline_service.binding_calls == [101]
 
 
+def test_pipeline_get_shader_returns_runtime_error_when_stage_is_unbound(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _NullShaderPipe(_FakePipe):
+        def GetShader(self, stage: object) -> str:
+            return "ResourceId::0"
+
+    class _NullShaderController(_FakeController):
+        def GetPipelineState(self) -> _NullShaderPipe:
+            return _NullShaderPipe(self.current_event)
+
+    controller = _NullShaderController(
+        roots=[
+            _FakeAction(101, flags=_FakeActionFlags.Drawcall, outputs=["rt0"]),
+        ]
+    )
+    pipeline_service = _FakePipelineService()
+    _install_common_env(monkeypatch, controller)
+    monkeypatch.setattr(server.server_runtime, "_is_null_resource_id", lambda rid: str(rid) in {"", "ResourceId::0", "0"})
+    server.server_runtime._pipeline_service = pipeline_service
+    server.server_runtime._session_manager = SimpleNamespace()
+    _seed_capture()
+    _seed_session(101)
+
+    payload = json.loads(asyncio.run(server._dispatch_pipeline("get_shader", {"session_id": "sess_demo", "stage": "ps"})))
+
+    assert payload["success"] is False
+    assert payload["code"] == "shader_not_bound"
+    assert payload["details"]["resolved_event_id"] == 101
+    assert payload["details"]["stage"] == "PS"
+
+
 def test_resource_usage_and_history_expose_canonical_and_raw_event_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = _FakeController(
         roots=[
@@ -493,3 +523,86 @@ def test_capture_close_file_succeeds_after_close_replay() -> None:
     context = server._context_snapshot()
     assert context["runtime"]["session_id"] == ""
     assert context["runtime"]["capture_file_id"] == ""
+
+
+def test_export_shader_bundle_forwards_requested_event(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    seen_calls: list[dict[str, Any]] = []
+
+    async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
+        assert session_id == "sess_demo"
+        return int(event_id or 0)
+
+    async def _fake_dispatch_pipeline(action: str, args: dict[str, object]) -> str:
+        seen_calls.append({"action": action, **dict(args)})
+        stage = str(args["stage"])
+        event_id = int(args["event_id"])
+        return json.dumps(
+            {
+                "success": True,
+                "shader": {
+                    "stage": stage.upper(),
+                    "shader_id": f"{stage}@{event_id}",
+                    "entry_point": f"main_{event_id}",
+                },
+                "resolved_event_id": event_id,
+            }
+        )
+
+    monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
+    monkeypatch.setattr(server.server_runtime, "_dispatch_pipeline", _fake_dispatch_pipeline)
+
+    output_dir = tmp_path / "shader_bundle"
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_export(
+                "shader_bundle",
+                {"session_id": "sess_demo", "event_id": 202, "output_dir": str(output_dir)},
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["resolved_event_id"] == 202
+    assert seen_calls
+    assert all(call["action"] == "get_shader" for call in seen_calls)
+    assert all(int(call["event_id"]) == 202 for call in seen_calls)
+    bundle = json.loads((output_dir / "shader_bundle.json").read_text(encoding="utf-8"))
+    assert bundle["requested_event_id"] == 202
+    assert bundle["resolved_event_id"] == 202
+    assert bundle["shaders"][0]["resolved_event_id"] == 202
+
+
+def test_export_shader_bundle_returns_runtime_error_when_event_has_no_bound_shaders(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
+        return int(event_id or 0)
+
+    async def _fake_dispatch_pipeline(action: str, args: dict[str, object]) -> str:
+        return json.dumps(
+            {
+                "success": False,
+                "code": "shader_not_bound",
+                "category": "runtime",
+                "details": {
+                    "session_id": str(args["session_id"]),
+                    "resolved_event_id": int(args["event_id"]),
+                    "stage": str(args["stage"]).upper(),
+                },
+            }
+        )
+
+    monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
+    monkeypatch.setattr(server.server_runtime, "_dispatch_pipeline", _fake_dispatch_pipeline)
+
+    output_dir = tmp_path / "shader_bundle_empty"
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_export(
+                "shader_bundle",
+                {"session_id": "sess_demo", "event_id": 202, "output_dir": str(output_dir)},
+            )
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["code"] == "shader_bundle_empty"
+    assert payload["details"]["resolved_event_id"] == 202

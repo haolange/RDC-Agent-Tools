@@ -8,9 +8,9 @@ from rdx import server
 
 
 class _FakeTrace:
-    def __init__(self, *, valid: bool) -> None:
+    def __init__(self, *, valid: bool, debugger: object | None = None) -> None:
         self.valid = valid
-        self.debugger = None
+        self.debugger = object() if debugger is None and not valid else debugger
 
 
 class _FakeHistoryItem:
@@ -138,16 +138,20 @@ def test_debug_start_returns_structured_error_details(monkeypatch) -> None:
     )
 
     assert payload["success"] is False
-    assert payload["code"] == "sample_compatibility"
-    assert payload["category"] == "runtime"
+    assert payload["code"] == "shader_debug_event_binding_unavailable"
+    assert payload["category"] == "capability"
+    assert payload["details"]["capability"] == "shader_debug"
     assert "resolved_context" in payload["details"]
     assert "pixel_history_summary" in payload["details"]
     assert "attempts" in payload["details"]
     assert "selected_target_source" in payload["details"]
+    assert payload["details"]["failure_stage"] == "debug_pixel"
+    assert payload["details"]["failure_reason"] == "invalid_trace"
+    assert payload["details"]["debug_attempt_count"] == 1
     assert controller.debug_calls[0] == {"x": 3, "y": 4, "sample": 7, "view": 8, "primitive": 9}
 
 
-def test_debug_start_synthetic_fallback_unlocks_debug_chain(monkeypatch) -> None:
+def test_debug_start_rejects_cross_event_fallback(monkeypatch) -> None:
     controller = _FakeController([_FakeTrace(valid=False), _FakeTrace(valid=False), _FakeTrace(valid=False)])
     _install_debug_env(monkeypatch, controller, [_FakeHistoryItem(17, 0)])
 
@@ -164,48 +168,78 @@ def test_debug_start_synthetic_fallback_unlocks_debug_chain(monkeypatch) -> None
             )
         )
     )
-    assert start["success"] is True
-    assert start["synthetic_debug"] is True
-    assert start["resolved_context"]["event_id"] == 17
-    assert start["resolved_context"]["primitive"] == 0
+    assert start["success"] is False
+    assert start["code"] == "shader_debug_event_binding_unavailable"
+    assert start["details"]["capability"] == "shader_debug"
+    assert start["details"]["failure_stage"] == "pixel_history"
+    assert start["details"]["failure_reason"] == "cross_event_only"
+    assert any(
+        "Cross-event shader debug fallback" in str(item.get("error") or "")
+        for item in start["details"]["attempts"]
+        if isinstance(item, dict)
+    )
 
-    shader_debug_id = start["shader_debug_id"]
-    state = json.loads(asyncio.run(server._dispatch_shader("get_debug_state", {"session_id": "sess_test", "shader_debug_id": shader_debug_id})))
-    assert state["success"] is True
-    assert state["resolved_context"]["debug_backend"] == "synthetic"
 
-    step = json.loads(asyncio.run(server._dispatch_debug("step", {"session_id": "sess_test", "shader_debug_id": shader_debug_id})))
-    assert step["success"] is True
+def test_debug_start_reports_target_configuration_failures(monkeypatch) -> None:
+    controller = _FakeController([])
+    _install_debug_env(monkeypatch, controller, [])
 
-    run_to = json.loads(
+    async def _failing_configure(session_id: str, target: dict[str, object], *, event_id: int | None = None, sample_override: int | None = None):  # type: ignore[no-untyped-def]
+        raise RuntimeError("no target available")
+
+    monkeypatch.setattr(server.server_runtime, "_configure_texture_output_for_target", _failing_configure)
+
+    payload = json.loads(
         asyncio.run(
-            server._dispatch_debug(
-                "run_to",
-                {"session_id": "sess_test", "shader_debug_id": shader_debug_id, "target": {"pc": 0}, "timeout_ms": 50},
+            server._dispatch_shader(
+                "debug_start",
+                {
+                    "session_id": "sess_test",
+                    "mode": "pixel",
+                    "event_id": 11,
+                    "params": {"x": 2, "y": 3, "target": {"texture_id": "ResourceId::77"}},
+                },
             )
         )
     )
-    assert run_to["success"] is True
 
-    variables = json.loads(asyncio.run(server._dispatch_debug("get_variables", {"session_id": "sess_test", "shader_debug_id": shader_debug_id})))
-    assert variables["success"] is True
-    assert any(item["name"] == "primitive" for item in variables["variables"])
+    assert payload["success"] is False
+    assert payload["code"] == "shader_debug_target_config_failed"
+    assert payload["category"] == "runtime"
+    assert payload["details"]["failure_stage"] == "configure_target"
+    assert payload["details"]["failure_reason"] == "all_targets_failed"
+    assert payload["details"]["target_config_failures"] >= 1
 
-    expr = json.loads(
-        asyncio.run(server._dispatch_debug("evaluate_expression", {"session_id": "sess_test", "shader_debug_id": shader_debug_id, "expression": "0"}))
+
+def test_debug_start_reports_missing_debugger_handle(monkeypatch) -> None:
+    controller = _FakeController([_FakeTrace(valid=True, debugger=None)])
+    _install_debug_env(monkeypatch, controller, [])
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "debug_start",
+                {
+                    "session_id": "sess_test",
+                    "mode": "pixel",
+                    "event_id": 11,
+                    "params": {"x": 5, "y": 6, "target": {"texture_id": "ResourceId::77"}},
+                },
+            )
+        )
     )
-    assert expr["success"] is True
-    assert expr["value"] == 0
 
-    finish = json.loads(asyncio.run(server._dispatch_debug("finish", {"session_id": "sess_test", "shader_debug_id": shader_debug_id})))
-    assert finish["success"] is True
-    assert shader_debug_id not in server._runtime.shader_debugs
+    assert payload["success"] is False
+    assert payload["code"] == "shader_debug_start_failed"
+    assert payload["category"] == "runtime"
+    assert payload["details"]["failure_stage"] == "trace_state"
+    assert payload["details"]["failure_reason"] == "debugger_handle_missing"
 
 
 def test_capabilities_and_compile_error_are_structured() -> None:
     caps = asyncio.run(server._core_capabilities(detail="full"))
     assert "app_api" not in caps
-    for key in ("remote", "shader_debug", "mesh_post_transform", "shader_binary_export", "shader_compile", "counters"):
+    for key in ("remote", "shader_debug", "shader_replace", "mesh_post_transform", "shader_binary_export", "shader_compile", "counters"):
         entry = caps[key]
         assert set(("available", "reason", "optional", "source")).issubset(entry.keys())
 

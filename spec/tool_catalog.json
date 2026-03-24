@@ -2146,12 +2146,19 @@
     {
       "name": "rd.shader.edit_and_replace",
       "group": "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)",
-      "description": "在当前 Replay Session 中替换 shader（实时验证修复假设）。",
-      "parameter_raw": "session_id (str)<br>stage (str): `'VS'<br>'PS'",
-      "returns_raw": "ok (bool)<br>data (dict): tool-specific payload<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "description": "在指定 event 的当前绑定 shader 上执行真实 runtime replacement；内部会向 `BuildTargetShader` 传入真实 `ShaderCompileFlags`，若当前 replay backend 不支持或编译/替换失败，则显式返回 capability / runtime 失败，不再返回伪成功。",
+      "parameter_raw": "session_id (str)<br>stage (str): 'VS'|'HS'|'DS'|'GS'|'PS'|'CS'|'MS'|'AS'<br>event_id (int, 可选): 缺省为当前 active event，内部会解析为 canonical event<br>shader_id (str, 可选): 若给定则必须与该 event 的当前绑定 shader 一致<br>ops (list): `PatchSpec/PatchOp` 风格的补丁操作列表，不能为空<br>replacement_id (str, 可选)<br>intent (str, 可选)<br>max_diff_ops (int, 可选, 默认 20)<br>preserve_outputs (bool, 可选, 默认 true)",
+      "returns_raw": "ok (bool)<br>data (dict): {replacement_id, status='applied', resolved_event_id, messages, replacement}<br>artifacts (list)<br>error (dict|null): backend 不支持或替换失败时返回显式 capability / runtime 错误；编译相关错误会在 `error.details` 中补充 `compile_flags` / `compiler_output` 等诊断，不再返回 `mock_applied`<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
-        "stage"
+        "stage",
+        "event_id",
+        "shader_id",
+        "ops",
+        "replacement_id",
+        "intent",
+        "max_diff_ops",
+        "preserve_outputs"
       ],
       "prerequisites": [
         {
@@ -2247,9 +2254,9 @@
     {
       "name": "rd.shader.debug_start",
       "group": "3.9，Shader Debugger 与像素/顶点级调试 (Shader Debugging)",
-      "description": "启动 shader debugger（默认 pixel），返回 debug session 句柄。",
+      "description": "启动 shader debugger（默认 pixel），仅当请求 event 的精确 debug context 可用时成功；不支持时显式返回 capability / runtime 失败，不做跨 event fallback。",
       "parameter_raw": "session_id (str)<br>mode (str, 可选, 默认 'pixel'): 'pixel' | 'vertex' | 'compute'<br>event_id (int, 可选): 缺省为当前 active event<br>params (dict):<br>- pixel: {x, y, sample?, target?}<br>- vertex: {vertex_index, instance, view?}<br>- compute: {group_x, group_y, group_z, thread_x, thread_y, thread_z}<br>timeout_ms (int, 可选, 默认 10000)",
-      "returns_raw": "ok (bool)<br>data (dict): {shader_debug_id, initial_state}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "returns_raw": "ok (bool)<br>data (dict): {shader_debug_id, initial_state, resolved_context, resolved_event_id, selected_target_source, pixel_history_summary}<br>artifacts (list)<br>error (dict|null): 若无法在请求 event 内精确解析 debug context，则返回显式 capability / runtime 错误；失败细节会通过 `failure_stage` / `failure_reason` / `attempts` 暴露<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
         "mode",
@@ -2860,9 +2867,9 @@
     {
       "name": "rd.export.shader_bundle",
       "group": "3.11，导出、报告与可复现打包 (Export & Reporting)",
-      "description": "导出当前 event 相关 shader 的 bundle（反射 + disasm + binary），用于离线分析。",
+      "description": "按请求 event 导出 shader bundle（反射 + disasm + binary），用于离线分析，不再静默回退到其他 event。",
       "parameter_raw": "session_id (str)<br>event_id (int, 可选)<br>output_dir (str)<br>include_binaries (bool, 可选, 默认 true)<br>include_reflection (bool, 可选, 默认 true)<br>include_disassembly (bool, 可选, 默认 true)",
-      "returns_raw": "ok (bool)<br>data (dict): {saved_files}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+      "returns_raw": "ok (bool)<br>data (dict): {output_dir, bundle_path, resolved_event_id}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
         "event_id",
@@ -3879,8 +3886,8 @@
     {
       "name": "rd.session.resume",
       "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
-      "description": "基于持久化状态尝试恢复当前 context 的本地 `.rdc` session；可选仅校验指定 session 的恢复结果。",
-      "parameter_raw": "session_id (str, 可选): 若给定则在恢复完成后校验该 session 是否已恢复为 live",
+      "description": "基于持久化状态尝试恢复当前 context 的本地与可恢复 remote session，优先复用原 `session_id`；可选仅校验指定 session 的恢复结果。",
+      "parameter_raw": "session_id (str, 可选): 若给定则在恢复完成后校验该 session 是否已恢复为 live；若 remote endpoint 真断开、bootstrap 失败或恢复元数据不足，则显式返回 degraded / error",
       "returns_raw": "ok (bool)<br>data (dict): {context_id, runtime, remote, focus, current_session_id, sessions, recovery, limits, recent_operations, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id"

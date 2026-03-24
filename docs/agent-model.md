@@ -68,14 +68,15 @@
   - remote `open_replay` 成功后，原 `remote_id` 会被 session 消费；不要继续对它执行 `ping` / `disconnect` / 再次 `open_replay`。
   - 如果复用了已经失效的 handle，预期错误码应为 `remote_handle_consumed`。
   - 对 Android remote，不要假设外部 `qrenderdoc` 已经替你做了 bootstrap；`rd.remote.connect` 的 `options.transport="adb_android"` 才是平台定义入口。
+  - daemon / worker 重启后，平台会优先用持久化 remote 元数据恢复同一个 `session_id`；只有 endpoint 真断开、bootstrap 失败或恢复元数据不足时，才需要重新执行整条 remote 建链。
 - 显式保存关键状态。
   - 至少保存 `capture_file_id`、`session_id`、当前 `frame_index`、必要时保存 `event_id`。
   - 长链任务优先通过 `rd.session.get_context` / `rd.session.list_sessions` / `rd.session.update_context` 维护 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
 - 多 session context 下显式选择 current session。
   - 当 `rd.session.list_sessions` 返回多条记录时，后续 inspection 前优先通过 `rd.session.select_session` 锁定当前工作面。
 - 对 daemon 重启后的本地链路，优先读取恢复面。
-  - 本地 `.rdc` session 可通过 `rd.session.get_context` / `rd.session.resume` 自动或显式恢复。
-  - remote session 不会自动重连；一旦 daemon 退出，应重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
+  - 本地与可恢复 remote session 都可通过 `rd.session.get_context` / `rd.session.resume` 自动或显式恢复。
+  - 若 remote endpoint 真断开、bootstrap 失败或恢复元数据缺失，运行时会显式返回 `degraded` / error；这时再重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
 - 先用 discovery 接口，再决定注入多少 tool 描述。
   - `rd.core.list_tools` 适合按 `namespace`、`group`、`capability`、`role` 做结构化枚举。
   - `rd.core.search_tools` 适合按当前任务关键词做轻量筛选。
@@ -85,12 +86,18 @@
   - `tabular/tsv projection` 只是结构化结果的表格化摘要，用于更快扫描与复制，不表示语义重要度排序。
 - 只把可 round-trip 的 canonical `event_id` 当作后续 `rd.event.set_active` 候选。
   - `rd.resource.get_usage` / `rd.resource.get_history` 返回的 `raw_event_id` 仅用于诊断，不应默认直接传回 `rd.event.*`。
+- 对 event-bound pipeline / shader / texture / export / debug 调用，显式传入 `event_id` 并检查返回中的 `resolved_event_id`。
+  - 如果 backend 不支持精确 event-bound debug 或 shader 绑定，运行时现在会显式失败，而不是静默回退到别的 event。
 - 把 handle 当作短生命周期引用。
   - 上层如需缓存，必须准备重建 session 的恢复路径，而不是把 handle 当成永久主键。
 - 先读 catalog 的 `prerequisites`，再决定 tool 序列。
   - session / capture / remote / capability 前置应优先做静态满足性判断。
 - 显式参数优先于 snapshot 默认值。
   - `rd.session.*` 只用于补充上下文，不应覆盖本轮调用显式给出的参数。
+- 对 `rd.shader.edit_and_replace`，只接受两类结果。
+  - 真正的 runtime 替换成功。
+  - 明确的 capability/runtime 失败。
+  - 不应再把任何“逻辑记录已保存但未替换”的状态当成成功。
 - 优先轻量调用。
   - 先获取事件、状态、元数据，再进入导出、diff、debug 等更重的操作。
 - 失败时先看共享契约。

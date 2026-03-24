@@ -90,6 +90,24 @@ class InternalToolError(CoreError):
 def map_exception(exc: Exception) -> CoreError:
     if isinstance(exc, CoreError):
         return exc
+    try:
+        from rdx.core.session_manager import SessionError
+    except Exception:
+        SessionError = None  # type: ignore[assignment]
+    if SessionError is not None and isinstance(exc, SessionError):
+        detail = getattr(exc, "detail", None)
+        code = str(getattr(detail, "code", "runtime_error") or "runtime_error")
+        message = str(getattr(detail, "message", str(exc)) or str(exc))
+        details = getattr(detail, "details", None)
+        if not isinstance(details, dict):
+            details = {}
+        category = "not_found" if code.endswith("_not_found") or code == "session_not_found" else "runtime"
+        return CoreError(
+            code=code,
+            message=message,
+            category=category,
+            details=dict(details),
+        )
     if isinstance(exc, FileNotFoundError):
         return NotFoundError(str(exc))
     if isinstance(exc, PermissionError):

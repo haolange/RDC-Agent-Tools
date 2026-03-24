@@ -282,5 +282,60 @@ rdx call rd.session.update_context --args-file ".\context-update.json" --json --
 daemon 退出后，本地 `.rdc` session 默认会保留在持久化 context state 中；再次附着同一 context 时，平台会优先尝试自动恢复本地 session。remote session 不会自动重连。
 ## 长操作静默
 
+daemon 退出后，本地与可恢复 remote session 默认都会保留在持久化 context state 中；再次附着同一 context 时，平台会优先尝试恢复原 `session_id`。只有 remote endpoint 真断开、Android bootstrap 失败或恢复元数据缺失时，remote session 才会显式进入 `degraded` / error。
+
+## remote inspection 中频繁出现 `Unknown session_id`
+
+这不是正常预期。
+
+当前平台语义是：
+
+- 已成功建立的 replay session，在后续普通 inspection 工具调用中会优先做 lazy recovery。
+- 如果能恢复，平台应继续复用原 `session_id`，而不是把上层调用打成新的未知句柄。
+- 如果不能恢复，错误应明确落在 remote endpoint、bootstrap、恢复元数据或 RenderDoc runtime 状态上，而不是只剩一个裸 `Unknown session_id`。
+
+排查顺序：
+
+- 先看 `rd.session.get_context` / `rd.session.resume` 返回的 `sessions[*].recovery`、`last_error`、`remote` 元数据。
+- 再看失败调用的 `error.details`，确认是 endpoint 断开、`remote.OpenCapture(...)`、Android bootstrap 还是恢复元数据缺失。
+- 只有在 endpoint 真断开或恢复确实失败时，才重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay`。
+
+## `rd.shader.edit_and_replace` 失败还是成功，怎么判断
+
+现在只看 canonical 结果：
+
+- 成功时，`ok=true`，并返回 `status="applied"`、`replacement_id` 与 `resolved_event_id`。
+- backend 不支持 runtime 替换时，会返回显式 capability 错误，例如 `shader_replace_backend_unsupported`。
+- 编译、绑定校验或 replay runtime 失败时，会返回显式 runtime/validation 错误。
+- `error.code/details` 现在会尽量区分：
+  - `shader_build_runtime_error`
+  - `shader_build_failed`
+  - `shader_replace_apply_failed`
+  - 以及绑定/校验类错误
+- 编译相关失败会把 `entry_point`、`encoding`、`compile_flags`、`compiler_output` 等诊断信息写进 `error.details`，便于判断是 `BuildTargetShader(...)` 绑定问题，还是 shader 本身编译失败。
+
+不应再把 `mock_applied`、logical replacement 或“看起来成功但没有真正替换”的状态当成成功。
+
+## `rd.shader.debug_start` 拿到的 event 不可信
+
+当前平台语义是：
+
+- `rd.shader.debug_start` 只应在请求的同一个 event 内成功解析 debug 上下文。
+- 返回值会包含 `resolved_event_id` 与 `resolved_context`，用于给上层做交叉核对。
+- 如果 backend 只能从别的 event 找到 trace，或者只能构造 synthetic debug，运行时会显式返回 capability/runtime 失败，不会再静默回退成功。
+- 失败时优先看 `error.details.failure_stage` / `failure_reason`：
+  - `configure_target` / `all_targets_failed`
+  - `pixel_history` / `cross_event_only`
+  - `debug_pixel` / `invalid_trace`
+  - `trace_state` / `debugger_handle_missing`
+
+如果你看到失败，请优先检查：
+
+- 输入的 `event_id` 是否是 canonical action event。
+- `error.details.attempts` 里是否已经明确标出 cross-event fallback 被拒绝。
+- 当前 replay backend 是否真的支持该类 shader debug。
+
+## 长操作静默
+
 - 若 `rd.remote.connect` 或 `rd.capture.open_replay` 耗时较长，优先读取 daemon `status/get_state` 中的 `active_operation`。
 - 若没有 push-style progress，`active_operation.stage` 仍是唯一权威中间状态，不要再依赖日志文本推断。

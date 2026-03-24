@@ -122,9 +122,11 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - Android remote 可通过 `rd.remote.connect` 的 `options.transport="adb_android"` 触发仓库内置的 `adb` bootstrap。
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
 - 一个 context 现在可持有多条本地 session 记录；`rd.session.get_context` 会同时返回 `current_session_id`、`sessions`、`recovery`、`limits` 与 `recent_operations`。
-- daemon 退出或重启后，本地 `.rdc` session 会按持久化索引尝试自动恢复；remote session 不会自动重连，只会保留 tombstone 与恢复错误面。
+- daemon 退出或重启后，平台会优先按持久化索引恢复本地与可恢复 remote session，并尽量复用原 `session_id`；只有 remote endpoint 真断开、bootstrap 失败或恢复元数据缺失时，才会把该 session 标记为 `degraded` 并返回明确错误。
 - `rd.remote.connect` 与 `rd.capture.open_replay` 在 daemon / streamable transports 下会更新结构化 progress；如宿主不支持 push，至少应通过 `daemon status` 读取 `active_operation`。
 - `active_event_id` 与对外暴露的 canonical `event_id` 只表示可被 `rd.event.get_action_details` round-trip 的 action event；对 `rd.resource.get_usage` / `rd.resource.get_history` 中不可 round-trip 的底层记录，应查看 `raw_event_id` 与 `event_resolvable`。
+- event-bound `rd.pipeline.*`、`rd.shader.*`、`rd.texture.get_pixel_value`、`rd.export.shader_bundle` 与 `rd.shader.debug_start` 会返回 `resolved_event_id`；若 backend 不能精确绑定请求 event，运行时会显式失败，不做 silent fallback。
+- `rd.shader.edit_and_replace` 现在要么执行真实 runtime shader replacement，要么返回明确的 capability/runtime 失败；不会再返回 `mock_applied` 一类伪成功状态。
 
 更完整的操作说明见 [docs/quickstart.md](docs/quickstart.md)。
 
