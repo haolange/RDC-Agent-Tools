@@ -194,3 +194,82 @@ def test_build_args_for_session_update_context_uses_notes_round_trip_payload(tmp
     )
 
     assert args == {"key": "notes", "value": "local contract test"}
+
+
+def test_remote_connect_args_default_to_android_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RDX_REMOTE_CONNECT_TRANSPORT", raising=False)
+    monkeypatch.delenv("RDX_REMOTE_DEVICE_SERIAL", raising=False)
+
+    args = tool_contract_check._remote_connect_args()
+
+    assert args["host"] == "127.0.0.1"
+    assert args["port"] == 38920
+    assert args["options"]["transport"] == "adb_android"
+
+
+def test_remote_connect_args_allow_renderdoc_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RDX_REMOTE_CONNECT_TRANSPORT", "renderdoc")
+    monkeypatch.delenv("RDX_REMOTE_DEVICE_SERIAL", raising=False)
+
+    args = tool_contract_check._remote_connect_args()
+
+    assert "options" not in args
+
+
+def test_build_args_for_remote_connect_uses_android_bootstrap_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("RDX_REMOTE_CONNECT_TRANSPORT", raising=False)
+    monkeypatch.delenv("RDX_REMOTE_DEVICE_SERIAL", raising=False)
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+    files = {
+        "artifacts": tmp_path / "artifacts",
+        "sample": tmp_path / "sample.bin",
+        "text_a": tmp_path / "a.txt",
+        "text_b": tmp_path / "b.txt",
+        "png_a": tmp_path / "a.png",
+        "png_b": tmp_path / "b.png",
+        "zip_out": tmp_path / "bundle.zip",
+    }
+
+    args = tool_contract_check._build_args("rd.remote.connect", ["host", "port", "timeout_ms"], state, files)
+
+    assert args["host"] == "127.0.0.1"
+    assert args["port"] == 38920
+    assert args["options"]["transport"] == "adb_android"
+
+
+def test_sample_compatibility_detects_cross_gpu_replay_error() -> None:
+    message = (
+        "OpenCapture failed with status: Current replaying hardware unsupported or incompatible with captured hardware: "
+        "Capture requires extension 'VK_EXT_fragment_density_map' which is not supported\n\n"
+        "Capture was made on: Qualcomm Adreno (TM) 650, 512.502.0\n"
+        "Replayed on: nVidia NVIDIA GeForce RTX 4070 SUPER, 576.2.0\n"
+        "Captures are not commonly portable between GPUs from different vendors."
+    )
+
+    assert tool_contract_check._is_sample_compatibility_error(message, "internal_error") is True
+
+
+def test_track_tool_side_effects_updates_remote_handle_state(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+
+    tool_contract_check._track_tool_side_effects(
+        "rd.remote.connect",
+        {},
+        {
+            "ok": True,
+            "data": {"remote_id": "remote_demo"},
+        },
+        state,
+    )
+    assert state.remote_id == "remote_demo"
+
+    tool_contract_check._track_tool_side_effects(
+        "rd.remote.disconnect",
+        {"remote_id": "remote_demo"},
+        {
+            "ok": True,
+            "data": {"detail": {"connected": False}},
+        },
+        state,
+    )
+    assert state.remote_id is None

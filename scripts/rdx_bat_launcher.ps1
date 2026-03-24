@@ -226,6 +226,22 @@ function Extract-JsonPayload {
     }
 }
 
+function Get-JsonStringProperty {
+    param(
+        [object]$Object,
+        [string]$PropertyName
+    )
+
+    if ($null -eq $Object -or [string]::IsNullOrWhiteSpace($PropertyName)) {
+        return ''
+    }
+    $property = $Object.PSObject.Properties[$PropertyName]
+    if ($null -eq $property) {
+        return ''
+    }
+    return [string]$property.Value
+}
+
 function Write-JsonStatus {
     param(
         [bool]$Ok,
@@ -658,13 +674,15 @@ function Ensure-DaemonContext {
         return [pscustomobject]@{ Ok = $false; Message = 'daemon start timeout'; Result = $result }
     }
     if ($result.ExitCode -ne 0) {
-        $message = if ($result.Payload -and $result.Payload.error) { [string]$result.Payload.error.message } else { ($result.StdErr + $result.StdOut).Trim() }
+        $payloadError = if ($result.Payload -and ($result.Payload.PSObject.Properties.Name -contains 'error')) { $result.Payload.error } else { $null }
+        $message = Get-JsonStringProperty -Object $payloadError -PropertyName 'message'
+        if (-not $message) { $message = ($result.StdErr + $result.StdOut).Trim() }
         if (-not $message) { $message = 'daemon start failed' }
         return [pscustomobject]@{ Ok = $false; Message = $message; Result = $result }
     }
     $message = ''
-    if ($result.Payload -and $result.Payload.data) {
-        $message = [string]$result.Payload.data.message
+    if ($result.Payload -and ($result.Payload.PSObject.Properties.Name -contains 'data')) {
+        $message = Get-JsonStringProperty -Object $result.Payload.data -PropertyName 'message'
     }
     if (-not $message) { $message = 'daemon ready' }
     return [pscustomobject]@{ Ok = $true; Message = $message; Result = $result }

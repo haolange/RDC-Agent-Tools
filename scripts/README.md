@@ -27,6 +27,8 @@
 - `tool_contract_check.py`
   - catalog 全量 `rd.*` tools contract / transport 检查。
   - local-only 真实样本验证使用 `--local-rdc <path> --skip-remote --transport both`。
+  - 若同时提供 `--remote-rdc`，当前 remote matrix 默认走 Android `adb` bootstrap，也就是 `rd.remote.connect(options.transport="adb_android")`。
+  - 如需覆盖 remote 行为，可通过环境变量指定：`RDX_REMOTE_CONNECT_TRANSPORT`、`RDX_REMOTE_DEVICE_SERIAL`、`RDX_REMOTE_LOCAL_PORT`、`RDX_REMOTE_INSTALL_APK`、`RDX_REMOTE_PUSH_CONFIG`。
 - `smoke_report_aggregator.py`
   - 聚合 blockers / detailed 汇总报告。
   - 输入 `rdx_bat_command_smoke.json` 与 `tool_contract_report.json`，输出当前 markdown 汇总报告。

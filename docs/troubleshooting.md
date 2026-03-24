@@ -216,6 +216,19 @@ rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --
 
 如果 `rd.remote.connect` 失败，先修它；不要继续把依赖 `remote_id` 的后续报错误判成 replay 层问题。
 
+## `tool_contract_check.py` 的 remote 默认值
+
+如果你用正式 smoke 脚本 `python scripts/tool_contract_check.py --local-rdc <...> --remote-rdc <...>` 跑 remote matrix，当前默认 remote branch 会走 Android `adb` bootstrap，也就是：
+
+- `rd.remote.connect(options.transport="adb_android")`
+
+补充说明：
+
+- 只有一台 Android 设备在线时，可以不额外指定 serial。
+- 多设备场景下，优先显式设置 `RDX_REMOTE_DEVICE_SERIAL`。
+- 如果目标不是 Android `adb` remote，而是裸 `RenderDoc` remote host，请显式设置 `RDX_REMOTE_CONNECT_TRANSPORT=renderdoc`。
+- 当桌面 local replay 只是不兼容当前 GPU / extension 时，正式 smoke 应把它归类为 `sample_compatibility`，而不是无限重复 `open_file` 直到触发 capture limit。
+
 ## 如何用 `rd.session.get_context` 定位长链状态
 
 当链路较长、你不确定“当前到底在哪个 session / event / remote 生命周期”时，优先执行：

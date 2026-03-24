@@ -104,6 +104,7 @@
 - `AGENTS.md`
 
 如果改动影响 release smoke 门禁、`rdx.bat` 非交互 launcher 入口，或 `tool_contract_check.py` / `smoke_report_aggregator.py` 的当前输出约定，也必须补一轮真实 local-only smoke 检查。
+如果改动影响 smoke 脚本的默认 transport、remote bootstrap 策略或环境变量覆盖方式，也必须同步写清“当前默认值”和“如何显式覆盖”，避免脚本文档与 `quickstart` / Android smoke 模板冲突。
 
 ## 4. 文档口径规则
 

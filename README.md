@@ -148,6 +148,7 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 若需要把真实 local smoke 纳入发布门禁：
 
 - 继续通过显式参数把外部 `.rdc` 样本传给 `tool_contract_check.py`
+- 若同时做 Android remote matrix，`tool_contract_check.py` 当前默认通过 `rd.remote.connect(options.transport="adb_android")` 走仓库内置 `adb` bootstrap；如需改成裸 `renderdoc` remote，可显式设置 `RDX_REMOTE_CONNECT_TRANSPORT=renderdoc`
 - 生成当前 `rdx_bat_command_smoke.*`、`tool_contract_report.*`、`rdx_smoke_issues_blockers.md`、`rdx_smoke_detailed_report.md`
 - 再执行 `python scripts/release_gate.py --require-smoke-reports`
 

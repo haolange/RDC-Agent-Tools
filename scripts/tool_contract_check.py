@@ -48,6 +48,8 @@ SAMPLE_COMPATIBILITY_SNIPPETS = (
     "unsupported version",
     "could not parse capture",
     "Failed to open capture",
+    "Current replaying hardware unsupported or incompatible with captured hardware",
+    "Captures are not commonly portable between GPUs from different vendors",
 )
 
 SESSION_RETRY_LIMIT = 2
@@ -146,7 +148,7 @@ def _is_remote_app_dependency_error(message: str, code: str) -> bool:
 
 def _is_sample_compatibility_error(message: str, code: str) -> bool:
     haystack = " ".join([str(code or ""), str(message or "")]).lower()
-    return any(snippet in haystack for snippet in SAMPLE_COMPATIBILITY_SNIPPETS)
+    return any(snippet.lower() in haystack for snippet in SAMPLE_COMPATIBILITY_SNIPPETS)
 
 
 def _is_scope_skip_item(item: dict[str, Any]) -> bool:
@@ -534,7 +536,8 @@ def _remote_connect_args() -> dict[str, Any]:
         "port": 38920,
         "timeout_ms": REMOTE_CONNECT_DEFAULT_TIMEOUT_MS,
     }
-    transport = str(os.environ.get("RDX_REMOTE_CONNECT_TRANSPORT", "renderdoc") or "renderdoc").strip().lower()
+    # Android bootstrap is the default remote smoke path for this repository.
+    transport = str(os.environ.get("RDX_REMOTE_CONNECT_TRANSPORT", "adb_android") or "adb_android").strip().lower()
     options: dict[str, Any] = {}
     if transport and transport != "renderdoc":
         options["transport"] = transport
@@ -980,6 +983,18 @@ def _track_tool_side_effects(
         _forget_capture_handle(state, str(args.get("capture_file_id") or ""))
         return
 
+    if tool == "rd.remote.connect":
+        remote_id = str(payload.get("remote_id") or data.get("remote_id") or "").strip()
+        if remote_id:
+            state.remote_id = remote_id
+        return
+
+    if tool == "rd.remote.disconnect":
+        remote_id = str(args.get("remote_id") or "").strip()
+        if remote_id and state.remote_id == remote_id:
+            state.remote_id = None
+        return
+
     if tool == "rd.core.shutdown":
         state.known_session_ids.clear()
         state.known_capture_file_ids.clear()
@@ -1333,6 +1348,9 @@ def _covered_preflight_pass(
 
 
 def _build_args(tool: str, param_names: list[str], state: SampleState, files: dict[str, Path]) -> dict[str, Any]:
+    if tool == "rd.remote.connect":
+        return _remote_connect_args()
+
     args: dict[str, Any] = {}
     for param in param_names:
         if hasattr(state, param):

@@ -282,13 +282,21 @@ def main() -> int:
     )
     combined = out + "\n" + err
     status_code, status_text = _status_command(root, custom_ctx)
+    status_payload = extract_json_payload(status_text)
+    stopped = (
+        status_code == 0
+        and isinstance(status_payload, dict)
+        and bool(status_payload.get("ok"))
+        and isinstance(status_payload.get("data"), dict)
+        and status_payload["data"].get("running") is False
+    )
     ok, missing = _check_contains(combined, ["CLI shell ready. context=smoke-cli-custom", "result_kind\": \"rdx.context.clear\"", "daemon stopped"])
     _append_result(
         results,
         test_id="interactive-cli-custom",
         command="rdx.bat",
-        status="pass" if (code == 0 and not timed_out and ok and status_code != 0) else "blocker",
-        reason="" if (code == 0 and not timed_out and ok and status_code != 0) else (f"missing marker: {missing}" if not ok else f"status_code={status_code}"),
+        status="pass" if (code == 0 and not timed_out and ok and stopped) else "blocker",
+        reason="" if (code == 0 and not timed_out and ok and stopped) else (f"missing marker: {missing}" if not ok else f"status_code={status_code}, stopped={stopped}"),
         evidence=combined + "\n" + status_text,
         context_id=custom_ctx,
     )
