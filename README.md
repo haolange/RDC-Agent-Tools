@@ -117,9 +117,14 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - `rd.remote.connect` 返回的是 live `remote_id`，不是占位 handle。
 - `rd.remote.ping` 用于确认该 `remote_id` 仍然连着 live endpoint。
 - `rd.capture.open_replay` 需要通过 `options.remote_id` 显式进入 remote replay backend。
-- remote `open_replay` 一旦成功，原 `remote_id` 会被对应 `session_id` 消费；如需新的 live handle，必须重新 `rd.remote.connect`。
-- 如果复用了已经失效的 `remote_id`，预期生命周期错误码应为 `remote_handle_consumed`。
+- remote `open_replay` 成功后，会基于该 live `remote_id` 建立 replay-owned lease；原 `remote_id` 默认继续保持 live，可继续执行 `rd.remote.ping`、`rd.remote.list_targets` 等 live endpoint tool。
+- `rd.session.get_context` 的 `remote.active_session_ids` 会显式暴露当前 live remote handle 被哪些 replay session lease。
+- 当 live remote handle 仍被 session lease 时，`rd.remote.disconnect` 预期返回 `remote_handle_in_use`；应先关闭相关 replay 或等待 lease 释放。
+- `remote_handle_consumed` 仍可能出现在旧 tombstone / 恢复异常路径，但它不再是正常 remote `open_replay` 成功后的默认结果。
 - Android remote 可通过 `rd.remote.connect` 的 `options.transport="adb_android"` 触发仓库内置的 `adb` bootstrap。
+- `rd.remote.connect` 的 `options` 参数面在 `CLI` / daemon / `MCP` 下保持一致，至少包括 `transport`、`device_serial`、`local_port`、`install_apk`、`push_config`。
+- `rd.shader.compile` 现在是 session-aware tool：可显式传 `session_id` 与 `source_encoding`，并通过返回里的 `supported_source_encodings` 判断当前 replay backend 接受哪类源码。
+- `rd.remote.set_overlay_options` 在当前 `RenderDoc` Python binding 未暴露 overlay RPC 时，会返回显式 `remote_overlay_options_unavailable`，而不是静默成功。
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
 - 一个 context 现在可持有多条本地 session 记录；`rd.session.get_context` 会同时返回 `current_session_id`、`sessions`、`recovery`、`limits` 与 `recent_operations`。
 - daemon 退出或重启后，平台会优先按持久化索引恢复本地与可恢复 remote session，并尽量复用原 `session_id`；只有 remote endpoint 真断开、bootstrap 失败或恢复元数据缺失时，才会把该 session 标记为 `degraded` 并返回明确错误。

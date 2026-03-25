@@ -13,7 +13,7 @@
 - 平台规范源是什么。
 - `.rdc` 如何进入可操作 session。
 - `context`、daemon、session state、artifact、context snapshot 如何协同。
-- `remote_id` 的生命周期边界是什么。
+- `remote_id` 的生命周期边界是什么，以及 remote `open_replay` 成功后它是否仍保持 live、如何通过 `active_session_ids` / `remote_handle_in_use` 表达 lease 语义。
 - remote session 在什么条件下可恢复、何时保持原 `session_id`、何时必须显式进入 `degraded`。
 - event-bound pipeline / shader / export / debug 如何表达 `resolved_event_id`，以及何时必须显式失败而不是回退。
 - 上层 Agent / framework 的责任边界在哪里。
@@ -116,7 +116,7 @@
 - 未验证的行为不得写成“已验证”。
 - 不把并发现象写成平台定义。
 - 不把恢复 ownership 错放给仓库。
-- 如果 `remote_id` 被写入文档，必须说明它在 remote `open_replay` 成功后会被消费。
+- 如果 `remote_id` 被写入文档，必须说明 remote `open_replay` 成功后它是否仍保持 live、何时会看到 `active_session_ids`、以及何时应返回 `remote_handle_in_use` / `remote_handle_consumed`。
 - 如果文档写到 remote session 恢复，必须说明“优先复用原 `session_id`”与“只有 endpoint 真断开、bootstrap 失败或恢复元数据缺失时才显式 `degraded`”。
 - 如果 catalog 已公开 `rd.session.get_context` / `rd.session.update_context`，核心文档中必须能找到它们的角色说明。
 - 如果 catalog 已公开 `rd.session.list_sessions` / `rd.session.select_session` / `rd.session.resume`，核心文档中必须说明“一个 context 可持有多条 session 记录”和“`current_session_id` 只表示当前工作面”。

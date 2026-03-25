@@ -120,6 +120,7 @@ class SessionState:
     output: Any = None
     capture_file: Any = None
     remote_server: Any = None
+    remote_server_owned: bool = True
     capabilities: SessionCapabilities = field(default_factory=SessionCapabilities)
     capture_id: Optional[str] = None
     is_initialized: bool = False
@@ -309,6 +310,7 @@ class SessionManager:
         remote = backend_config.get("remote_server")
         if remote is not None:
             state.remote_server = remote
+            state.remote_server_owned = bool(backend_config.get("close_remote_server_on_cleanup", False))
             logger.debug("Reusing remote RenderDoc server connection at %s", url)
             return
 
@@ -322,6 +324,7 @@ class SessionManager:
             fix_hint="Confirm the remote endpoint is reachable and still owns a valid replay runtime.",
         )
         state.remote_server = remote
+        state.remote_server_owned = True
         logger.debug("Connected to remote RenderDoc server at %s", url)
 
     async def _open_local_capture(self, state: SessionState, rdc_path: str) -> None:
@@ -415,12 +418,13 @@ class SessionManager:
                 errors.append(f"capture_file.CloseFile/Shutdown: {exc}")
             state.capture_file = None
 
-        if state.remote_server is not None:
+        if state.remote_server is not None and state.remote_server_owned:
             try:
                 await self._offload(state.remote_server.ShutdownConnection)
             except Exception as exc:
                 errors.append(f"remote.ShutdownConnection: {exc}")
-            state.remote_server = None
+        state.remote_server = None
+        state.remote_server_owned = True
 
         if state.backend_type == BackendType.LOCAL:
             remaining_local = any(s.backend_type == BackendType.LOCAL for s in self._sessions.values())

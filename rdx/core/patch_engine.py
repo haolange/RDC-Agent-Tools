@@ -241,6 +241,26 @@ class PatchEngine:
             # 4 -- 顺序应用每个 PatchOp
             modified = source
             for op in patch_spec.ops:
+                if op.op == "force_full_precision" and ("spirv" in encoding_name or "spv" in encoding_name):
+                    precision_matches = self._collect_spirv_precision_targets(
+                        modified,
+                        op.variables,
+                    )
+                    if precision_matches:
+                        matched_lines = ", ".join(
+                            str(line_no) for line_no, _ in precision_matches[:12]
+                        )
+                        if len(precision_matches) > 12:
+                            matched_lines = f"{matched_lines}, ..."
+                        messages.append(
+                            f"force_full_precision matched {len(precision_matches)} RelaxedPrecision line(s)"
+                            f" at {matched_lines}",
+                        )
+                    elif op.variables:
+                        messages.append(
+                            "force_full_precision matched no RelaxedPrecision lines for variables: "
+                            + ", ".join(str(item) for item in op.variables),
+                        )
                 modified = self._apply_op(modified, encoding_name, op)
 
             if modified == source:
@@ -251,6 +271,17 @@ class PatchEngine:
                 )
                 messages.append(
                     "Patch operations produced no source changes before recompilation.",
+                )
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    applied_to_shader_hash=original_hash,
+                    original_shader_hash=original_hash,
+                    success=True,
+                    messages=messages,
+                    source_before_text=source,
+                    source_after_text=modified,
+                    disassembly_target=str(disasm_target),
+                    encoding=encoding_name,
                 )
 
             # 5 -- 编译修改后的源码
@@ -312,6 +343,12 @@ class PatchEngine:
                             "compiler_output": str(errors),
                         },
                         messages=messages,
+                        source_before_text=source,
+                        source_after_text=modified,
+                        disassembly_target=str(disasm_target),
+                        encoding=encoding_name,
+                        entry_point=str(entry_point),
+                        compile_flags=compile_flag_payload,
                     )
                 # 非致命警告 —— 记录日志并继续。
                 logger.warning(
@@ -350,6 +387,12 @@ class PatchEngine:
                         "exception_type": type(exc).__name__,
                     },
                     messages=messages,
+                    source_before_text=source,
+                    source_after_text=modified,
+                    disassembly_target=str(disasm_target),
+                    encoding=encoding_name,
+                    entry_point=str(entry_point),
+                    compile_flags=compile_flag_payload,
                 )
 
             applied_hash = hashlib.sha256(
@@ -380,6 +423,12 @@ class PatchEngine:
                 original_shader_hash=original_hash,
                 success=True,
                 messages=messages,
+                source_before_text=source,
+                source_after_text=modified,
+                disassembly_target=str(disasm_target),
+                encoding=encoding_name,
+                entry_point=str(entry_point),
+                compile_flags=compile_flag_payload,
             )
 
         except Exception as exc:
@@ -398,6 +447,12 @@ class PatchEngine:
                     "patch_id": patch_spec.patch_id,
                     "exception_type": type(exc).__name__,
                 },
+                source_before_text=source if 'source' in locals() else "",
+                source_after_text=modified if 'modified' in locals() else "",
+                disassembly_target=str(disasm_target) if 'disasm_target' in locals() else "",
+                encoding=encoding_name if 'encoding_name' in locals() else "",
+                entry_point=str(entry_point) if 'entry_point' in locals() else "",
+                compile_flags=compile_flag_payload if 'compile_flag_payload' in locals() else [],
             )
 
     async def revert_patch(
@@ -427,6 +482,9 @@ class PatchEngine:
         try:
             controller = session_manager.get_controller(session_id)
             controller.RemoveReplacement(record.original_shader_id)
+            target_event_id = int(getattr(record.spec, "target_event_id", 0) or 0)
+            if target_event_id > 0:
+                controller.SetFrameEvent(target_event_id, True)
             controller.FreeTargetResource(record.replacement_shader_id)
             del self._patches[patch_id]
             logger.info("Reverted patch %s", patch_id)
@@ -586,6 +644,12 @@ class PatchEngine:
                         re.MULTILINE,
                     )
                     modified = pattern.sub("", modified)
+                    renderdoc_pattern = re.compile(
+                        rf"^([^\n]*(?:%{re.escape(var)}\b|_{re.escape(var)}\b)[^\n]*?)"
+                        r"\s*:\s*\[\[RelaxedPrecision\]\](\s*;)\s*$",
+                        re.MULTILINE,
+                    )
+                    modified = renderdoc_pattern.sub(r"\1\2", modified)
             else:
                 # 移除 *所有* RelaxedPrecision 装饰。
                 modified = re.sub(
@@ -594,8 +658,35 @@ class PatchEngine:
                     modified,
                     flags=re.MULTILINE,
                 )
+                modified = re.sub(
+                    r"\s*:\s*\[\[RelaxedPrecision\]\](\s*;)",
+                    r"\1",
+                    modified,
+                )
 
         return modified
+
+    @staticmethod
+    def _collect_spirv_precision_targets(
+        source: str,
+        variables: List[str],
+    ) -> List[Tuple[int, str]]:
+        matches: List[Tuple[int, str]] = []
+        exact_token_patterns = [
+            re.compile(rf"(?:%{re.escape(var)}\b|_{re.escape(var)}\b)")
+            for var in variables
+            if str(var or "").strip()
+        ]
+        for line_no, line in enumerate(source.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped or "RelaxedPrecision" not in stripped:
+                continue
+            if not exact_token_patterns:
+                matches.append((line_no, stripped))
+                continue
+            if any(pattern.search(stripped) for pattern in exact_token_patterns):
+                matches.append((line_no, stripped))
+        return matches
 
     # ------------------------------------------------------------------
     # Guard patch（防护插入）
@@ -754,8 +845,9 @@ class PatchEngine:
         if raw_flags is None:
             return compile_flags
         try:
+            raw_values = getattr(raw_flags, "flags", raw_flags)
             cloned_flags = []
-            for item in list(raw_flags):
+            for item in list(raw_values):
                 flag = rd.ShaderCompileFlag()
                 flag.name = str(getattr(item, "name", "") or "")
                 flag.value = str(getattr(item, "value", "") or "")
@@ -792,6 +884,21 @@ class PatchEngine:
         兼容不同 renderdoc 版本暴露的 ``ShaderEncoding.HLSL`` 或裸
         ``"HLSL"`` 形式。
         """
+        try:
+            numeric = int(encoding)
+        except (TypeError, ValueError):
+            numeric = None
+        if numeric is not None:
+            numeric_map = {
+                0: "unknown",
+                1: "hlsl",
+                2: "glsl",
+                3: "spirvasm",
+                4: "dxil",
+                5: "slang",
+            }
+            if numeric in numeric_map:
+                return numeric_map[numeric]
         name = str(encoding)
         if "." in name:
             name = name.rsplit(".", 1)[-1]

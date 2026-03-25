@@ -55,7 +55,7 @@ from rdx.core.renderdoc_status import (
     status_text as _rd_status_text,
 )
 from rdx.progress import ProgressReporter
-from rdx.timeout_policy import remote_connect_timeout_ms
+from rdx.timeout_policy import PIXEL_HISTORY_TIMEOUT_S, remote_connect_timeout_ms
 from rdx.core.event_graph import EventGraphService
 from rdx.core.patch_engine import PatchEngine
 from rdx.core.perf_service import PerfService
@@ -130,10 +130,16 @@ class RemoteHandle:
     bootstrap: Dict[str, Any] = field(default_factory=dict)
     bootstrap_result: Any = None
     leased_session_id: str = ""
+    leased_session_ids: List[str] = field(default_factory=list)
     requested_host: str = ""
     requested_port: int = 0
     device_serial: str = ""
     detail: Dict[str, Any] = field(default_factory=dict)
+    default_capture_options: Dict[str, Any] = field(default_factory=dict)
+    overlay_options: Dict[str, Any] = field(default_factory=dict)
+    known_targets: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    known_captures: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    last_target_scan_ms: int = 0
 
 
 @dataclass
@@ -880,6 +886,10 @@ def _context_snapshot(context_id: Optional[str] = None) -> Dict[str, Any]:
     owned_session_id = str(remote_payload.get("consumed_by_session_id") or "")
     if remote_state == "live_handle" and (not remote_id or remote_id not in _runtime.remotes):
         snapshot["remote"] = default_context_snapshot(ctx).get("remote", {})
+    elif remote_state == "live_handle" and remote_id in _runtime.remotes:
+        live_handle = _runtime.remotes.get(remote_id)
+        if live_handle is not None:
+            snapshot["remote"] = _remote_snapshot_payload_from_handle(live_handle)
     elif remote_state == "session_owned" and owned_session_id not in _runtime.session_owned_remotes:
         state_session = sessions.get(owned_session_id) if isinstance(sessions, dict) else None
         state_remote = _session_record_remote_metadata(state_session) if isinstance(state_session, dict) else {}
@@ -892,11 +902,16 @@ def _context_snapshot(context_id: Optional[str] = None) -> Dict[str, Any]:
                 "origin_remote_id": state_origin_remote_id or str(remote_payload.get("origin_remote_id") or ""),
                 "endpoint": state_endpoint or str(remote_payload.get("endpoint") or ""),
                 "consumed_by_session_id": owned_session_id,
+                "active_session_ids": [owned_session_id] if owned_session_id else [],
             }
             _runtime.context_snapshots[ctx] = snapshot
             return snapshot
         origin_remote_id = str(remote_payload.get("origin_remote_id") or "")
-        if origin_remote_id and origin_remote_id in _runtime.consumed_remotes:
+        if origin_remote_id and origin_remote_id in _runtime.remotes:
+            live_handle = _runtime.remotes.get(origin_remote_id)
+            if live_handle is not None:
+                snapshot["remote"] = _remote_snapshot_payload_from_handle(live_handle)
+        elif origin_remote_id and origin_remote_id in _runtime.consumed_remotes:
             tombstone = _runtime.consumed_remotes[origin_remote_id]
             snapshot["remote"] = {
                 "state": "consumed",
@@ -904,6 +919,7 @@ def _context_snapshot(context_id: Optional[str] = None) -> Dict[str, Any]:
                 "origin_remote_id": tombstone.remote_id,
                 "endpoint": tombstone.endpoint,
                 "consumed_by_session_id": tombstone.consumed_by_session_id,
+                "active_session_ids": [],
             }
         else:
             snapshot["remote"] = default_context_snapshot(ctx).get("remote", {})
@@ -996,15 +1012,46 @@ def _set_context_frame(session_id: str, frame_index: int, active_event_id: int, 
 
 
 
+def _remote_active_session_ids(handle: Optional[RemoteHandle]) -> List[str]:
+    if handle is None:
+        return []
+    session_ids = [str(item or "").strip() for item in list(handle.leased_session_ids or [])]
+    session_ids = [item for item in session_ids if item]
+    leased_session_id = str(handle.leased_session_id or "").strip()
+    if leased_session_id and leased_session_id not in session_ids:
+        session_ids.append(leased_session_id)
+    return session_ids
+
+
+def _remote_snapshot_payload_from_handle(handle: RemoteHandle) -> Dict[str, Any]:
+    active_session_ids = _remote_active_session_ids(handle)
+    return {
+        "state": "live_handle",
+        "remote_id": str(handle.remote_id or ""),
+        "origin_remote_id": str(handle.remote_id or ""),
+        "endpoint": _remote_url(handle.host, handle.port),
+        "consumed_by_session_id": active_session_ids[0] if active_session_ids else "",
+        "active_session_ids": active_session_ids,
+    }
+
+
+
 def _set_context_remote_live(remote_id: str, endpoint: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
     snapshot = _context_snapshot(context_id)
-    snapshot["remote"] = {
-        "state": "live_handle",
-        "remote_id": str(remote_id or ""),
-        "origin_remote_id": str(remote_id or ""),
-        "endpoint": str(endpoint or ""),
-        "consumed_by_session_id": "",
-    }
+    handle = _runtime.remotes.get(str(remote_id or "").strip())
+    if handle is not None:
+        payload = _remote_snapshot_payload_from_handle(handle)
+        payload["endpoint"] = str(endpoint or payload.get("endpoint") or "")
+        snapshot["remote"] = payload
+    else:
+        snapshot["remote"] = {
+            "state": "live_handle",
+            "remote_id": str(remote_id or ""),
+            "origin_remote_id": str(remote_id or ""),
+            "endpoint": str(endpoint or ""),
+            "consumed_by_session_id": "",
+            "active_session_ids": [],
+        }
     return _store_context_snapshot(snapshot, context_id)
 
 
@@ -1023,6 +1070,7 @@ def _set_context_remote_session_owned(
         "origin_remote_id": str(remote_id or ""),
         "endpoint": str(endpoint or ""),
         "consumed_by_session_id": str(session_id or ""),
+        "active_session_ids": [str(session_id or "")] if str(session_id or "").strip() else [],
     }
     return _store_context_snapshot(snapshot, context_id)
 
@@ -1042,8 +1090,53 @@ def _set_context_remote_consumed(
         "origin_remote_id": str(remote_id or ""),
         "endpoint": str(endpoint or ""),
         "consumed_by_session_id": str(session_id or ""),
+        "active_session_ids": [],
     }
     return _store_context_snapshot(snapshot, context_id)
+
+
+
+def _register_remote_session_lease(
+    session_id: str,
+    handle: RemoteHandle,
+    *,
+    context_id: Optional[str] = None,
+) -> RemoteHandle:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return handle
+    active_session_ids = _remote_active_session_ids(handle)
+    if sid not in active_session_ids:
+        active_session_ids.append(sid)
+    handle.leased_session_ids = active_session_ids
+    handle.leased_session_id = active_session_ids[0] if active_session_ids else ""
+    _runtime.session_owned_remotes[sid] = handle
+    if handle.remote_id in _runtime.remotes:
+        _set_context_remote_live(handle.remote_id, _remote_url(handle.host, handle.port), context_id=context_id)
+    else:
+        _set_context_remote_session_owned(handle.remote_id, sid, _remote_url(handle.host, handle.port), context_id=context_id)
+    return handle
+
+
+
+def _release_remote_session_lease(session_id: str, *, context_id: Optional[str] = None) -> Optional[RemoteHandle]:
+    sid = str(session_id or "").strip()
+    handle = _runtime.session_owned_remotes.pop(sid, None)
+    if handle is None:
+        return None
+    active_session_ids = [item for item in _remote_active_session_ids(handle) if item != sid]
+    handle.leased_session_ids = active_session_ids
+    handle.leased_session_id = active_session_ids[0] if active_session_ids else ""
+    if handle.remote_id in _runtime.remotes:
+        _set_context_remote_live(handle.remote_id, _remote_url(handle.host, handle.port), context_id=context_id)
+    elif active_session_ids:
+        _set_context_remote_session_owned(
+            handle.remote_id,
+            active_session_ids[0],
+            _remote_url(handle.host, handle.port),
+            context_id=context_id,
+        )
+    return handle
 
 
 
@@ -1061,8 +1154,19 @@ def _clear_context_runtime(session_id: str, *, context_id: Optional[str] = None)
     ctx = normalize_context_id(context_id or _runtime_context_id())
     snapshot = _context_snapshot(ctx)
     remote = snapshot.get("remote", {})
-    if remote.get("state") == "session_owned" and remote.get("consumed_by_session_id") == str(session_id or ""):
+    if remote.get("state") == "live_handle":
+        active_session_ids = [
+            item
+            for item in [str(value or "").strip() for value in list(remote.get("active_session_ids") or [])]
+            if item and item != str(session_id or "").strip()
+        ]
+        if active_session_ids or str(remote.get("remote_id") or "").strip():
+            snapshot["remote"]["active_session_ids"] = active_session_ids
+            snapshot["remote"]["consumed_by_session_id"] = active_session_ids[0] if active_session_ids else ""
+            _store_context_snapshot(snapshot, ctx)
+    elif remote.get("state") == "session_owned" and remote.get("consumed_by_session_id") == str(session_id or ""):
         snapshot["remote"]["state"] = "consumed"
+        snapshot["remote"]["active_session_ids"] = []
         _store_context_snapshot(snapshot, ctx)
     return _remove_context_session(str(session_id or ""), context_id=ctx)
 
@@ -1549,6 +1653,435 @@ def _disconnect_remote_handle_sync(handle: RemoteHandle) -> List[str]:
         errors.extend(cleanup_android_remote(handle.bootstrap_result))
     return errors
 
+
+_CAPTURE_OPTION_ATTRS: Dict[str, str] = {
+    "allow_vsync": "allowVSync",
+    "allow_fullscreen": "allowFullscreen",
+    "api_validation": "apiValidation",
+    "capture_all_cmd_lists": "captureAllCmdLists",
+    "capture_callstacks": "captureCallstacks",
+    "capture_callstacks_only_actions": "captureCallstacksOnlyActions",
+    "debug_output_mute": "debugOutputMute",
+    "delay_for_debugger": "delayForDebugger",
+    "hook_into_children": "hookIntoChildren",
+    "ref_all_resources": "refAllResources",
+    "soft_memory_limit": "softMemoryLimit",
+    "verify_buffer_access": "verifyBufferAccess",
+}
+
+
+def _remote_target_message_type_name(value: Any) -> str:
+    rd = _get_rd()
+    raw_value = int(value or 0)
+    for name in dir(rd.TargetControlMessageType):
+        if name.startswith("_"):
+            continue
+        try:
+            if int(getattr(rd.TargetControlMessageType, name)) == raw_value:
+                return name
+        except Exception:
+            continue
+    return str(raw_value)
+
+
+def _capture_options_payload(options: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    for key, attr in _CAPTURE_OPTION_ATTRS.items():
+        if hasattr(options, attr):
+            payload[key] = getattr(options, attr)
+    return payload
+
+
+def _capture_options_from_dict(values: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
+    rd = _get_rd()
+    options = rd.GetDefaultCaptureOptions()
+    applied: Dict[str, Any] = {}
+    for raw_key, raw_value in dict(values or {}).items():
+        key = str(raw_key or "").strip()
+        attr = _CAPTURE_OPTION_ATTRS.get(key, key)
+        if not attr or not hasattr(options, attr):
+            continue
+        current_value = getattr(options, attr)
+        if isinstance(current_value, bool):
+            coerced = _as_bool(raw_value, current_value)
+        elif isinstance(current_value, int):
+            coerced = _as_int(raw_value, int(current_value))
+        else:
+            coerced = raw_value
+        setattr(options, attr, coerced)
+        applied[key] = coerced
+    return options, applied
+
+
+def _environment_modifications_from_dict(values: Dict[str, Any]) -> List[Any]:
+    rd = _get_rd()
+    modifications: List[Any] = []
+    for name, value in dict(values or {}).items():
+        item = rd.EnvironmentModification()
+        item.name = str(name or "")
+        item.value = str(value or "")
+        if hasattr(item, "sep"):
+            item.sep = ";"
+        if hasattr(item, "mod"):
+            try:
+                item.mod = 0
+            except Exception:
+                pass
+        modifications.append(item)
+    return modifications
+
+
+def _remote_target_control_client_name(handle: RemoteHandle) -> str:
+    remote_id = str(handle.remote_id or "remote").strip() or "remote"
+    return f"rdx-tools-{remote_id}"[:64]
+
+
+def _remote_target_ident(target_id: Any) -> int:
+    text = str(target_id or "").strip()
+    try:
+        return int(text)
+    except Exception:
+        return 0
+
+
+def _create_target_control_sync(handle: RemoteHandle, ident: int, *, force_connection: bool = False) -> Any:
+    rd = _get_rd()
+    return rd.CreateTargetControl(
+        _remote_url(handle.host, handle.port),
+        int(ident),
+        _remote_target_control_client_name(handle),
+        bool(force_connection),
+    )
+
+
+def _target_summary_from_control(handle: RemoteHandle, ident: int, control: Any) -> Dict[str, Any]:
+    target_id = str(int(ident))
+    target = dict(handle.known_targets.get(target_id) or {})
+    target.update(
+        {
+            "target_id": target_id,
+            "ident": int(ident),
+            "name": str(control.GetTarget() or ""),
+            "api": str(control.GetAPI() or ""),
+            "pid": int(control.GetPID() or 0),
+            "connected": bool(control.Connected()) if hasattr(control, "Connected") else True,
+        }
+    )
+    busy_client = str(control.GetBusyClient() or "") if hasattr(control, "GetBusyClient") else ""
+    if busy_client:
+        target["busy_client"] = busy_client
+    handle.known_targets[target_id] = target
+    return target
+
+
+def _update_remote_capture_registry_from_message(
+    handle: RemoteHandle,
+    *,
+    target_id: str,
+    message_type: str,
+    message: Any,
+) -> Optional[Dict[str, Any]]:
+    capture = getattr(message, "newCapture", None)
+    capture_id = int(getattr(capture, "captureId", 0) or 0)
+    if capture_id <= 0:
+        return None
+    capture_key = str(capture_id)
+    record = dict(handle.known_captures.get(capture_key) or {})
+    record.update(
+        {
+            "capture_id": capture_key,
+            "target_id": str(target_id or ""),
+            "path": str(getattr(capture, "path", "") or ""),
+            "title": str(getattr(capture, "title", "") or ""),
+            "api": str(getattr(capture, "api", "") or ""),
+            "frame_number": int(getattr(capture, "frameNumber", 0) or 0),
+            "size_bytes": int(getattr(capture, "byteSize", 0) or 0),
+            "timestamp": int(getattr(capture, "timestamp", 0) or 0),
+            "local": bool(getattr(capture, "local", False)),
+            "thumb_width": int(getattr(capture, "thumbWidth", 0) or 0),
+            "thumb_height": int(getattr(capture, "thumbHeight", 0) or 0),
+            "message_type": message_type,
+            "updated_at_ms": _now_ms(),
+        }
+    )
+    handle.known_captures[capture_key] = record
+    return record
+
+
+def _drain_target_control_messages_sync(
+    handle: RemoteHandle,
+    control: Any,
+    *,
+    target_id: str,
+    max_messages: int = 16,
+    deadline_s: float = 0.0,
+) -> List[Dict[str, Any]]:
+    rd = _get_rd()
+    events: List[Dict[str, Any]] = []
+    deadline = time.perf_counter() + max(float(deadline_s or 0.0), 0.0)
+    remaining_messages = max(1, int(max_messages or 1))
+    while remaining_messages > 0:
+        message = control.ReceiveMessage(None)
+        message_type = _remote_target_message_type_name(getattr(message, "type", 0))
+        event: Dict[str, Any] = {"type": message_type}
+        if message_type == "Noop":
+            if deadline_s > 0.0 and time.perf_counter() < deadline:
+                time.sleep(0.1)
+                remaining_messages -= 1
+                continue
+            break
+        if message_type == "Disconnected":
+            events.append(event)
+            break
+        if message_type in {"NewCapture", "CaptureCopied"}:
+            capture_record = _update_remote_capture_registry_from_message(
+                handle,
+                target_id=target_id,
+                message_type=message_type,
+                message=message,
+            )
+            if capture_record is not None:
+                event["capture"] = capture_record
+        elif message_type == "NewChild":
+            child = getattr(message, "newChild", None)
+            child_ident = int(getattr(child, "ident", 0) or 0)
+            if child_ident > 0:
+                child_target_id = str(child_ident)
+                handle.known_targets.setdefault(
+                    child_target_id,
+                    {
+                        "target_id": child_target_id,
+                        "ident": child_ident,
+                        "pid": int(getattr(child, "processId", 0) or 0),
+                    },
+                )
+                event["target"] = dict(handle.known_targets[child_target_id])
+        elif message_type == "RegisterAPI":
+            api_use = getattr(message, "apiUse", None)
+            target = dict(handle.known_targets.get(str(target_id or "")) or {})
+            target["api"] = str(getattr(api_use, "name", "") or target.get("api") or "")
+            target["supported"] = bool(getattr(api_use, "supported", True))
+            support_message = str(getattr(api_use, "supportMessage", "") or "")
+            if support_message:
+                target["support_message"] = support_message
+            target["presenting"] = bool(getattr(api_use, "presenting", False))
+            handle.known_targets[str(target_id or "")] = target
+            event["target"] = target
+        elif message_type == "Busy":
+            busy = getattr(message, "busy", None)
+            target = dict(handle.known_targets.get(str(target_id or "")) or {})
+            target["busy_client"] = str(getattr(busy, "clientName", "") or "")
+            handle.known_targets[str(target_id or "")] = target
+            event["target"] = target
+        elif message_type == "CapturableWindowCount":
+            target = dict(handle.known_targets.get(str(target_id or "")) or {})
+            target["capturable_window_count"] = int(getattr(message, "capturableWindowCount", 0) or 0)
+            handle.known_targets[str(target_id or "")] = target
+            event["target"] = target
+        elif message_type == "CaptureProgress":
+            event["progress"] = float(getattr(message, "capProgress", 0.0) or 0.0)
+        events.append(event)
+        remaining_messages -= 1
+    return events
+
+
+def _remote_list_targets_sync(handle: RemoteHandle) -> List[Dict[str, Any]]:
+    rd = _get_rd()
+    url = _remote_url(handle.host, handle.port)
+    next_ident = 0
+    seen: set[int] = set()
+    discovered: List[Dict[str, Any]] = []
+    for _ in range(64):
+        ident = int(rd.EnumerateRemoteTargets(url, int(next_ident)) or 0)
+        if ident <= 0 or ident in seen:
+            break
+        seen.add(ident)
+        target_id = str(ident)
+        try:
+            control = _create_target_control_sync(handle, ident)
+            summary = _target_summary_from_control(handle, ident, control)
+            _drain_target_control_messages_sync(handle, control, target_id=target_id, max_messages=4, deadline_s=0.0)
+            discovered.append(dict(handle.known_targets.get(target_id) or summary))
+        except Exception as exc:
+            errored = {
+                "target_id": target_id,
+                "ident": ident,
+                "connected": False,
+                "error": str(exc),
+            }
+            handle.known_targets[target_id] = errored
+            discovered.append(errored)
+        next_ident = ident
+    handle.last_target_scan_ms = _now_ms()
+    if discovered:
+        return sorted(discovered, key=lambda item: int(item.get("ident") or 0))
+    cached = [dict(item) for item in handle.known_targets.values()]
+    return sorted(cached, key=lambda item: int(item.get("ident") or 0))
+
+
+def _resolve_remote_target_ident_sync(handle: RemoteHandle, target_id: str = "") -> Tuple[int, Dict[str, Any]]:
+    requested_ident = _remote_target_ident(target_id)
+    if requested_ident > 0:
+        summary = dict(handle.known_targets.get(str(requested_ident)) or {})
+        if not summary:
+            _remote_list_targets_sync(handle)
+            summary = dict(handle.known_targets.get(str(requested_ident)) or {})
+        if not summary:
+            raise RuntimeToolError(
+                f"Unknown target_id: {target_id}",
+                details={"remote_id": handle.remote_id, "target_id": target_id},
+            )
+        return requested_ident, summary
+
+    targets = _remote_list_targets_sync(handle)
+    if len(targets) == 1:
+        summary = dict(targets[0])
+        return int(summary.get("ident") or 0), summary
+    if not targets:
+        raise RuntimeToolError(
+            "No remote targets are currently available",
+            details={"remote_id": handle.remote_id, "endpoint": _remote_url(handle.host, handle.port)},
+        )
+    raise RuntimeToolError(
+        "target_id is required when multiple remote targets are available",
+        details={
+            "remote_id": handle.remote_id,
+            "available_target_ids": [str(item.get("target_id") or "") for item in targets],
+        },
+    )
+
+
+def _capture_records_for_target(handle: RemoteHandle, target_id: str = "") -> List[Dict[str, Any]]:
+    records = [dict(item) for item in handle.known_captures.values()]
+    if target_id:
+        records = [item for item in records if str(item.get("target_id") or "") == str(target_id or "")]
+    return sorted(
+        records,
+        key=lambda item: (int(item.get("timestamp") or 0), int(item.get("capture_id") or 0)),
+        reverse=True,
+    )
+
+
+def _poll_captures_for_target_sync(
+    handle: RemoteHandle,
+    *,
+    target_id: str,
+    deadline_s: float = 3.0,
+    max_messages: int = 24,
+) -> List[Dict[str, Any]]:
+    ident = _remote_target_ident(target_id)
+    if ident <= 0:
+        return []
+    control = _create_target_control_sync(handle, ident)
+    _drain_target_control_messages_sync(
+        handle,
+        control,
+        target_id=str(target_id or ""),
+        max_messages=max_messages,
+        deadline_s=deadline_s,
+    )
+    return _capture_records_for_target(handle, target_id=str(target_id or ""))
+
+
+def _launch_remote_app_sync(
+    handle: RemoteHandle,
+    *,
+    exe_path: str,
+    working_dir: str,
+    cmdline: str,
+    env: Dict[str, Any],
+    capture_options: Dict[str, Any],
+) -> Dict[str, Any]:
+    merged_capture_options = {**dict(handle.default_capture_options or {}), **dict(capture_options or {})}
+    capture_options_obj, applied_capture_options = _capture_options_from_dict(merged_capture_options)
+    env_modifications = _environment_modifications_from_dict(env)
+    execute_result = handle.remote_server.ExecuteAndInject(
+        str(exe_path or ""),
+        str(working_dir or ""),
+        str(cmdline or ""),
+        env_modifications,
+        capture_options_obj,
+    )
+    status = getattr(execute_result, "result", None)
+    status_ok = False
+    if status is not None:
+        ok_method = getattr(status, "OK", None)
+        if callable(ok_method):
+            try:
+                status_ok = bool(ok_method())
+            except Exception:
+                status_ok = _status_ok(status)
+        else:
+            status_ok = _status_ok(status)
+    if status is not None and not status_ok:
+        raise RuntimeToolError(
+            f"ExecuteAndInject({exe_path}) failed: {_status_text(status)}",
+            details=build_renderdoc_error_details(
+                status,
+                operation=f"ExecuteAndInject({exe_path})",
+                source_layer="renderdoc_status",
+                backend_type="remote",
+                capture_context={"remote_id": handle.remote_id, "endpoint": _remote_url(handle.host, handle.port)},
+                classification="remote_endpoint",
+                fix_hint="Verify the remote endpoint can launch and inject the target application.",
+            ),
+        )
+    ident = int(getattr(execute_result, "ident", 0) or 0)
+    if ident <= 0:
+        raise RuntimeToolError(
+            (
+                f"ExecuteAndInject({exe_path}) did not return a target ident"
+                + (f": {_status_text(status)}" if status is not None else "")
+            ),
+            details={
+                "remote_id": handle.remote_id,
+                "endpoint": _remote_url(handle.host, handle.port),
+                "renderdoc_status": {
+                    "status_text": _status_text(status) if status is not None else "",
+                    "status_ok": status_ok,
+                },
+            },
+        )
+    control = _create_target_control_sync(handle, ident, force_connection=False)
+    target = _target_summary_from_control(handle, ident, control)
+    _drain_target_control_messages_sync(handle, control, target_id=str(ident), max_messages=8, deadline_s=0.5)
+    target = dict(handle.known_targets.get(str(ident)) or target)
+    target["capture_options"] = applied_capture_options
+    return target
+
+
+def _trigger_remote_capture_sync(
+    handle: RemoteHandle,
+    *,
+    target_id: str,
+    num_frames: int,
+    capture_delay_ms: int = 0,
+    queued: bool = False,
+) -> Dict[str, Any]:
+    ident, target = _resolve_remote_target_ident_sync(handle, target_id)
+    control = _create_target_control_sync(handle, ident, force_connection=False)
+    if capture_delay_ms > 0:
+        time.sleep(max(0.0, float(capture_delay_ms) / 1000.0))
+    if queued:
+        control.QueueCapture(0, max(1, int(num_frames or 1)))
+    else:
+        control.TriggerCapture(max(1, int(num_frames or 1)))
+    captures = _poll_captures_for_target_sync(
+        handle,
+        target_id=str(ident),
+        deadline_s=5.0 if not queued else 2.0,
+        max_messages=32,
+    )
+    return {
+        "target": dict(handle.known_targets.get(str(ident)) or target),
+        "captures": captures,
+        "queue_status": {
+            "queued": bool(queued),
+            "target_id": str(ident),
+            "num_frames": max(1, int(num_frames or 1)),
+        },
+    }
+
 def _require(fields: Dict[str, Any], *names: str) -> None:
     missing = []
     for name in names:
@@ -2009,6 +2542,46 @@ def _artifact_path(artifact_ref: Any) -> Optional[str]:
     return str(_artifact_store.get_path(sha256))
 
 
+async def _store_text_artifact_payload(
+    text: str,
+    *,
+    stem: str,
+    suffix: str,
+    output_dir: str = "",
+    title: str = "",
+    mime: str = "text/plain",
+) -> Dict[str, Any]:
+    if not text:
+        return {}
+    saved_path = ""
+    if output_dir:
+        out_dir = Path(str(output_dir))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{_safe_name_token(stem)}{suffix}"
+        out_path.write_text(text, encoding="utf-8")
+        saved_path = str(out_path)
+    artifact_path = ""
+    if _artifact_store is not None:
+        artifact = await _artifact_store.store(
+            text.encode("utf-8"),
+            mime=mime,
+            suffix=suffix,
+        )
+        artifact_path = str(_artifact_path(artifact) or "")
+    payload: Dict[str, Any] = {}
+    if title:
+        payload["title"] = str(title)
+    if artifact_path:
+        payload["artifact_path"] = artifact_path
+    if saved_path:
+        payload["saved_path"] = saved_path
+    elif artifact_path:
+        payload["saved_path"] = artifact_path
+    if payload:
+        payload["type"] = "saved_path"
+    return payload
+
+
 def _format_size(value: int) -> str:
     units = ["B", "KB", "MB", "GB", "TB"]
     size = float(value)
@@ -2382,6 +2955,26 @@ async def _pixel_history_raw(controller: Any, resource_id: Any, x: int, y: int, 
     return list(history_raw or [])
 
 
+def _pixel_history_timeout_message(timeout_s: float) -> str:
+    return f"PixelHistory timed out after {timeout_s:.1f}s"
+
+
+async def _pixel_history_raw_with_timeout(
+    controller: Any,
+    resource_id: Any,
+    x: int,
+    y: int,
+    subresource: Any,
+    *,
+    timeout_s: Optional[float] = None,
+) -> List[Any]:
+    effective_timeout = float(PIXEL_HISTORY_TIMEOUT_S if timeout_s is None else timeout_s)
+    return await asyncio.wait_for(
+        _pixel_history_raw(controller, resource_id, x, y, subresource),
+        timeout=effective_timeout,
+    )
+
+
 def _pixel_history_item_payload(item: Any) -> Dict[str, Any]:
     passed = bool(item.Passed()) if hasattr(item, "Passed") else False
     flags: List[str] = []
@@ -2527,6 +3120,17 @@ async def _restore_remote_handle_from_session_record(
     bootstrap_result = None
     bootstrap_detail = _as_dict(remote_record.get("bootstrap"), default={})
 
+    if origin_remote_id and origin_remote_id in _runtime.remotes:
+        live_handle = _runtime.remotes.get(origin_remote_id)
+        if live_handle is not None and live_handle.connected:
+            live_handle.requested_host = requested_host
+            live_handle.requested_port = requested_port
+            if device_serial:
+                live_handle.device_serial = device_serial
+            if bootstrap_detail:
+                live_handle.bootstrap = dict(bootstrap_detail)
+            return live_handle
+
     if transport == "adb_android":
         bootstrap_result = await _offload(
             bootstrap_android_remote,
@@ -2612,7 +3216,8 @@ async def _restore_remote_handle_from_session_record(
         server_info=server_info,
         bootstrap=bootstrap_detail,
         bootstrap_result=bootstrap_result,
-        leased_session_id=str(session_id or ""),
+        leased_session_id="",
+        leased_session_ids=[],
         requested_host=requested_host,
         requested_port=requested_port,
         device_serial=device_serial,
@@ -2700,6 +3305,7 @@ async def _recover_single_session_from_state(
             session_record,
         )
         remote_endpoint = str(remote_handle_for_session.detail.get("endpoint") or _remote_url(remote_handle_for_session.host, remote_handle_for_session.port))
+        _runtime.remotes[str(remote_handle_for_session.remote_id)] = remote_handle_for_session
         backend_config = {
             "type": "remote",
             "host": remote_handle_for_session.host,
@@ -2707,6 +3313,7 @@ async def _recover_single_session_from_state(
             "transport": remote_handle_for_session.transport,
             "remote_id": remote_handle_for_session.remote_id,
             "remote_server": remote_handle_for_session.remote_server,
+            "close_remote_server_on_cleanup": False,
         }
 
     if trace_id:
@@ -2744,15 +3351,9 @@ async def _recover_single_session_from_state(
         remote_metadata: Dict[str, Any] = {}
         if remote_handle_for_session is not None:
             origin_remote_id = str(_session_record_remote_metadata(session_record).get("origin_remote_id") or remote_handle_for_session.remote_id or _new_id("remote"))
-            _runtime.session_owned_remotes[str(session_id)] = remote_handle_for_session
-            _runtime.consumed_remotes[origin_remote_id] = ConsumedRemoteHandle(
-                remote_id=origin_remote_id,
-                endpoint=remote_endpoint,
-                transport=remote_handle_for_session.transport,
-                consumed_by_session_id=str(session_id),
-                server_info=dict(remote_handle_for_session.server_info),
-            )
-            _set_context_remote_session_owned(origin_remote_id, str(session_id), remote_endpoint, context_id=ctx)
+            remote_handle_for_session.remote_id = origin_remote_id
+            _runtime.remotes[origin_remote_id] = remote_handle_for_session
+            _register_remote_session_lease(str(session_id), remote_handle_for_session, context_id=ctx)
             remote_metadata = _remote_session_metadata(
                 remote_handle_for_session,
                 remote_id=origin_remote_id,
@@ -2799,11 +3400,7 @@ async def _recover_single_session_from_state(
             pass
         _runtime.replays.pop(str(session_id), None)
         if remote_handle_for_session is not None:
-            _runtime.session_owned_remotes.pop(str(session_id), None)
-            try:
-                await _offload(_disconnect_remote_handle_sync, remote_handle_for_session)
-            except Exception:
-                pass
+            _release_remote_session_lease(str(session_id), context_id=ctx)
         session_record["state"] = "degraded"
         session_record["is_live"] = False
         session_record["last_error"] = str(exc)
@@ -2821,6 +3418,56 @@ async def _recover_single_session_from_state(
         _sync_context_metrics(ctx)
         _sync_context_snapshot_from_state(ctx)
         raise
+
+
+async def _maybe_refresh_remote_session_after_revert(
+    session_id: str,
+    *,
+    remaining_replacements: Sequence[Dict[str, Any]],
+) -> None:
+    if remaining_replacements:
+        return
+    ctx = _runtime_context_id()
+    state = _context_state(ctx)
+    sessions = state.setdefault("sessions", {})
+    session_record = dict(sessions.get(str(session_id)) or {})
+    if not session_record:
+        return
+    if str(session_record.get("backend_type") or "local") != "remote":
+        return
+
+    try:
+        await _session_manager.close_session(str(session_id))
+    except Exception:
+        logger.debug(
+            "Best-effort close_session during replacement revert refresh failed",
+            exc_info=True,
+        )
+
+    _runtime.replays.pop(str(session_id), None)
+    owned_handle = _release_remote_session_lease(str(session_id), context_id=ctx)
+    remote_meta = _session_record_remote_metadata(session_record)
+    origin_remote_id = str(
+        remote_meta.get("origin_remote_id")
+        or getattr(owned_handle, "remote_id", "")
+        or "",
+    ).strip()
+
+    live_handle = _runtime.remotes.pop(origin_remote_id, None) if origin_remote_id else None
+    if origin_remote_id:
+        _clear_context_remote_live(origin_remote_id, context_id=ctx)
+    if live_handle is None:
+        live_handle = owned_handle
+    if live_handle is not None:
+        try:
+            await _offload(_disconnect_remote_handle_sync, live_handle)
+        except Exception:
+            logger.debug(
+                "Best-effort remote disconnect during replacement revert refresh failed",
+                exc_info=True,
+            )
+
+    await _recover_single_session_from_state(ctx, str(session_id))
 
 
 async def _recover_context_sessions(context_id: str) -> Dict[str, Any]:
@@ -2999,14 +3646,7 @@ async def runtime_shutdown() -> None:
                 await _offload(_disconnect_remote_handle_sync, handle)
             except Exception:
                 pass
-    for sid in list(_runtime.session_owned_remotes.keys()):
-        handle = _runtime.session_owned_remotes.pop(sid, None)
-        if handle is not None:
-            handle.remote_server = None
-            try:
-                await _offload(_disconnect_remote_handle_sync, handle)
-            except Exception:
-                pass
+    _runtime.session_owned_remotes.clear()
     _runtime.consumed_remotes.clear()
     _runtime.context_snapshots.clear()
     _runtime.context_states.clear()
@@ -3028,10 +3668,15 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
         return _ok(api_version=version, capabilities=capabilities)
 
     if action == "shutdown":
+        unique_remote_ids = {
+            str(item.remote_id or "")
+            for item in list(_runtime.remotes.values()) + list(_runtime.session_owned_remotes.values())
+            if item is not None and str(item.remote_id or "").strip()
+        }
         released = {
             "sessions": len(_runtime.replays),
             "capture_files": len(_runtime.captures),
-            "remote_connections": len(_runtime.remotes) + len(_runtime.session_owned_remotes),
+            "remote_connections": len(unique_remote_ids),
             "shader_debugs": len(_runtime.shader_debugs),
         }
         if _patch_engine is not None:
@@ -3056,14 +3701,7 @@ async def _dispatch_core(action: str, args: Dict[str, Any]) -> str:
                     await _offload(_disconnect_remote_handle_sync, handle)
                 except Exception:
                     pass
-        for sid in list(_runtime.session_owned_remotes.keys()):
-            handle = _runtime.session_owned_remotes.pop(sid, None)
-            if handle is not None:
-                handle.remote_server = None
-                try:
-                    await _offload(_disconnect_remote_handle_sync, handle)
-                except Exception:
-                    pass
+        _runtime.session_owned_remotes.clear()
         _runtime.consumed_remotes.clear()
         _runtime.context_snapshots.clear()
         _runtime.context_states.clear()
@@ -3257,22 +3895,22 @@ async def _core_capabilities(*, detail: str) -> Dict[str, Any]:
             source="renderdoc_runtime",
         ),
         "mesh_post_transform": _capability_entry(
-            False,
-            reason="Post-VS/GS extraction is not available in this build.",
+            True,
+            reason="Requires a replay session whose controller exposes GetPostVSData.",
             optional=True,
-            source="runtime_build",
+            source="renderdoc_runtime",
         ),
         "shader_binary_export": _capability_entry(
-            False,
-            reason="Shader binary extraction is not available via this replay backend.",
+            True,
+            reason="Requires a bound shader whose reflection exposes rawBytes.",
             optional=True,
-            source="runtime_build",
+            source="renderdoc_runtime",
         ),
         "shader_compile": _capability_entry(
-            False,
-            reason="On-host shader compilation is not configured in this build.",
+            True,
+            reason="Requires a replay session whose controller exposes BuildTargetShader.",
             optional=True,
-            source="runtime_build",
+            source="renderdoc_runtime",
         ),
         "counters": _capability_entry(
             True,
@@ -3754,6 +4392,19 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
     if action == "select_session":
         _require(args, "session_id")
         session_id = str(args["session_id"] or "").strip()
+        state = _context_state(context_id)
+        if session_id in state.get("sessions", {}):
+            if session_id not in _runtime.replays:
+                try:
+                    await _ensure_live_session(session_id)
+                except CoreError as exc:
+                    if exc.code == "session_resume_failed":
+                        return _err(
+                            exc.message,
+                            code=exc.code,
+                            category=exc.category,
+                            details=dict(exc.details),
+                        )
         snapshot = _select_context_session_state(session_id, context_id=context_id)
         state = _context_state(context_id)
         return _ok(
@@ -3779,12 +4430,25 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
                     details={"session_id": requested_session_id},
                 )
             if not bool(session.get("is_live")):
-                return _err(
-                    f"Session could not be resumed: {requested_session_id}",
-                    code="session_resume_failed",
-                    category="runtime",
-                    details={"session_id": requested_session_id, "last_error": str(session.get("last_error") or "")},
-                )
+                try:
+                    await _ensure_live_session(requested_session_id)
+                except CoreError as exc:
+                    if exc.code == "session_resume_failed":
+                        return _err(
+                            exc.message,
+                            code=exc.code,
+                            category=exc.category,
+                            details=dict(exc.details),
+                        )
+                state = _context_state(context_id)
+                session = dict(state.get("sessions", {}).get(requested_session_id) or {})
+                if not bool(session.get("is_live")):
+                    return _err(
+                        f"Session could not be resumed: {requested_session_id}",
+                        code="session_resume_failed",
+                        category="runtime",
+                        details={"session_id": requested_session_id, "last_error": str(session.get("last_error") or "")},
+                    )
             _select_context_session_state(requested_session_id, context_id=context_id)
         state = _context_state(context_id)
         snapshot = _context_snapshot(context_id)
@@ -4008,6 +4672,7 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                 "transport": remote_handle.transport,
                 "remote_id": remote_id,
                 "remote_server": remote_handle.remote_server,
+                "close_remote_server_on_cleanup": False,
             }
         session_info = await _session_manager.create_session(
             backend_config=backend_config,
@@ -4032,17 +4697,7 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                 active_event_id=active_event_id,
             )
             if remote_handle_for_session is not None:
-                _runtime.remotes.pop(remote_id, None)
-                remote_handle_for_session.leased_session_id = session_info.session_id
-                _runtime.session_owned_remotes[session_info.session_id] = remote_handle_for_session
-                _runtime.consumed_remotes[remote_id] = ConsumedRemoteHandle(
-                    remote_id=remote_id,
-                    endpoint=remote_endpoint,
-                    transport=remote_handle_for_session.transport,
-                    consumed_by_session_id=session_info.session_id,
-                    server_info=dict(remote_handle_for_session.server_info),
-                )
-                _set_context_remote_session_owned(remote_id, session_info.session_id, remote_endpoint)
+                _register_remote_session_lease(session_info.session_id, remote_handle_for_session)
             _set_context_runtime_session(
                 session_info.session_id,
                 capture_file_id=capture_file_id,
@@ -4078,19 +4733,13 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                 pass
             _runtime.replays.pop(session_info.session_id, None)
             if remote_handle_for_session is not None:
-                handle_for_cleanup = _runtime.remotes.pop(remote_id, None) or remote_handle_for_session
-                handle_for_cleanup.connected = False
-                handle_for_cleanup.remote_server = None
-                try:
-                    await _offload(_disconnect_remote_handle_sync, handle_for_cleanup)
-                except Exception:
-                    pass
-                _clear_context_remote_live(remote_id)
+                _release_remote_session_lease(session_info.session_id)
+                _set_context_remote_live(remote_id, remote_endpoint)
             raise
     if action == "close_replay":
         _require(args, "session_id")
         session_id = str(args["session_id"])
-        owned_remote = _runtime.session_owned_remotes.pop(session_id, None)
+        owned_remote = _release_remote_session_lease(session_id)
         if _patch_engine is not None:
             try:
                 await _patch_engine.revert_all(session_id, _session_manager)
@@ -4099,14 +4748,8 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
         _runtime.shader_replacements.pop(session_id, None)
         _runtime.replays.pop(session_id, None)
         await _session_manager.close_session(session_id)
-        if owned_remote is not None:
-            owned_remote.remote_server = None
-            errors = await _offload(_disconnect_remote_handle_sync, owned_remote)
-            if errors:
-                _record_log("warning", "session_remote_cleanup", {"session_id": session_id, "errors": errors})
-        tombstone = next((item for item in _runtime.consumed_remotes.values() if item.consumed_by_session_id == session_id), None)
-        if tombstone is not None:
-            _set_context_remote_consumed(tombstone.remote_id, session_id, tombstone.endpoint)
+        if owned_remote is not None and owned_remote.remote_id in _runtime.remotes:
+            _set_context_remote_live(owned_remote.remote_id, _remote_url(owned_remote.host, owned_remote.port))
         _clear_context_runtime(session_id)
         return _ok()
 
@@ -5161,6 +5804,61 @@ async def _dispatch_buffer(action: str, args: Dict[str, Any]) -> str:
     return _err(f"Unsupported buffer action: {action}")
 
 
+def _resource_format_payload(fmt: Any) -> Dict[str, Any]:
+    if fmt is None:
+        return {}
+    payload: Dict[str, Any] = {}
+    for attr in ("type", "compCount", "compByteWidth", "compType", "special", "bgraOrder", "srgbCorrected"):
+        if not hasattr(fmt, attr):
+            continue
+        value = getattr(fmt, attr)
+        if isinstance(value, bool):
+            payload[attr] = bool(value)
+        else:
+            try:
+                payload[attr] = int(value)
+            except Exception:
+                payload[attr] = str(value)
+    payload["repr"] = str(fmt)
+    return payload
+
+
+def _mesh_format_payload(mesh: Any) -> Dict[str, Any]:
+    return {
+        "vertex_resource_id": str(getattr(mesh, "vertexResourceId", "") or ""),
+        "vertex_byte_offset": int(getattr(mesh, "vertexByteOffset", 0) or 0),
+        "vertex_byte_size": int(getattr(mesh, "vertexByteSize", 0) or 0),
+        "vertex_byte_stride": int(getattr(mesh, "vertexByteStride", 0) or 0),
+        "index_resource_id": str(getattr(mesh, "indexResourceId", "") or ""),
+        "index_byte_offset": int(getattr(mesh, "indexByteOffset", 0) or 0),
+        "index_byte_size": int(getattr(mesh, "indexByteSize", 0) or 0),
+        "index_byte_stride": int(getattr(mesh, "indexByteStride", 0) or 0),
+        "num_indices": int(getattr(mesh, "numIndices", 0) or 0),
+        "topology": str(getattr(mesh, "topology", "") or ""),
+        "status": str(getattr(mesh, "status", "") or ""),
+        "format": _resource_format_payload(getattr(mesh, "format", None)),
+    }
+
+
+def _mesh_vertex_rows(raw: bytes, *, stride: int, max_vertices: int) -> List[Dict[str, Any]]:
+    if stride <= 0:
+        return []
+    rows: List[Dict[str, Any]] = []
+    total_vertices = len(raw) // stride
+    count = total_vertices if max_vertices <= 0 else min(total_vertices, max_vertices)
+    for vertex_index in range(count):
+        start = vertex_index * stride
+        end = start + stride
+        chunk = raw[start:end]
+        rows.append(
+            {
+                "vertex_index": vertex_index,
+                "bytes_hex": chunk.hex(),
+            }
+        )
+    return rows
+
+
 async def _dispatch_mesh(action: str, args: Dict[str, Any]) -> str:
     if action == "get_drawcall_mesh_config":
         _require(args, "session_id", "event_id")
@@ -5169,13 +5867,72 @@ async def _dispatch_mesh(action: str, args: Dict[str, Any]) -> str:
         snap = await _pipeline_service.snapshot_pipeline(session_id, event_id, _session_manager)
         return _ok(mesh_config={"event_id": event_id, "topology": snap.topology, "bindings": [b.model_dump(mode="json") for b in snap.bindings]})
     if action in {"get_post_vs_data", "get_post_gs_data"}:
-        return _capability_error(
-            "mesh_post_transform_unavailable",
-            "Post-VS/GS extraction is not available in this build",
-            capability="mesh_post_transform",
-            reason="Post-VS/GS extraction is not available in this build.",
-            source="runtime_build",
-            action=action,
+        _require(args, "session_id")
+        session_id = str(args["session_id"])
+        controller = await _get_controller(session_id)
+        event_id = await _ensure_event(
+            session_id,
+            _as_int(args.get("event_id"), 0) if args.get("event_id") is not None else None,
+        )
+        rd = _get_rd()
+        stage = rd.MeshDataStage.VSOut if action == "get_post_vs_data" else rd.MeshDataStage.GSOut
+        instance = _as_int(args.get("instance"), 0)
+        view_index = _as_int(args.get("view_index", args.get("view", 0)), 0)
+        max_vertices = _as_int(args.get("max_vertices"), 0)
+        try:
+            mesh = await _offload(controller.GetPostVSData, instance, view_index, stage)
+        except Exception as exc:
+            return _err(
+                f"Failed to fetch post-transform mesh data: {exc}",
+                code="mesh_post_transform_failed",
+                category="runtime",
+                details={"session_id": session_id, "resolved_event_id": int(event_id), "stage": str(stage)},
+            )
+        vertex_resource_id = getattr(mesh, "vertexResourceId", None)
+        if _is_null_resource_id(vertex_resource_id):
+            mesh_format = _mesh_format_payload(mesh)
+            if action == "get_post_gs_data":
+                pipe = await _get_output(session_id)
+                gs_shader_id = await _offload(pipe.GetShader, _rd_stage("gs"))
+                if _is_null_resource_id(gs_shader_id):
+                    return _ok(
+                        mesh_data={
+                            "mesh_format": mesh_format,
+                            "vertex_rows": [],
+                            "vertex_count": 0,
+                            "truncated": False,
+                            "stage": "GS",
+                            "stage_bound": False,
+                            "availability_reason": f"No shader bound at stage GS for event {int(event_id)}",
+                        },
+                        resolved_event_id=int(event_id),
+                    )
+            return _err(
+                "Post-transform mesh data is unavailable for the requested draw",
+                code="mesh_post_transform_unavailable",
+                category="runtime",
+                details={
+                    "session_id": session_id,
+                    "resolved_event_id": int(event_id),
+                    "stage": str(stage),
+                    "stage_name": "GS" if action == "get_post_gs_data" else "VS",
+                    "mesh_format": mesh_format,
+                },
+            )
+        vertex_offset = int(getattr(mesh, "vertexByteOffset", 0) or 0)
+        vertex_size = int(getattr(mesh, "vertexByteSize", 0) or 0)
+        vertex_stride = int(getattr(mesh, "vertexByteStride", 0) or 0)
+        raw = await _offload(controller.GetBufferData, vertex_resource_id, vertex_offset, vertex_size)
+        mesh_format = _mesh_format_payload(mesh)
+        rows = _mesh_vertex_rows(raw, stride=vertex_stride, max_vertices=max_vertices)
+        return _ok(
+            mesh_data={
+                "mesh_format": mesh_format,
+                "vertex_rows": rows,
+                "vertex_count": len(rows),
+                "truncated": bool(max_vertices > 0 and len(raw) // max(vertex_stride, 1) > len(rows)),
+            },
+            resolved_event_id=int(event_id),
         )
     if action == "decode_vertex_data":
         _require(args, "session_id", "vertex_buffer_id", "layout")
@@ -5400,12 +6157,26 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
         sub.slice = _as_int(args.get("slice"), 0)
         sub.sample = _as_int(args.get("sample"), 0)
         try:
-            history_raw = await _pixel_history_raw(
+            history_raw = await _pixel_history_raw_with_timeout(
                 controller,
                 rid,
                 _as_int(args["x"]),
                 _as_int(args["y"]),
                 sub,
+            )
+        except asyncio.TimeoutError:
+            return _err(
+                _pixel_history_timeout_message(PIXEL_HISTORY_TIMEOUT_S),
+                code="pixel_history_timeout",
+                category="runtime",
+                details={
+                    "session_id": session_id,
+                    "texture_id": str(rid),
+                    "x": _as_int(args["x"]),
+                    "y": _as_int(args["y"]),
+                    "timeout_seconds": float(PIXEL_HISTORY_TIMEOUT_S),
+                    "resolved_event_id": int(event_id),
+                },
             )
         except Exception as exc:
             return _err(f"PixelHistory unavailable: {exc}")
@@ -5542,16 +6313,179 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
     return _err(f"Unsupported texture action: {action}")
 
 
+def _shader_encoding_name(value: Any) -> str:
+    rd = _get_rd()
+    try:
+        raw_value = int(value)
+    except Exception:
+        raw_value = None
+    if raw_value is not None:
+        for name in dir(rd.ShaderEncoding):
+            if name.startswith("_"):
+                continue
+            try:
+                if int(getattr(rd.ShaderEncoding, name)) != raw_value:
+                    continue
+            except Exception:
+                continue
+            mapping = {
+                "SPIRVAsm": "spirvasm",
+                "SPIRV": "spirv",
+                "DXBC": "dxbc",
+                "DXIL": "dxil",
+                "HLSL": "hlsl",
+                "GLSL": "glsl",
+                "Slang": "slang",
+            }
+            return mapping.get(name, str(name).strip().lower())
+    text = str(value or "").strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text.lower()
+
+
+def _shader_encoding_from_name(name: str) -> Any:
+    rd = _get_rd()
+    normalized = str(name or "").strip().lower()
+    mapping = {
+        "hlsl": getattr(rd.ShaderEncoding, "HLSL", None),
+        "glsl": getattr(rd.ShaderEncoding, "GLSL", None),
+        "spirv": getattr(rd.ShaderEncoding, "SPIRV", None),
+        "spirvasm": getattr(rd.ShaderEncoding, "SPIRVAsm", None),
+        "spirv_asm": getattr(rd.ShaderEncoding, "SPIRVAsm", None),
+        "dxbc": getattr(rd.ShaderEncoding, "DXBC", None),
+        "dxil": getattr(rd.ShaderEncoding, "DXIL", None),
+        "slang": getattr(rd.ShaderEncoding, "Slang", None),
+    }
+    return mapping.get(normalized)
+
+
+def _shader_binary_suffix(container: str) -> str:
+    normalized = str(container or "").strip().lower()
+    mapping = {
+        "dxbc": ".dxbc",
+        "dxil": ".dxil",
+        "spirv": ".spv",
+        "spirvasm": ".spvasm",
+        "spirv_asm": ".spvasm",
+        "glsl": ".glsl",
+        "hlsl": ".hlslbin",
+    }
+    return mapping.get(normalized, ".bin")
+
+
+def _shader_raw_bytes(reflection: Any) -> bytes:
+    raw_bytes = getattr(reflection, "rawBytes", None)
+    if raw_bytes is None:
+        return b""
+    try:
+        return bytes(raw_bytes)
+    except Exception:
+        pass
+    try:
+        return raw_bytes.tobytes()
+    except Exception:
+        return b""
+
+
 async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
     if action == "compile":
-        return _capability_error(
-            "shader_compile_unavailable",
-            "On-host shader compilation is not configured",
-            capability="shader_compile",
-            reason="On-host shader compilation is not configured in this build.",
-            source="runtime_build",
-            action=action,
+        session_id = str(args.get("session_id") or _context_snapshot().get("runtime", {}).get("session_id") or "").strip()
+        if not session_id:
+            return _err(
+                "rd.shader.compile requires session_id or a current context session",
+                code="validation_error",
+                category="validation",
+            )
+        controller = await _get_controller(session_id)
+        rd = _get_rd()
+        source = str(args.get("source") or "")
+        if not source:
+            return _err("Missing required parameter(s): source", code="validation_error", category="validation")
+        stage = _parse_stage(args.get("stage"))
+        entry = str(args.get("entry") or "main").strip() or "main"
+        requested_encoding_name = str(args.get("source_encoding") or "").strip().lower()
+        target_hint = str(args.get("target") or "").strip().lower()
+        if not requested_encoding_name:
+            if "#version" in source.lower():
+                requested_encoding_name = "glsl"
+            elif target_hint.startswith("spirv") or source.lstrip().startswith("Op"):
+                requested_encoding_name = "spirvasm"
+            else:
+                requested_encoding_name = "hlsl"
+        requested_encoding = _shader_encoding_from_name(requested_encoding_name)
+        supported_encodings = list(await _offload(controller.GetTargetShaderEncodings) or [])
+        supported_encoding_names = [_shader_encoding_name(item) for item in supported_encodings]
+        if requested_encoding is None:
+            return _err(
+                f"Unsupported shader source encoding: {requested_encoding_name}",
+                code="shader_compile_encoding_unsupported",
+                category="validation",
+                details={"requested_source_encoding": requested_encoding_name, "supported_source_encodings": supported_encoding_names},
+            )
+        if requested_encoding not in supported_encodings:
+            return _err(
+                f"Requested shader source encoding is unsupported for this session: {requested_encoding_name}",
+                code="shader_compile_encoding_unsupported",
+                category="validation",
+                details={"requested_source_encoding": requested_encoding_name, "supported_source_encodings": supported_encoding_names},
+            )
+        compile_flags = rd.ShaderCompileFlags()
+        shader_id, messages = await _offload(
+            controller.BuildTargetShader,
+            entry,
+            requested_encoding,
+            source.encode("utf-8"),
+            compile_flags,
+            _rd_stage(stage),
         )
+        if _is_null_resource_id(shader_id):
+            return _err(
+                str(messages or "BuildTargetShader returned a null shader id"),
+                code="shader_compile_failed",
+                category="runtime",
+                details={
+                    "session_id": session_id,
+                    "stage": stage.upper(),
+                    "entry": entry,
+                    "requested_source_encoding": requested_encoding_name,
+                    "supported_source_encodings": supported_encoding_names,
+                },
+            )
+        result: Dict[str, Any] = {
+            "session_id": session_id,
+            "shader_id": str(shader_id),
+            "entry": entry,
+            "stage": stage.upper(),
+            "source_encoding": requested_encoding_name,
+            "supported_source_encodings": supported_encoding_names,
+            "messages": str(messages or ""),
+        }
+        try:
+            entry_points = await _offload(controller.GetShaderEntryPoints, shader_id)
+            if entry_points:
+                reflection = await _offload(controller.GetShader, rd.ResourceId(), shader_id, entry_points[0])
+                raw_bytes = _shader_raw_bytes(reflection)
+            else:
+                raw_bytes = b""
+        except Exception:
+            raw_bytes = b""
+        if raw_bytes:
+            output_path = args.get("output_path")
+            suffix = _shader_binary_suffix(requested_encoding_name)
+            if output_path:
+                out = Path(str(output_path))
+                if out.suffix == "":
+                    out = out.with_suffix(suffix)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(raw_bytes)
+                result["saved_path"] = str(out)
+            else:
+                assert _artifact_store is not None
+                artifact = await _artifact_store.store(raw_bytes, mime="application/octet-stream", suffix=suffix)
+                result["artifact_path"] = _artifact_path(artifact)
+            result["byte_size"] = len(raw_bytes)
+        return _ok(**result)
 
     _require(args, "session_id")
     session_id = str(args["session_id"])
@@ -5635,6 +6569,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         cross_event_rejections = 0
         debugger_missing_count = 0
         matched_event_hit_seen = False
+        pixel_history_timeout_count = 0
 
         for target_source, target_candidate in target_candidates:
             try:
@@ -5677,9 +6612,43 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 "target": resolved_target,
             }
             last_target_source = target_source
+            history_timed_out = False
 
             try:
-                history_raw = await _pixel_history_raw(controller, target_rid, x, y, target_sub)
+                history_raw = await _pixel_history_raw_with_timeout(
+                    controller,
+                    target_rid,
+                    x,
+                    y,
+                    target_sub,
+                )
+            except asyncio.TimeoutError:
+                pixel_history_timeout_count += 1
+                history_items = []
+                history_summary = {
+                    "hit_count": 0,
+                    "matched_event_hit_count": 0,
+                    "passed_hit_count": 0,
+                    "viable_hit_count": 0,
+                    "primitive_ids": [],
+                    "error": _pixel_history_timeout_message(PIXEL_HISTORY_TIMEOUT_S),
+                    "timeout_seconds": float(PIXEL_HISTORY_TIMEOUT_S),
+                }
+                history_timed_out = True
+                attempts_log.append(
+                    {
+                        "target_source": target_source,
+                        "stage": "pixel_history",
+                        "resolved_context": {
+                            "event_id": int(event_id),
+                            "x": int(x),
+                            "y": int(y),
+                            "target": resolved_target,
+                        },
+                        "error": _pixel_history_timeout_message(PIXEL_HISTORY_TIMEOUT_S),
+                        "timeout_seconds": float(PIXEL_HISTORY_TIMEOUT_S),
+                    },
+                )
             except Exception as exc:
                 history_items: List[Dict[str, Any]] = []
                 history_summary = {
@@ -5699,6 +6668,8 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             last_history_summary = history_summary
             if int(history_summary.get("matched_event_hit_count", 0)) > 0:
                 matched_event_hit_seen = True
+            if history_timed_out:
+                continue
             default_sample = sample_override if sample_override is not None else _subresource_to_dict(target_sub)["sample"]
             default_view = view_override if view_override is not None else 0
 
@@ -5876,6 +6847,12 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 error_code = "shader_debug_start_failed"
                 error_category = "runtime"
                 error_message = "Shader debug trace was created without a usable debugger handle"
+            elif pixel_history_timeout_count > 0 and debug_attempt_count == 0:
+                failure_stage = "pixel_history"
+                failure_reason = "pixel_history_timeout"
+                error_code = "shader_debug_start_failed"
+                error_category = "runtime"
+                error_message = "Shader debug target discovery timed out while collecting pixel history"
             elif not matched_event_hit_seen and cross_event_rejections > 0:
                 failure_stage = "pixel_history"
                 failure_reason = "cross_event_only"
@@ -5898,6 +6875,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 "cross_event_rejections": int(cross_event_rejections),
                 "matched_event_hit_seen": bool(matched_event_hit_seen),
                 "debugger_missing_count": int(debugger_missing_count),
+                "pixel_history_timeout_count": int(pixel_history_timeout_count),
             }
             if error_category == "runtime":
                 return _err(
@@ -5979,7 +6957,28 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 category="not_found",
                 details={"replacement_id": replacement_id, "session_id": session_id},
             )
-        _runtime.shader_replacements[session_id] = [r for r in repl if str(r.get("replacement_id")) != replacement_id]
+        remaining_replacements = [
+            r for r in repl if str(r.get("replacement_id")) != replacement_id
+        ]
+        _runtime.shader_replacements[session_id] = remaining_replacements
+        try:
+            await _maybe_refresh_remote_session_after_revert(
+                session_id,
+                remaining_replacements=remaining_replacements,
+            )
+        except Exception as exc:
+            return _err(
+                "Replacement reverted but replay session recovery failed",
+                code="replacement_revert_recovery_failed",
+                category="runtime",
+                details={
+                    "replacement_id": replacement_id,
+                    "session_id": session_id,
+                    "remaining_replacements": len(remaining_replacements),
+                    "error": str(exc),
+                    "exception_type": type(exc).__name__,
+                },
+            )
         return _ok(replacement_id=replacement_id, reverted=True)
 
     if action == "edit_and_replace":
@@ -6052,6 +7051,8 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 "preserve_outputs": _as_bool(args.get("preserve_outputs"), True),
             }
         )
+        emit_patch_artifacts = _as_bool(args.get("emit_patch_artifacts"), False)
+        patch_output_dir = str(args.get("output_dir") or "").strip()
         patch_result = await _patch_engine.apply_patch(
             session_id=session_id,
             event_id=int(event_id),
@@ -6075,23 +7076,85 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 category=patch_result.error_category or "runtime",
                 details=error_details,
             )
+        no_source_change = bool(
+            patch_result.applied_to_shader_hash
+            and patch_result.applied_to_shader_hash == patch_result.original_shader_hash
+            and any(
+                "no source changes before recompilation" in str(msg).lower()
+                for msg in (patch_result.messages or [])
+            )
+        )
         replacement = {
             "replacement_id": patch_spec.patch_id,
             "stage": stage.upper(),
             "resolved_event_id": int(event_id),
             "original_shader_id": shader_id,
-            "status": "applied",
+            "status": "noop" if no_source_change else "applied",
             "messages": list(patch_result.messages or []),
             "applied_to_shader_hash": patch_result.applied_to_shader_hash,
             "original_shader_hash": patch_result.original_shader_hash,
+            "compile": {
+                "encoding": str(patch_result.encoding or ""),
+                "disassembly_target": str(patch_result.disassembly_target or ""),
+                "entry_point": str(patch_result.entry_point or ""),
+                "compile_flags": list(patch_result.compile_flags or []),
+            },
         }
-        _runtime.shader_replacements.setdefault(session_id, []).append(replacement)
+        artifacts: List[Dict[str, Any]] = []
+        if emit_patch_artifacts or patch_output_dir:
+            base_stem = f"shader_patch_ev{int(event_id)}_{stage}_{patch_spec.patch_id}"
+            before_payload = await _store_text_artifact_payload(
+                str(patch_result.source_before_text or ""),
+                stem=f"{base_stem}_before",
+                suffix=".txt",
+                output_dir=patch_output_dir,
+                title="shader_source_before",
+            )
+            after_payload = await _store_text_artifact_payload(
+                str(patch_result.source_after_text or ""),
+                stem=f"{base_stem}_after",
+                suffix=".txt",
+                output_dir=patch_output_dir,
+                title="shader_source_after",
+            )
+            diff_text = ""
+            if patch_result.source_before_text or patch_result.source_after_text:
+                diff_text = "".join(
+                    difflib.unified_diff(
+                        str(patch_result.source_before_text or "").splitlines(keepends=True),
+                        str(patch_result.source_after_text or "").splitlines(keepends=True),
+                        fromfile="before",
+                        tofile="after",
+                    )
+                )
+            diff_payload = await _store_text_artifact_payload(
+                diff_text,
+                stem=f"{base_stem}_diff",
+                suffix=".diff",
+                output_dir=patch_output_dir,
+                title="shader_patch_diff",
+                mime="text/x-diff",
+            )
+            patch_artifacts = {
+                "source_before": before_payload,
+                "source_after": after_payload,
+                "patch_diff": diff_payload,
+            }
+            replacement["artifacts"] = {
+                key: value
+                for key, value in patch_artifacts.items()
+                if value
+            }
+            artifacts = [value for value in patch_artifacts.values() if value]
+        if not no_source_change:
+            _runtime.shader_replacements.setdefault(session_id, []).append(replacement)
         return _ok(
             replacement_id=replacement["replacement_id"],
             status=replacement["status"],
             resolved_event_id=int(event_id),
             messages=replacement["messages"],
             replacement=replacement,
+            artifacts=artifacts,
         )
 
     if action == "get_messages":
@@ -6104,23 +7167,72 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         return _ok(messages=messages, severity_min=severity_min)
 
     if action == "save_binary":
-        return _capability_error(
-            "shader_binary_export_unavailable",
-            "Shader binary extraction is not available via this replay backend",
-            capability="shader_binary_export",
-            reason="Shader binary extraction is not available via this replay backend.",
-            source="runtime_build",
-            action=action,
-        )
+        action = "extract_binary"
     if action == "extract_binary":
-        return _capability_error(
-            "shader_binary_export_unavailable",
-            "Shader binary extraction is not available via this replay backend",
-            capability="shader_binary_export",
-            reason="Shader binary extraction is not available via this replay backend.",
-            source="runtime_build",
-            action=action,
-        )
+        shader_id = str(args.get("shader_id", "")).strip()
+        stage = _parse_stage(args.get("stage"))
+        if shader_id:
+            stage = await _find_stage_by_shader(shader_id)
+            if stage is None:
+                return _err(
+                    f"Shader not bound at current event: {shader_id}",
+                    code="shader_not_bound",
+                    category="runtime",
+                    details={"session_id": session_id, "resolved_event_id": int(event_id), "shader_id": shader_id},
+                )
+        else:
+            rd_stage_explicit = _rd_stage(stage)
+            bound_shader = await _offload(pipe.GetShader, rd_stage_explicit)
+            if _is_null_resource_id(bound_shader):
+                return _err(
+                    f"No shader bound at stage {stage.upper()} for event {int(event_id)}",
+                    code="shader_not_bound",
+                    category="runtime",
+                    details={"session_id": session_id, "resolved_event_id": int(event_id), "stage": stage.upper()},
+                )
+            shader_id = str(bound_shader)
+        rd_stage = _rd_stage(stage)
+        reflection = await _offload(pipe.GetShaderReflection, rd_stage)
+        raw_bytes = _shader_raw_bytes(reflection)
+        if not raw_bytes:
+            return _capability_error(
+                "shader_binary_export_unavailable",
+                "Shader reflection does not expose raw bytes for the requested shader",
+                capability="shader_binary_export",
+                reason="Shader reflection does not expose raw bytes for the requested shader.",
+                source="renderdoc_runtime",
+                action=action,
+                session_id=session_id,
+                shader_id=shader_id,
+                resolved_event_id=int(event_id),
+            )
+        encoding_name = _shader_encoding_name(getattr(reflection, "encoding", ""))
+        container = str(args.get("container") or encoding_name or "bin").strip().lower() or "bin"
+        result: Dict[str, Any] = {
+            "shader_id": shader_id,
+            "encoding": encoding_name,
+            "container": container,
+            "byte_size": len(raw_bytes),
+            "resolved_event_id": int(event_id),
+        }
+        output_path = args.get("output_path")
+        suffix = _shader_binary_suffix(container or encoding_name)
+        if output_path:
+            out = Path(str(output_path))
+            if out.suffix == "":
+                out = out.with_suffix(suffix)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(raw_bytes)
+            result["saved_path"] = str(out)
+        else:
+            assert _artifact_store is not None
+            artifact = await _artifact_store.store(raw_bytes, mime="application/octet-stream", suffix=suffix)
+            result["artifact_path"] = _artifact_path(artifact)
+        if _as_bool(args.get("as_base64"), False):
+            import base64
+
+            result["base64"] = base64.b64encode(raw_bytes).decode("ascii")
+        return _ok(**result)
     if action == "get_source":
         return _ok(source=None, files=[])
 
@@ -6408,12 +7520,25 @@ async def _dispatch_perf(action: str, args: Dict[str, Any]) -> str:
         return _ok(counters=counters)
     if action == "describe_counter":
         _require(args, "counter_id")
-        counters = await _perf_service.enumerate_counters(session_id, _session_manager)
         cid = _as_int(args["counter_id"])
-        for counter in counters:
-            if int(counter.get("counter_id", -1)) == cid:
-                return _ok(counter=counter)
-        return _err(f"Counter not found: {cid}")
+        controller = await _get_controller(session_id)
+        try:
+            desc = await _offload(controller.DescribeCounter, cid)
+        except Exception as exc:
+            return _err(
+                f"Counter not found: {cid}",
+                code="counter_not_found",
+                category="runtime",
+                details={"counter_id": cid, "session_id": session_id, "error": str(exc)},
+            )
+        counter = {
+            "counter_id": int(cid),
+            "name": str(getattr(desc, "name", "")),
+            "description": str(getattr(desc, "description", "")),
+            "unit": str(getattr(desc, "unit", "")),
+            "result_type": str(getattr(desc, "resultType", "")),
+        }
+        return _ok(counter=counter)
     if action == "sample_counters":
         counter_ids = [int(v) for v in _as_list(args.get("counter_ids"), default=[])]
         event_range = _as_dict(args.get("event_range"), default={})
@@ -7032,27 +8157,90 @@ async def _dispatch_macro(action: str, args: Dict[str, Any]) -> str:
     if action == "shader_hotfix_validate":
         _require(args, "replacement")
         replacement_args = _as_dict(args["replacement"])
+        validation_args = _as_dict(args.get("validation"))
+        output_root = Path(str(args.get("output_dir") or artifacts_dir()))
+        output_root.mkdir(parents=True, exist_ok=True)
+        before_path = output_root / "before_hotfix.png"
+        after_path = output_root / "after_hotfix.png"
+        target_texture_id = str(
+            validation_args.get("target_texture_id")
+            or validation_args.get("texture_id")
+            or ""
+        ).strip()
+        screenshot_args: Dict[str, Any] = {
+            "session_id": session_id,
+            "event_id": replacement_args.get("event_id"),
+            "output_path": str(before_path),
+        }
+        if target_texture_id:
+            screenshot_args["target"] = {"texture_id": target_texture_id}
+        before_pixel_payload: Optional[Dict[str, Any]] = None
+        pixel_args: Optional[Dict[str, Any]] = None
+        pixel_x = validation_args.get("x")
+        pixel_y = validation_args.get("y")
+        if target_texture_id and pixel_x is not None and pixel_y is not None:
+            pixel_args = {
+                "session_id": session_id,
+                "texture_id": target_texture_id,
+                "x": _as_int(pixel_x),
+                "y": _as_int(pixel_y),
+                "event_id": replacement_args.get("event_id"),
+                "mip": 0,
+                "slice": 0,
+                "sample": 0,
+                "as_type": "float",
+            }
         screenshot_before = await _dispatch_export(
             "screenshot",
-            {
-                "session_id": session_id,
-                "event_id": replacement_args.get("event_id"),
-                "output_path": str(artifacts_dir() / "before_hotfix.png"),
-            },
+            screenshot_args,
         )
+        if pixel_args is not None:
+            before_pixel_payload = json.loads(
+                await _dispatch_texture("get_pixel_value", pixel_args)
+            )
         repl_resp = await _dispatch_shader("edit_and_replace", {"session_id": session_id, **replacement_args})
         repl_payload = json.loads(repl_resp)
         if not repl_payload.get("success"):
             return repl_resp
+        screenshot_args["output_path"] = str(after_path)
         screenshot_after = await _dispatch_export(
             "screenshot",
-            {
-                "session_id": session_id,
-                "event_id": replacement_args.get("event_id"),
-                "output_path": str(artifacts_dir() / "after_hotfix.png"),
-            },
+            screenshot_args,
         )
-        return _ok(replacement=repl_payload, before=json.loads(screenshot_before), after=json.loads(screenshot_after))
+        before_payload = json.loads(screenshot_before)
+        after_payload = json.loads(screenshot_after)
+
+        validation_result: Dict[str, Any] = {
+            "target_texture_id": target_texture_id,
+        }
+
+        if pixel_args is not None:
+            validation_result["before_pixel"] = before_pixel_payload
+            validation_result["after_pixel"] = json.loads(
+                await _dispatch_texture("get_pixel_value", pixel_args)
+            )
+
+        metric = str(validation_args.get("metric") or "").strip().lower()
+        if metric:
+            validation_result["image_diff"] = json.loads(
+                await _dispatch_util(
+                    "diff_images",
+                    {
+                        "image_a_path": str(before_path),
+                        "image_b_path": str(after_path),
+                        "metrics": [metric],
+                    },
+                )
+            )
+
+        return _ok(
+            replacement=repl_payload,
+            before=before_payload,
+            after=after_payload,
+            validation=validation_result,
+            output_dir=str(output_root),
+            artifacts={"before": str(before_path), "after": str(after_path)},
+        )
 
     return _err(f"Unsupported macro action: {action}")
 
@@ -7813,6 +9001,17 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
         handle = _runtime.remotes.get(remote_id)
         if handle is None:
             return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
+        active_session_ids = _remote_active_session_ids(handle)
+        if active_session_ids:
+            return _err(
+                f"Remote handle {remote_id} is still leased by active session(s): {', '.join(active_session_ids)}",
+                code="remote_handle_in_use",
+                category="runtime",
+                details={
+                    "remote_id": remote_id,
+                    "active_session_ids": active_session_ids,
+                },
+            )
         handle = _runtime.remotes.pop(remote_id, None)
         if handle is None:
             return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
@@ -7879,7 +9078,12 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
         return _ok(
             latency_ms=latency_ms,
             server_info=handle.server_info,
-            detail={"connected": True, "transport": handle.transport},
+            detail={
+                "connected": True,
+                "transport": handle.transport,
+                "endpoint": _remote_url(handle.host, handle.port),
+                "active_session_ids": _remote_active_session_ids(handle),
+            },
         )
 
     if action in {
@@ -7898,17 +9102,180 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
         consumed = _remote_consumed_payload(remote_id)
         if consumed is not None:
             return consumed
-        if remote_id not in _runtime.remotes:
+        handle = _runtime.remotes.get(remote_id)
+        if handle is None:
             return _err(f"Unknown remote_id: {remote_id}", code="remote_not_found", category="runtime")
-        return _capability_error(
-            "remote_dependency",
-            "Remote target interaction requires a live RenderDoc remote endpoint",
-            capability="remote",
-            reason="Requires a live RenderDoc remote endpoint.",
-            source="external_dependency",
-            optional=True,
-            requires_remote_device=True,
-        )
+        if not handle.connected or handle.remote_server is None:
+            return _err(
+                f"Remote handle {remote_id} is not connected",
+                code="remote_not_connected",
+                category="runtime",
+                details={"remote_id": remote_id, "endpoint": _remote_url(handle.host, handle.port)},
+            )
+        if action == "list_targets":
+            try:
+                targets = await _offload(_remote_list_targets_sync, handle)
+            except Exception as exc:
+                return _err(
+                    f"Failed to enumerate remote targets: {exc}",
+                    code="remote_target_enumeration_failed",
+                    category="runtime",
+                    details={"remote_id": remote_id, "endpoint": _remote_url(handle.host, handle.port)},
+                )
+            return _ok(targets=targets, detail={"remote_id": remote_id, "target_count": len(targets)})
+        if action == "launch_app":
+            _require(args, "exe_path")
+            try:
+                target = await _offload(
+                    _launch_remote_app_sync,
+                    handle,
+                    exe_path=str(args.get("exe_path") or ""),
+                    working_dir=str(args.get("working_dir") or ""),
+                    cmdline=str(args.get("cmdline") or ""),
+                    env=_as_dict(args.get("env"), default={}),
+                    capture_options=_as_dict(args.get("capture_options"), default={}),
+                )
+            except Exception as exc:
+                return _err(
+                    f"Failed to launch remote app: {exc}",
+                    code="remote_launch_failed",
+                    category="runtime",
+                    details={"remote_id": remote_id, "endpoint": _remote_url(handle.host, handle.port)},
+                )
+            return _ok(
+                target_id=str(target.get("target_id") or ""),
+                pid=int(target.get("pid") or 0),
+                target=target,
+            )
+        if action == "set_capture_options":
+            options = _as_dict(args.get("options"), default={})
+            _, applied_options = await _offload(_capture_options_from_dict, options)
+            handle.default_capture_options = {**dict(handle.default_capture_options or {}), **applied_options}
+            return _ok(applied=applied_options, default_capture_options=dict(handle.default_capture_options))
+        if action == "set_overlay_options":
+            return _capability_error(
+                "remote_overlay_options_unavailable",
+                "Remote overlay RPC is not exposed by the current RenderDoc Python binding",
+                capability="remote",
+                reason="TargetControl / RemoteServer does not expose overlay option RPCs in this build.",
+                source="renderdoc_api",
+                optional=True,
+                requires_remote_device=True,
+            )
+        if action in {"trigger_capture", "queue_capture"}:
+            try:
+                result = await _offload(
+                    _trigger_remote_capture_sync,
+                    handle,
+                    target_id=str(args.get("target_id") or ""),
+                    num_frames=_as_int(args.get("num_frames"), 1),
+                    capture_delay_ms=_as_int(args.get("capture_delay_ms"), 0),
+                    queued=action == "queue_capture",
+                )
+            except Exception as exc:
+                return _err(
+                    f"Failed to {action}: {exc}",
+                    code=f"remote_{action}_failed",
+                    category="runtime",
+                    details={"remote_id": remote_id, "endpoint": _remote_url(handle.host, handle.port)},
+                )
+            if action == "trigger_capture":
+                return _ok(captures=result.get("captures", []), target=result.get("target", {}))
+            return _ok(queue_status=result.get("queue_status", {}), captures=result.get("captures", []), target=result.get("target", {}))
+        if action == "list_captures":
+            try:
+                target_id = str(args.get("target_id") or "")
+                if target_id:
+                    captures = await _offload(_poll_captures_for_target_sync, handle, target_id=target_id, deadline_s=1.0, max_messages=12)
+                else:
+                    targets = await _offload(_remote_list_targets_sync, handle)
+                    captures = _capture_records_for_target(handle)
+                    for item in targets:
+                        tid = str(item.get("target_id") or "")
+                        if not tid:
+                            continue
+                        captures = await _offload(_poll_captures_for_target_sync, handle, target_id=tid, deadline_s=0.5, max_messages=8)
+                    captures = _capture_records_for_target(handle)
+            except Exception as exc:
+                return _err(
+                    f"Failed to list remote captures: {exc}",
+                    code="remote_list_captures_failed",
+                    category="runtime",
+                    details={"remote_id": remote_id, "endpoint": _remote_url(handle.host, handle.port)},
+                )
+            return _ok(captures=captures)
+        if action == "copy_capture":
+            _require(args, "capture_id", "local_path")
+            capture_id = str(args.get("capture_id") or "").strip()
+            record = dict(handle.known_captures.get(capture_id) or {})
+            target_id = str(record.get("target_id") or "")
+            if not target_id:
+                targets = await _offload(_remote_list_targets_sync, handle)
+                if len(targets) == 1:
+                    target_id = str(targets[0].get("target_id") or "")
+            ident = _remote_target_ident(target_id)
+            if ident <= 0:
+                return _err(
+                    f"Unable to resolve target for capture_id: {capture_id}",
+                    code="remote_capture_target_unknown",
+                    category="runtime",
+                    details={"remote_id": remote_id, "capture_id": capture_id},
+                )
+            local_path = Path(str(args.get("local_path") or "")).resolve()
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                control = await _offload(_create_target_control_sync, handle, ident, force_connection=False)
+                await _offload(control.CopyCapture, _as_int(capture_id, 0), str(local_path))
+                deadline = time.perf_counter() + 30.0
+                while time.perf_counter() < deadline:
+                    if local_path.is_file():
+                        break
+                    await _offload(
+                        _drain_target_control_messages_sync,
+                        handle,
+                        control,
+                        target_id=str(ident),
+                        max_messages=6,
+                        deadline_s=0.2,
+                    )
+                    await asyncio.sleep(0.1)
+            except Exception as exc:
+                return _err(
+                    f"Failed to copy remote capture: {exc}",
+                    code="remote_copy_capture_failed",
+                    category="runtime",
+                    details={"remote_id": remote_id, "capture_id": capture_id, "local_path": str(local_path)},
+                )
+            return _ok(saved_path=str(local_path), capture=dict(handle.known_captures.get(capture_id) or record))
+        if action == "delete_capture":
+            _require(args, "capture_id")
+            capture_id = str(args.get("capture_id") or "").strip()
+            record = dict(handle.known_captures.get(capture_id) or {})
+            target_id = str(record.get("target_id") or "")
+            if not target_id:
+                targets = await _offload(_remote_list_targets_sync, handle)
+                if len(targets) == 1:
+                    target_id = str(targets[0].get("target_id") or "")
+            ident = _remote_target_ident(target_id)
+            if ident <= 0:
+                return _err(
+                    f"Unable to resolve target for capture_id: {capture_id}",
+                    code="remote_capture_target_unknown",
+                    category="runtime",
+                    details={"remote_id": remote_id, "capture_id": capture_id},
+                )
+            try:
+                control = await _offload(_create_target_control_sync, handle, ident, force_connection=False)
+                await _offload(control.DeleteCapture, _as_int(capture_id, 0))
+            except Exception as exc:
+                return _err(
+                    f"Failed to delete remote capture: {exc}",
+                    code="remote_delete_capture_failed",
+                    category="runtime",
+                    details={"remote_id": remote_id, "capture_id": capture_id},
+                )
+            handle.known_captures.pop(capture_id, None)
+            return _ok(detail={"deleted_capture_id": capture_id})
     return _err(f"Unsupported remote action: {action}")
 
 

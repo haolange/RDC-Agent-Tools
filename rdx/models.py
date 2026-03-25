@@ -345,6 +345,12 @@ class PatchResult(BaseModel):
     error_category: str = ""
     error_details: Dict[str, Any] = Field(default_factory=dict)
     messages: List[str] = Field(default_factory=list)
+    source_before_text: str = ""
+    source_after_text: str = ""
+    disassembly_target: str = ""
+    encoding: str = ""
+    entry_point: str = ""
+    compile_flags: List[Dict[str, str]] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

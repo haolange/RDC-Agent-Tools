@@ -107,6 +107,10 @@
 
 - `rd.shader.edit_and_replace` 现在要么执行真实 runtime shader replacement，要么返回明确的 capability/runtime 失败；不再允许 `mock_applied` 一类伪成功。
 - `rd.shader.edit_and_replace` 在编译阶段会传入真实 `ShaderCompileFlags` 对象；若编译失败、`BuildTargetShader` 绑定失败或 `ReplaceResource` 失败，错误会通过结构化 `error.code/details` 暴露，而不是全部折叠成同一种失败。
+- `rd.shader.edit_and_replace` 现在支持 `emit_patch_artifacts` 与 `output_dir`，可直接导出改前 IR、改后 IR 与 unified diff，便于对照手工 `qrenderdoc` patch 流程。
+- `force_full_precision` 在 `SPIR-V (RenderDoc)` 目标下会把“本次到底命中了哪些 `RelaxedPrecision` 行”写进 `messages`；若变量没有直接命中任何 `RelaxedPrecision` 行，则会返回 `status="noop"` 并明确说明“matched no RelaxedPrecision lines for variables: ...”。
+- 对 Android remote Vulkan 的手动 IR 调试，不要只看一个采样点；像 `EventID 1248` 这类 shader，`variables=["404"]` 这类高影响补丁可能只命中一行 `RelaxedPrecision`，但会把整个 `ResourceId::208592` 输出面一起打成 `0`。应同时用 `rd.texture.get_pixel_value`、`rd.export.screenshot` 与 `rd.shader.revert_replacement` 交叉验证。
+- 当 `rd.shader.edit_and_replace` 返回 `status="noop"` 时，表示当前 session 中没有创建 live replacement；这时不应再把该 `replacement_id` 当成需要回滚的 active replacement。
 - `rd.shader.debug_start` 只在请求 event 的真实 debug 上下文可用时成功；如果只能跨 event 或 synthetic 回退，运行时会显式失败。
 - `rd.shader.debug_start` 失败时会保留 `failure_stage` / `failure_reason`、`attempts`、`pixel_history_summary` 与 `resolved_context`，用于区分 target 配置失败、cross-event only、invalid trace 或 debugger handle 缺失。
 - `rd.export.shader_bundle` 会按请求 `event_id` 导出，并把 `requested_event_id` / `resolved_event_id` 一起写入 bundle。
@@ -115,10 +119,14 @@
 
 - `rd.remote.connect` 返回的 `remote_id` 代表 live remote connection；若连接失败，不会返回占位 handle。
 - `rd.capture.open_replay` 的 remote 入口是 `options.remote_id`，而不是隐式回退到 `localhost`。
-- remote replay 成功后，原 `remote_id` 会进入 consumed 生命周期语义，不再能继续 `ping` / `disconnect` / `open_replay`。
-- 若后续继续对旧 `remote_id` 调用 remote tool，预期会得到 `remote_handle_consumed` 一类生命周期错误，而不是“平台随机坏了”。
+- remote replay 成功后，原 `remote_id` 默认仍保持 live；其 replay-owned lease 会反映在 `rd.session.get_context -> remote.active_session_ids`。
+- 当 live remote handle 仍被 lease 时，`rd.remote.disconnect` 预期返回 `remote_handle_in_use`；不要把这种情况误判成 endpoint 丢失。
+- `remote_handle_consumed` 只应出现在旧 tombstone / 显式 consumed state 恢复路径，不再是正常成功链路的默认语义。
 - daemon / worker 重启后，平台会优先基于持久化 remote 元数据恢复同一个 `session_id`；只有 endpoint 真断开、bootstrap 失败或恢复元数据缺失时，才会显式进入 `degraded` / error。
 - `rd.remote.connect` 与 `rd.capture.open_replay` 会更新结构化 progress；daemon 路径下应通过 `daemon status/get_state -> active_operation` 读取统一状态面。
+- `rd.remote.connect` 的 `options` 参数面在 `CLI` / daemon / `MCP` 下保持一致。
+- `rd.shader.compile` 现在接受可选 `session_id` 与 `source_encoding`；不同 replay backend 的 `supported_source_encodings` 可能不同。
+- `rd.remote.set_overlay_options` 在当前 `RenderDoc` Python binding 未暴露 overlay RPC 时，会显式返回 `remote_overlay_options_unavailable`。
 
 ## 权威来源
 

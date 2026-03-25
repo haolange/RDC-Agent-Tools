@@ -106,6 +106,31 @@ def test_build_args_for_export_texture_uses_png_output_path(tmp_path: Path) -> N
     assert str(args["output_path"]).endswith("_texture_out.png")
 
 
+def test_build_args_for_remote_shader_compile_prefers_glsl(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc", session_id="sess_demo")
+    files = {
+        "artifacts": tmp_path / "artifacts",
+        "sample": tmp_path / "sample.bin",
+        "text_a": tmp_path / "a.txt",
+        "text_b": tmp_path / "b.txt",
+        "png_a": tmp_path / "a.png",
+        "png_b": tmp_path / "b.png",
+        "zip_out": tmp_path / "bundle.zip",
+    }
+
+    args = tool_contract_check._build_args(
+        "rd.shader.compile",
+        ["session_id", "source", "source_encoding", "stage", "entry", "target", "defines", "include_dirs", "additional_args", "output_path"],
+        state,
+        files,
+    )
+
+    assert args["session_id"] == "sess_demo"
+    assert args["source_encoding"] == "glsl"
+    assert args["target"] == "spirv"
+    assert "#version 450" in args["source"]
+
+
 def test_parse_args_requires_local_rdc(monkeypatch, tmp_path: Path) -> None:
     out_json = tmp_path / "tool_contract_report.json"
     out_md = tmp_path / "tool_contract_report.md"
@@ -291,7 +316,7 @@ def test_build_args_for_remote_connect_uses_android_bootstrap_defaults(monkeypat
 def test_build_args_for_remote_open_replay_uses_live_remote_handle(tmp_path: Path) -> None:
     state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
     state.capture_file_id = "capf_remote"
-    state.remote_id = "remote_live"
+    state.live_remote_id = "remote_live"
     files = {
         "artifacts": tmp_path / "artifacts",
         "sample": tmp_path / "sample.bin",
@@ -337,7 +362,7 @@ def test_track_tool_side_effects_updates_remote_handle_state(tmp_path: Path) -> 
         },
         state,
     )
-    assert state.remote_id == "remote_demo"
+    assert state.live_remote_id == "remote_demo"
 
     tool_contract_check._track_tool_side_effects(
         "rd.remote.disconnect",
@@ -348,7 +373,41 @@ def test_track_tool_side_effects_updates_remote_handle_state(tmp_path: Path) -> 
         },
         state,
     )
-    assert state.remote_id is None
+    assert state.live_remote_id is None
+
+
+def test_track_tool_side_effects_updates_current_capture_handle(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+
+    tool_contract_check._track_tool_side_effects(
+        "rd.capture.open_file",
+        {},
+        {
+            "ok": True,
+            "data": {"capture_file_id": "capf_demo"},
+        },
+        state,
+    )
+
+    assert state.capture_file_id == "capf_demo"
+    assert state.known_capture_file_ids == ["capf_demo"]
+
+
+def test_track_tool_side_effects_updates_current_session_handle(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+
+    tool_contract_check._track_tool_side_effects(
+        "rd.capture.open_replay",
+        {"options": {"remote_id": "remote_demo"}},
+        {
+            "ok": True,
+            "data": {"session_id": "sess_demo"},
+        },
+        state,
+    )
+
+    assert state.session_id == "sess_demo"
+    assert state.known_session_ids == ["sess_demo"]
 
 
 def test_track_tool_side_effects_preserves_existing_focus_texture_and_buffer(tmp_path: Path) -> None:
@@ -381,7 +440,53 @@ def test_track_tool_side_effects_preserves_existing_focus_texture_and_buffer(tmp
     assert state.buffer_id == "ResourceId::buffer-focus"
 
 
-def test_ensure_context_builds_remote_replay_with_consumed_live_handle(tmp_path: Path) -> None:
+def test_track_tool_side_effects_records_remote_targets_and_captures(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+
+    tool_contract_check._track_tool_side_effects(
+        "rd.remote.list_targets",
+        {"remote_id": "remote_demo"},
+        {
+            "ok": True,
+            "data": {"targets": [{"target_id": "17"}, {"target_id": "23"}]},
+        },
+        state,
+    )
+    tool_contract_check._track_tool_side_effects(
+        "rd.remote.list_captures",
+        {"remote_id": "remote_demo"},
+        {
+            "ok": True,
+            "data": {"captures": [{"capture_id": "11", "target_id": "23"}]},
+        },
+        state,
+    )
+
+    assert state.target_id == "23"
+    assert state.capture_id == "11"
+    assert state.known_target_ids == ["17", "23"]
+    assert state.known_capture_ids == ["11"]
+
+
+def test_default_for_id_does_not_invent_dummy_runtime_handles(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+
+    assert tool_contract_check._default_for_id("remote_id", state) is None
+    assert tool_contract_check._default_for_id("target_id", state) is None
+    assert tool_contract_check._default_for_id("capture_id", state) is None
+
+
+def test_preflight_scope_skip_respects_forced_remote_skip_tools(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
+
+    skip = tool_contract_check._preflight_scope_skip("rd.remote.list_targets", ["remote_id"], state)
+
+    assert skip is not None
+    assert skip[1] == "remote_live_tool_skipped"
+    assert skip[2] == "scope_skip"
+
+
+def test_ensure_context_keeps_live_remote_handle_for_remote_replay(tmp_path: Path) -> None:
     state = tool_contract_check.SampleState(matrix="remote", rdc_path=tmp_path / "sample.rdc")
     state.rdc_path.write_text("rdc", encoding="utf-8")
     files = {
@@ -427,5 +532,33 @@ def test_ensure_context_builds_remote_replay_with_consumed_live_handle(tmp_path:
 
     assert state.capture_file_id == "capf_demo"
     assert state.session_id == "sess_demo"
-    assert state.remote_id is None
+    assert state.live_remote_id == "remote_demo"
     assert ("rd.capture.open_replay", {"capture_file_id": "capf_demo", "options": {"remote_id": "remote_demo"}}) in calls
+
+
+def test_extract_mcp_payload_and_text_accepts_structured_content() -> None:
+    class _StructuredItem:
+        def model_dump(self, mode: str = "python"):  # noqa: ARG002
+            return {
+                "type": "json",
+                "data": {
+                    "schema_version": "3.0.0",
+                    "tool_version": "1.0.0",
+                    "result_kind": "rd.core.init",
+                    "ok": True,
+                    "data": {"ready": True},
+                    "artifacts": [],
+                    "error": None,
+                    "meta": {},
+                    "projections": {},
+                },
+            }
+
+    class _Result:
+        content = [_StructuredItem()]
+
+    payload, text = tool_contract_check._extract_mcp_payload_and_text(_Result())
+
+    assert payload is not None
+    assert payload["ok"] is True
+    assert "rd.core.init" in text

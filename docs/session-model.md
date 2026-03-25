@@ -44,8 +44,10 @@ remote endpoint
   - `rd.remote.connect` 返回的 live remote endpoint 句柄。
   - 它表示 runtime 已经建立远程连接，而不是“只保存 host/port 的占位引用”。
   - `rd.capture.open_replay` 若要进入 remote backend，必须通过 `options.remote_id` 显式引用它。
-  - 一旦 remote `open_replay` 成功，该 `remote_id` 会被对应 `session_id` 消费；之后它不再是 live handle，如需新的 remote handle，必须重新 `rd.remote.connect`。
-  - 如果复用了已经失效的 `remote_id`，预期生命周期错误码应为 `remote_handle_consumed`。
+  - remote `open_replay` 成功后，会基于该 live handle 建立 replay-owned lease；默认不会把原 `remote_id` 从 live endpoint 池中移除。
+  - `rd.session.get_context` 的 `remote.active_session_ids` 会显式反映这个 live handle 当前被哪些 replay session lease。
+  - 当 `active_session_ids` 非空时，`rd.remote.disconnect` 预期返回 `remote_handle_in_use`；应先关闭 replay 或等待 lease 释放。
+  - `remote_handle_consumed` 仍可能出现在旧状态恢复或显式 tombstone 场景里，但它不再是正常 remote `open_replay` 成功后的默认语义。
   - 当 remote replay session 建成后，平台会把 `transport`、endpoint、`origin_remote_id`、Android `device_serial`、bootstrap 摘要等恢复元数据写入持久化 session record，用于后续恢复同一个 `session_id`。
   - 它同样是运行时句柄，不应被视为长期稳定标识。
 - `frame_index`

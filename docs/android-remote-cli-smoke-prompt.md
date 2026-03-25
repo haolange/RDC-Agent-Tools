@@ -126,7 +126,11 @@
   - 样本 API 不受远端设备支持
   - 样本 GPU / extension 兼容性问题
   - 当前证据不足，暂不能精确归类
-- 如果 `rd.capture.open_replay(options.remote_id=...)` 成功，则必须额外确认旧 `remote_id` 的 consumed 语义是否符合预期，例如再做一次 `rd.remote.ping` 并记录其是否返回 `remote_handle_consumed`。
+- 如果 `rd.capture.open_replay(options.remote_id=...)` 成功，则必须额外确认 live remote handle 与 replay lease 的关系是否符合预期：
+  - 再做一次 `rd.remote.ping`
+  - 再读一次 `rd.session.get_context`
+  - 记录 `remote.active_session_ids` 是否包含当前 `session_id`
+  - 记录 `rd.remote.disconnect` 在 lease 未释放时是否返回 `remote_handle_in_use`
 
 ### Level 3: 代表性 transport / workflow 层
 - 目标：确认不是只有最短路径通，而是主要 transport 和几条代表性工具链也通。

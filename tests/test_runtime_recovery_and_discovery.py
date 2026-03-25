@@ -403,8 +403,9 @@ def test_session_resume_restores_persisted_remote_session_and_metadata(
     assert payload["ok"] is True
     assert payload["data"]["current_session_id"] == "sess_remote"
     assert payload["data"]["runtime"]["session_id"] == "sess_remote"
-    assert payload["data"]["remote"]["state"] == "session_owned"
+    assert payload["data"]["remote"]["state"] == "live_handle"
     assert payload["data"]["remote"]["origin_remote_id"] == "remote_origin"
+    assert payload["data"]["remote"]["active_session_ids"] == ["sess_remote"]
     assert fake_manager.created == ["sess_remote"]
     assert fake_manager.opened == [("sess_remote", str(capture_path))]
     assert fake_manager.backend_configs == [
@@ -415,11 +416,13 @@ def test_session_resume_restores_persisted_remote_session_and_metadata(
             "transport": "adb_android",
             "remote_id": "remote_origin",
             "remote_server": fake_remote.remote_server,
+            "close_remote_server_on_cleanup": False,
         }
     ]
     assert fake_controller.set_calls == [202]
     assert server._runtime.session_owned_remotes["sess_remote"].device_serial == "e38b8019"
-    assert server._runtime.consumed_remotes["remote_origin"].consumed_by_session_id == "sess_remote"
+    assert server._runtime.remotes["remote_origin"].leased_session_ids == ["sess_remote"]
+    assert "remote_origin" not in server._runtime.consumed_remotes
     state = server.server_runtime._context_state("default")
     assert state["sessions"]["sess_remote"]["remote"]["device_serial"] == "e38b8019"
     assert state["sessions"]["sess_remote"]["remote"]["origin_remote_id"] == "remote_origin"

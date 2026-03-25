@@ -65,8 +65,10 @@
   - 对 `.rdc` 的平台最小链路是 `rd.core.init -> rd.capture.open_file -> rd.capture.open_replay -> rd.replay.set_frame`。
 - 对 remote 路径，先拿到 live `remote_id`。
   - 推荐链路是 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
-  - remote `open_replay` 成功后，原 `remote_id` 会被 session 消费；不要继续对它执行 `ping` / `disconnect` / 再次 `open_replay`。
-  - 如果复用了已经失效的 handle，预期错误码应为 `remote_handle_consumed`。
+  - remote `open_replay` 成功后，原 `remote_id` 默认仍保持 live；不要把它当成已消费 tombstone。
+  - live remote handle 的当前 lease 会出现在 `rd.session.get_context -> remote.active_session_ids`。
+  - 如果你尝试在 lease 未释放时断开 live remote，预期错误码应为 `remote_handle_in_use`。
+  - `remote_handle_consumed` 只应在旧状态恢复或显式 tombstone 场景下视为生命周期异常，不再是正常成功链路的默认结果。
   - 对 Android remote，不要假设外部 `qrenderdoc` 已经替你做了 bootstrap；`rd.remote.connect` 的 `options.transport="adb_android"` 才是平台定义入口。
   - daemon / worker 重启后，平台会优先用持久化 remote 元数据恢复同一个 `session_id`；只有 endpoint 真断开、bootstrap 失败或恢复元数据不足时，才需要重新执行整条 remote 建链。
 - 显式保存关键状态。

@@ -179,9 +179,11 @@ rdx.bat --non-interactive cli --daemon-context smoke daemon status
 
 - `rd.remote.connect` 会负责 Android `adb` bootstrap：选择设备、选择仓库内 APK、启动 `RenderDocCmd`、push `renderdoc.conf`、建立 `adb forward`。
 - 如果 `rd.remote.connect` 失败，不应继续盲跑依赖 `remote_id` 的后续链路。
-- 如果 `rd.capture.open_replay(options.remote_id=...)` 成功，原 `remote_id` 会被消费；如需新的 live handle，必须重新 `rd.remote.connect`。
+- 如果 `rd.capture.open_replay(options.remote_id=...)` 成功，原 `remote_id` 默认仍保持 live；此时应通过 `rd.session.get_context` 检查 `remote.active_session_ids`，而不是假设它已经失效。
+- 当 live remote handle 仍被 replay lease 时，`rd.remote.disconnect` 预期返回 `remote_handle_in_use`；应先关闭相关 replay session。
 - daemon / worker 重启后，平台会优先使用持久化 remote 元数据恢复同一个 `session_id`；只有 endpoint 真断开、bootstrap 失败或恢复元数据不足时，才需要重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay`。
 - 对 event-bound 链路，优先显式传入 `event_id`，并检查返回里的 `resolved_event_id`；`rd.shader.debug_start`、`rd.export.shader_bundle`、`rd.pipeline.get_shader`、`rd.shader.get_reflection`、`rd.shader.get_disassembly`、`rd.texture.get_pixel_value` 都不应再静默回退到别的 event。
+- `rd.shader.compile` 需要基于当前 replay backend 选择真实可接受的 `source_encoding`；不要假设 Android remote Vulkan session 仍接受 `hlsl`，应检查 `supported_source_encodings`。
 
 如果后续要把资源追踪结果再喂回事件链路，请额外注意：
 

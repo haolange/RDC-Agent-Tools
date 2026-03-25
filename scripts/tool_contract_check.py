@@ -78,6 +78,17 @@ SESSION_REFRESH_TOOLS = {
     "rd.session.select_session",
     "rd.session.resume",
 }
+FORCED_REMOTE_SKIP_TOOLS = {
+    "rd.remote.list_targets",
+    "rd.remote.launch_app",
+    "rd.remote.set_capture_options",
+    "rd.remote.set_overlay_options",
+    "rd.remote.trigger_capture",
+    "rd.remote.queue_capture",
+    "rd.remote.list_captures",
+    "rd.remote.copy_capture",
+    "rd.remote.delete_capture",
+}
 
 
 def _tools_root() -> Path:
@@ -152,6 +163,19 @@ def _coalesce_error(
             return code, text
 
     return code, message
+
+
+def _is_remote_open_replay_network_io_failure(
+    tool: str,
+    payload: dict[str, Any] | None,
+    raw: str | None,
+    exc: str | None,
+) -> bool:
+    if tool != "rd.capture.open_replay":
+        return False
+    code, message = _coalesce_error(payload, raw, exc)
+    haystack = " ".join([str(code or ""), str(message or "")]).lower()
+    return ("network i/o operation failed" in haystack) or ("remote.opencapture()" in haystack)
 
 
 def _classify_transport_impact(tool: str, matrix: str, transport: str) -> str:
@@ -463,6 +487,9 @@ class SampleState:
     rdc_path: Path
     session_id: str | None = None
     capture_file_id: str | None = None
+    live_remote_id: str | None = None
+    target_id: str | None = None
+    capture_id: str | None = None
     event_id: int = 0
     texture_id: str | None = None
     resource_id: str | None = None
@@ -481,7 +508,6 @@ class SampleState:
     debug_target: dict[str, Any] = field(default_factory=dict)
     debug_params: dict[str, Any] = field(default_factory=dict)
     replacement_id: str | None = None
-    remote_id: str | None = None
     remote_error_code: str = ""
     remote_issue_type: str = "remote_endpoint"
     remote_reason: str = ""
@@ -492,6 +518,9 @@ class SampleState:
     sample_compatibility: bool = True
     known_session_ids: list[str] = field(default_factory=list)
     known_capture_file_ids: list[str] = field(default_factory=list)
+    known_remote_ids: list[str] = field(default_factory=list)
+    known_target_ids: list[str] = field(default_factory=list)
+    known_capture_ids: list[str] = field(default_factory=list)
 
 
 class DaemonExecutor:
@@ -616,7 +645,7 @@ def _remote_connect_args() -> dict[str, Any]:
 
 
 async def _ensure_live_remote_handle(call_fn: Any, state: SampleState, *, timeout_s: float = 20.0) -> None:
-    if state.remote_id:
+    if state.live_remote_id:
         return
 
     state.remote_error_code = ""
@@ -629,23 +658,25 @@ async def _ensure_live_remote_handle(call_fn: Any, state: SampleState, *, timeou
     )
     if remote_payload and remote_payload.get("ok"):
         data = _payload_data(remote_payload)
-        state.remote_id = str(remote_payload.get("remote_id") or data.get("remote_id") or "")
-        if not state.remote_id:
-            state.remote_id = None
+        state.live_remote_id = str(remote_payload.get("remote_id") or data.get("remote_id") or "")
+        if state.live_remote_id:
+            _remember_unique(state.known_remote_ids, state.live_remote_id)
+        if not state.live_remote_id:
+            state.live_remote_id = None
             state.remote_error_code = "remote_id_missing"
             state.remote_reason = "rd.remote.connect succeeded without returning remote_id"
             return
 
         ping_payload, ping_raw, ping_exc = await call_fn(
             "rd.remote.ping",
-            {"remote_id": state.remote_id},
+            {"remote_id": state.live_remote_id},
             timeout_s=10.0,
         )
         if not (ping_payload and ping_payload.get("ok")):
             state.remote_error_code, state.remote_reason = _coalesce_error(ping_payload, ping_raw, ping_exc)
             state.remote_error_code = state.remote_error_code or "remote_ping_failed"
             state.remote_reason = state.remote_reason or "rd.remote.ping failed"
-            state.remote_id = None
+            state.live_remote_id = None
         return
 
     state.remote_error_code, state.remote_reason = _coalesce_error(remote_payload, remote_raw, remote_exc)
@@ -663,9 +694,9 @@ async def _ensure_context(
 ) -> None:
     use_remote_replay = need_capture and state.matrix == "remote"
 
-    if need_capture and state.session_id and state.capture_file_id and (not need_remote or state.remote_id or use_remote_replay):
+    if need_capture and state.session_id and state.capture_file_id and (not need_remote or state.live_remote_id or use_remote_replay):
         return
-    if not need_capture and need_remote and state.remote_id:
+    if not need_capture and need_remote and state.live_remote_id:
         return
 
     if need_capture and not state.sample_compatibility:
@@ -684,7 +715,7 @@ async def _ensure_context(
 
     if use_remote_replay:
         await _ensure_live_remote_handle(call_fn, state, timeout_s=20.0)
-        if not state.remote_id:
+        if not state.live_remote_id:
             return
 
     if need_capture:
@@ -692,8 +723,8 @@ async def _ensure_context(
 
     if need_capture and state.capture_file_id:
         open_replay_options: dict[str, Any] = {}
-        if use_remote_replay and state.remote_id:
-            open_replay_options["remote_id"] = state.remote_id
+        if use_remote_replay and state.live_remote_id:
+            open_replay_options["remote_id"] = state.live_remote_id
         payload, _, _ = await call_fn(
             "rd.capture.open_replay",
             {"capture_file_id": state.capture_file_id, "options": open_replay_options},
@@ -706,8 +737,6 @@ async def _ensure_context(
                 state.session_id = None
             else:
                 _remember_session_handle(state, state.session_id)
-                if use_remote_replay:
-                    state.remote_id = None
         elif payload:
             code, message = _payload_error(payload)
             if _is_sample_compatibility_error(message, code):
@@ -965,6 +994,15 @@ def _default_for_id(param: str, state: SampleState) -> Any:
     preferred_capture_file_id = str(
         state.capture_file_id or (state.known_capture_file_ids[-1] if state.known_capture_file_ids else "")
     ).strip() or None
+    preferred_remote_id = str(
+        state.live_remote_id or (state.known_remote_ids[-1] if state.known_remote_ids else "")
+    ).strip() or None
+    preferred_target_id = str(
+        state.target_id or (state.known_target_ids[-1] if state.known_target_ids else "")
+    ).strip() or None
+    preferred_capture_id = str(
+        state.capture_id or (state.known_capture_ids[-1] if state.known_capture_ids else "")
+    ).strip() or None
     known = {
         "session_id": preferred_session_id,
         "capture_file_id": preferred_capture_file_id,
@@ -976,15 +1014,13 @@ def _default_for_id(param: str, state: SampleState) -> Any:
         "shader_id": state.shader_id,
         "shader_debug_id": state.shader_debug_id,
         "replacement_id": state.replacement_id,
-        "remote_id": state.remote_id,
-        "target_id": "target_dummy",
-        "capture_id": "capture_dummy",
+        "remote_id": preferred_remote_id,
+        "target_id": preferred_target_id,
+        "capture_id": preferred_capture_id,
     }
     value = known.get(param)
     if value is not None:
         return value
-    if param.endswith("_id"):
-        return f"{param}_dummy"
     return None
 
 
@@ -1000,6 +1036,30 @@ def _remember_capture_handle(state: SampleState, capture_file_id: str | None) ->
 
 def _remember_session_handle(state: SampleState, session_id: str | None) -> None:
     _remember_unique(state.known_session_ids, session_id)
+
+
+def _remember_remote_handle(state: SampleState, remote_id: str | None) -> None:
+    text = str(remote_id or "").strip()
+    if not text:
+        return
+    state.live_remote_id = text
+    _remember_unique(state.known_remote_ids, text)
+
+
+def _remember_remote_target(state: SampleState, target_id: str | None) -> None:
+    text = str(target_id or "").strip()
+    if not text:
+        return
+    state.target_id = text
+    _remember_unique(state.known_target_ids, text)
+
+
+def _remember_remote_capture(state: SampleState, capture_id: str | None) -> None:
+    text = str(capture_id or "").strip()
+    if not text:
+        return
+    state.capture_id = text
+    _remember_unique(state.known_capture_ids, text)
 
 
 def _forget_unique(items: list[str], value: str | None) -> None:
@@ -1018,6 +1078,38 @@ def _forget_session_handle(state: SampleState, session_id: str | None) -> None:
     _forget_unique(state.known_session_ids, session_id)
 
 
+def _forget_remote_handle(state: SampleState, remote_id: str | None) -> None:
+    text = str(remote_id or "").strip()
+    if not text:
+        return
+    _forget_unique(state.known_remote_ids, text)
+    if state.live_remote_id == text:
+        state.live_remote_id = None
+    state.target_id = None
+    state.capture_id = None
+    state.known_target_ids.clear()
+    state.known_capture_ids.clear()
+
+
+def _forget_remote_capture(state: SampleState, capture_id: str | None) -> None:
+    text = str(capture_id or "").strip()
+    if not text:
+        return
+    _forget_unique(state.known_capture_ids, text)
+    if state.capture_id == text:
+        state.capture_id = state.known_capture_ids[-1] if state.known_capture_ids else None
+
+
+def _payload_targets(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    targets = _payload_data(payload).get("targets", []) if isinstance(payload, dict) else []
+    return targets if isinstance(targets, list) else []
+
+
+def _payload_captures(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    captures = _payload_data(payload).get("captures", []) if isinstance(payload, dict) else []
+    return captures if isinstance(captures, list) else []
+
+
 def _track_tool_side_effects(
     tool: str,
     args: dict[str, Any],
@@ -1031,18 +1123,15 @@ def _track_tool_side_effects(
     if tool == "rd.capture.open_file":
         capture_file_id = str(payload.get("capture_file_id") or data.get("capture_file_id") or "").strip()
         if capture_file_id:
+            state.capture_file_id = capture_file_id
             _remember_capture_handle(state, capture_file_id)
         return
 
     if tool == "rd.capture.open_replay":
         session_id = str(payload.get("session_id") or data.get("session_id") or "").strip()
         if session_id:
+            state.session_id = session_id
             _remember_session_handle(state, session_id)
-        options = args.get("options") if isinstance(args.get("options"), dict) else {}
-        remote_id = str(options.get("remote_id") or "").strip()
-        if remote_id and state.remote_id == remote_id:
-            # Remote open_replay consumes the live handle; reconnect if later tools need a fresh remote_id.
-            state.remote_id = None
         return
 
     if tool == "rd.capture.close_replay":
@@ -1082,19 +1171,53 @@ def _track_tool_side_effects(
     if tool == "rd.remote.connect":
         remote_id = str(payload.get("remote_id") or data.get("remote_id") or "").strip()
         if remote_id:
-            state.remote_id = remote_id
+            _remember_remote_handle(state, remote_id)
         return
 
     if tool == "rd.remote.disconnect":
         remote_id = str(args.get("remote_id") or "").strip()
-        if remote_id and state.remote_id == remote_id:
-            state.remote_id = None
+        _forget_remote_handle(state, remote_id)
+        return
+
+    if tool == "rd.remote.list_targets":
+        for target in _payload_targets(payload):
+            if not isinstance(target, dict):
+                continue
+            _remember_remote_target(state, str(target.get("target_id") or ""))
+        return
+
+    if tool == "rd.remote.launch_app":
+        _remember_remote_target(state, str(data.get("target_id") or ""))
+        return
+
+    if tool in {"rd.remote.trigger_capture", "rd.remote.queue_capture", "rd.remote.list_captures"}:
+        target = data.get("target")
+        if isinstance(target, dict):
+            _remember_remote_target(state, str(target.get("target_id") or ""))
+        for capture in _payload_captures(payload):
+            if not isinstance(capture, dict):
+                continue
+            _remember_remote_capture(state, str(capture.get("capture_id") or ""))
+            _remember_remote_target(state, str(capture.get("target_id") or ""))
+        return
+
+    if tool == "rd.remote.delete_capture":
+        detail = data.get("detail")
+        deleted_capture_id = str(args.get("capture_id") or "").strip()
+        if isinstance(detail, dict):
+            deleted_capture_id = str(detail.get("deleted_capture_id") or deleted_capture_id).strip()
+        _forget_remote_capture(state, deleted_capture_id)
         return
 
     if tool == "rd.core.shutdown":
         state.known_session_ids.clear()
         state.known_capture_file_ids.clear()
-        state.remote_id = None
+        state.known_remote_ids.clear()
+        state.known_target_ids.clear()
+        state.known_capture_ids.clear()
+        state.live_remote_id = None
+        state.target_id = None
+        state.capture_id = None
         return
 
     if tool == "rd.shader.edit_and_replace":
@@ -1551,6 +1674,14 @@ def _preflight_scope_skip(
     param_names: list[str],
     state: SampleState,
 ) -> tuple[str, str, str, str, str] | None:
+    if state.matrix == "remote" and tool in FORCED_REMOTE_SKIP_TOOLS:
+        return (
+            "user-directed skip for live remote endpoint tool",
+            "remote_live_tool_skipped",
+            "scope_skip",
+            "Skip live remote endpoint tools in this run and focus on remote replay/open_replay stability.",
+            "only affects live remote endpoint tool coverage",
+        )
     if tool == "rd.perf.describe_counter" and state.counter_id is None:
         return (
             state.counter_reason or "performance counter unavailable",
@@ -1595,10 +1726,45 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
         if preferred_capture_file_id:
             args["capture_file_id"] = preferred_capture_file_id
         options: dict[str, Any] = {}
-        if state.matrix == "remote" and state.remote_id:
-            options["remote_id"] = state.remote_id
+        if state.matrix == "remote" and state.live_remote_id:
+            options["remote_id"] = state.live_remote_id
         args["options"] = options
         return args
+    if tool == "rd.shader.compile":
+        source_encoding = str(
+            os.environ.get(
+                "RDX_SHADER_COMPILE_SOURCE_ENCODING",
+                "glsl" if state.matrix == "remote" else "hlsl",
+            )
+            or ("glsl" if state.matrix == "remote" else "hlsl")
+        ).strip().lower()
+        source_map = {
+            "glsl": "#version 450\nlayout(location=0) out vec4 outColor;\nvoid main(){ outColor = vec4(0.0, 0.0, 0.0, 1.0); }",
+            "hlsl": "float4 main() : SV_Target { return 0; }",
+            "spirvasm": (
+                "OpCapability Shader\n"
+                "OpMemoryModel Logical GLSL450\n"
+                "OpEntryPoint Fragment %main \"main\" %outColor\n"
+                "OpExecutionMode %main OriginUpperLeft\n"
+            ),
+        }
+        target_map = {
+            "glsl": "spirv",
+            "hlsl": "ps_5_0",
+            "spirvasm": "spirv",
+        }
+        return {
+            "session_id": preferred_session_id,
+            "source": source_map.get(source_encoding, source_map["hlsl"]),
+            "source_encoding": source_encoding,
+            "stage": "ps",
+            "entry": "main",
+            "target": target_map.get(source_encoding, "ps_5_0"),
+            "defines": {},
+            "include_dirs": [],
+            "additional_args": [],
+            "output_path": str(files["artifacts"] / f"{state.matrix}_{tool.replace('.', '_')}.out"),
+        }
     if tool == "rd.shader.edit_and_replace":
         args: dict[str, Any] = {
             "session_id": state.session_id,
@@ -1906,7 +2072,7 @@ def _build_args(tool: str, param_names: list[str], state: SampleState, files: di
         elif param == "cmdline":
             args[param] = ""
         elif param == "exe_path":
-            args[param] = "dummy.exe"
+            args[param] = str(os.environ.get("RDX_REMOTE_LAUNCH_EXE", "") or "dummy.exe")
         elif param == "working_dir":
             args[param] = str(files["artifacts"])
         elif param == "env":
@@ -2164,8 +2330,8 @@ async def _rebuild_replay_context(
     if not state.capture_file_id:
         return
     open_replay_options: dict[str, Any] = {}
-    if state.matrix == "remote" and state.remote_id:
-        open_replay_options["remote_id"] = state.remote_id
+    if state.matrix == "remote" and state.live_remote_id:
+        open_replay_options["remote_id"] = state.live_remote_id
     payload, _, _ = await call_fn(
         "rd.capture.open_replay",
         {"capture_file_id": state.capture_file_id, "options": open_replay_options},
@@ -2179,8 +2345,6 @@ async def _rebuild_replay_context(
         state.session_id = None
         return
     _remember_session_handle(state, state.session_id)
-    if state.matrix == "remote":
-        state.remote_id = None
     await call_fn("rd.replay.set_frame", {"session_id": state.session_id, "frame_index": 0}, timeout_s=20.0)
     await _repair_shader_focus(call_fn, state)
 
@@ -2204,17 +2368,18 @@ async def _invoke_with_repair(
         payload, raw, exc = await call_fn(tool, attempt_args, timeout_s=timeout_s)
         last_payload, last_raw, last_exc = payload, raw, exc
         remote_handle_failure = _is_remote_handle_failure(payload, raw, exc)
+        remote_open_replay_network_failure = _is_remote_open_replay_network_io_failure(tool, payload, raw, exc)
         replay_focus_failure = _is_replay_focus_failure(tool, payload, raw, exc)
         session_failure = _is_session_related_failure(payload)
 
-        if payload is not None and not session_failure and not remote_handle_failure and not replay_focus_failure:
+        if payload is not None and not session_failure and not remote_handle_failure and not remote_open_replay_network_failure and not replay_focus_failure:
             return payload, raw, exc
 
         if exc and "TaskGroup" in exc:
             return payload, raw, exc
 
         if not session_failure and not ("session" in (str(exc).lower())):
-            if not remote_handle_failure and not replay_focus_failure:
+            if not remote_handle_failure and not remote_open_replay_network_failure and not replay_focus_failure:
                 return payload, raw, exc
 
         if attempt >= SESSION_RETRY_LIMIT:
@@ -2222,10 +2387,10 @@ async def _invoke_with_repair(
 
         if remote_handle_failure:
             if tool.startswith("rd.remote.") or ("remote_id" in args):
-                state.remote_id = None
+                state.live_remote_id = None
                 await _ensure_live_remote_handle(call_fn, state, timeout_s=20.0)
                 attempt_args = dict(args)
-                remote_id = str(state.remote_id or "").strip()
+                remote_id = str(state.live_remote_id or "").strip()
                 if remote_id:
                     if "remote_id" in attempt_args:
                         attempt_args["remote_id"] = remote_id
@@ -2233,6 +2398,14 @@ async def _invoke_with_repair(
                     if isinstance(options, dict) and "remote_id" in options:
                         attempt_args["options"] = {**options, "remote_id": remote_id}
                     continue
+
+        if remote_open_replay_network_failure:
+            state.live_remote_id = None
+            await _ensure_live_remote_handle(call_fn, state, timeout_s=20.0)
+            if not state.capture_file_id:
+                await _ensure_capture_handle(call_fn, state, files)
+            attempt_args = _build_args(tool, param_names, state, files)
+            continue
 
         if session_failure or "session" in (str(exc).lower()):
             await _rebuild_replay_context(call_fn, state, files)
@@ -2395,6 +2568,57 @@ def _write_markdown_report(result: dict[str, Any], out_path: Path) -> None:
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _extract_mcp_payload_and_text(result: Any) -> tuple[dict[str, Any] | None, str]:
+    content_items = list(getattr(result, "content", []) or [])
+    raw_parts: list[str] = []
+
+    def _try_structured(candidate: Any) -> dict[str, Any] | None:
+        if isinstance(candidate, dict) and all(key in candidate for key in CANONICAL_KEYS):
+            return candidate
+        if isinstance(candidate, str):
+            parsed = extract_json_payload(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+    for item in content_items:
+        text_value = getattr(item, "text", None)
+        if isinstance(text_value, str) and text_value.strip():
+            raw_parts.append(text_value)
+            payload = extract_json_payload(text_value)
+            if isinstance(payload, dict):
+                return payload, "\n".join(raw_parts)
+
+        model_dump = getattr(item, "model_dump", None)
+        if callable(model_dump):
+            try:
+                dumped = model_dump(mode="python")
+            except Exception:
+                dumped = None
+            payload = _try_structured(dumped)
+            if payload is not None:
+                raw_parts.append(json.dumps(dumped, ensure_ascii=False))
+                return payload, "\n".join(raw_parts)
+            if isinstance(dumped, dict):
+                for key in ("text", "data", "json", "payload"):
+                    payload = _try_structured(dumped.get(key))
+                    if payload is not None:
+                        raw_parts.append(json.dumps(dumped, ensure_ascii=False))
+                        return payload, "\n".join(raw_parts)
+
+        for attr in ("data", "json", "payload"):
+            payload = _try_structured(getattr(item, attr, None))
+            if payload is not None:
+                raw_parts.append(str(getattr(item, attr)))
+                return payload, "\n".join(raw_parts)
+
+        raw_parts.append(str(item))
+
+    raw_text = "\n".join(part for part in raw_parts if part)
+    payload = extract_json_payload(raw_text)
+    return payload if isinstance(payload, dict) else None, raw_text
+
+
 async def _run_transport_mcp(
     root: Path,
     names: list[str],
@@ -2440,11 +2664,7 @@ async def _run_transport_mcp(
                         result = await asyncio.wait_for(session.call_tool(name, args), timeout=effective_timeout_s)
                     except Exception as exc:  # noqa: BLE001
                         return None, "", f"call exception: {exc}"
-                    text = ""
-                    if hasattr(result, "content") and result.content:
-                        first = result.content[0]
-                        text = getattr(first, "text", str(first))
-                    payload = extract_json_payload(text)
+                    payload, text = _extract_mcp_payload_and_text(result)
                     if payload is None:
                         return None, text, "non-json MCP output"
                     return payload, text, ""
@@ -2474,13 +2694,32 @@ async def _run_transport_mcp(
                             ),
                         )
                         continue
+                    if matrix == "remote" and name in FORCED_REMOTE_SKIP_TOOLS:
+                        args = _build_args(name, param_names, state, files)
+                        items.append(
+                            _make_scope_skip_item(
+                                tool=name,
+                                transport="mcp",
+                                matrix=matrix,
+                                reason="user-directed skip for live remote endpoint tool",
+                                issue_type="scope_skip",
+                                fix_hint="Skip live remote endpoint tools in this run and focus on remote replay/open_replay stability.",
+                                impact_scope="only affects live remote endpoint tool coverage",
+                                args=args,
+                                error_code="remote_live_tool_skipped",
+                                evidence="tool skipped by current remote-only validation scope",
+                                repro_command=f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
+                                contract=False,
+                            ),
+                        )
+                        continue
                     requires_capture = ("session_id" in param_names) or ("capture_file_id" in param_names)
-                    had_remote_id = bool(state.remote_id)
-                    if matrix == "remote" and _is_remote_matrix_tool(name, param_names) and not state.remote_id:
+                    had_remote_id = bool(state.live_remote_id)
+                    if matrix == "remote" and _is_remote_matrix_tool(name, param_names) and not state.live_remote_id:
                         await _ensure_context(_call_mcp, state, files, need_capture=False, need_remote=True)
-                        if state.remote_id and not had_remote_id:
-                            remote_workflow_events.append(f"mcp-connect:{state.remote_id}")
-                    if matrix == "remote" and not state.remote_id and state.remote_reason:
+                        if state.live_remote_id and not had_remote_id:
+                            remote_workflow_events.append(f"mcp-connect:{state.live_remote_id}")
+                    if matrix == "remote" and not state.live_remote_id and state.remote_reason:
                         args = _build_args(name, param_names, state, files)
                         items.append(
                             {
@@ -2527,7 +2766,7 @@ async def _run_transport_mcp(
                                 impact_scope="only affects remote matrix replay path",
                                 args=args,
                                 error_code="sample_compatibility",
-                                evidence=f"sample_compatibility={state.sample_compatibility}, remote_id={state.remote_id}",
+                                evidence=f"sample_compatibility={state.sample_compatibility}, remote_id={state.live_remote_id}",
                                 repro_command=f"MCP call `{name}` with args-json `{json.dumps(args, ensure_ascii=False)}`",
                                 contract=True,
                                 sample_compatibility=False,
@@ -2780,14 +3019,36 @@ async def _run_transport_daemon(
                     ),
                 )
                 continue
+            if matrix == "remote" and name in FORCED_REMOTE_SKIP_TOOLS:
+                args = _build_args(name, param_names, state, files)
+                items.append(
+                    _make_scope_skip_item(
+                        tool=name,
+                        transport="daemon",
+                        matrix=matrix,
+                        reason="user-directed skip for live remote endpoint tool",
+                        issue_type="scope_skip",
+                        fix_hint="Skip live remote endpoint tools in this run and focus on remote replay/open_replay stability.",
+                        impact_scope="only affects live remote endpoint tool coverage",
+                        args=args,
+                        error_code="remote_live_tool_skipped",
+                        evidence="tool skipped by current remote-only validation scope",
+                        repro_command=(
+                            f"python cli/run_cli.py --daemon-context {context_name} call {name} "
+                            f"--args-json '{json.dumps(args, ensure_ascii=False)}' --format json"
+                        ),
+                        contract=False,
+                    ),
+                )
+                continue
             if matrix == "remote":
                 remote_workflow_events.append(f"daemon-tool:{name}")
-            if matrix == "remote" and _is_remote_matrix_tool(name, param_names) and not state.remote_id:
-                had_remote_id = bool(state.remote_id)
+            if matrix == "remote" and _is_remote_matrix_tool(name, param_names) and not state.live_remote_id:
+                had_remote_id = bool(state.live_remote_id)
                 await _ensure_context(_call_daemon, state, files, need_capture=False, need_remote=True)
-                if state.remote_id and not had_remote_id:
-                    remote_workflow_events.append(f"daemon-connect:{state.remote_id}")
-            if matrix == "remote" and not state.remote_id and state.remote_reason:
+                if state.live_remote_id and not had_remote_id:
+                    remote_workflow_events.append(f"daemon-connect:{state.live_remote_id}")
+            if matrix == "remote" and not state.live_remote_id and state.remote_reason:
                 args = _build_args(name, param_names, state, files)
                 items.append(
                     {
@@ -2834,7 +3095,7 @@ async def _run_transport_daemon(
                         impact_scope="only affects remote matrix replay path",
                         args=args,
                         error_code="sample_compatibility",
-                        evidence=f"sample_compatibility={state.sample_compatibility}, remote_id={state.remote_id}",
+                        evidence=f"sample_compatibility={state.sample_compatibility}, remote_id={state.live_remote_id}",
                         repro_command=(
                             f"python cli/run_cli.py --daemon-context {context_name} call {name} "
                             f"--args-json '{json.dumps(args, ensure_ascii=False)}' --json --connect"

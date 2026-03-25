@@ -190,18 +190,19 @@ python cli/run_cli.py call rd.session.get_context --args-file $argsFile --format
 
 ## `remote_handle_consumed` 是什么
 
-这是预期生命周期错误，不是随机故障。
+它现在属于少数生命周期异常面，不再是 remote `open_replay` 成功后的默认结果。
 
 它表示：
 
 - 某个 `remote_id` 曾经是 live remote handle
-- 该 handle 已经被一次成功的 `rd.capture.open_replay(options.remote_id=...)` 消费
-- remote ownership 已经转移到对应 `session_id`
+- 当前恢复链路拿到的是旧 tombstone / 旧 snapshot / 显式 consumed 记录，而不是当前 live handle
+- 该 handle 已经不再对应可用的 live remote endpoint
 
 因此：
 
-- 成功 remote `open_replay` 后，不应再对旧 `remote_id` 做 `ping` / `disconnect` / 再次 `open_replay`
-- 如需新的 live handle，必须重新 `rd.remote.connect`
+- 正常 remote `open_replay` 成功后，优先看 `rd.session.get_context -> remote.active_session_ids` 是否已挂到 live handle 上
+- 如果只是想断开 live remote，但 `active_session_ids` 非空，预期先看到的是 `remote_handle_in_use`
+- 只有当你恢复到了旧 tombstone / 旧 snapshot，或显式复用了失效 handle，才应看到 `remote_handle_consumed`
 - 如果只是想确认当前链路状态，优先看 `rd.session.get_context`
 
 ## `rd.remote.connect` 成功了，但后续 `rd.capture.open_replay(options.remote_id=...)` 仍然失败
@@ -214,7 +215,8 @@ python cli/run_cli.py call rd.session.get_context --args-file $argsFile --format
   - 优先检查 remote endpoint 本身、样本兼容性、以及 remote host 是否真的有可用 replay 环境。
   - 如果 `open_replay` 失败，旧 `remote_id` 不应被视为已消费成功。
 - `open_replay` 已成功，后续再用旧 `remote_id` 报错
-  - 这时优先判断是否就是 `remote_handle_consumed`，而不是误判成 remote transport 回归。
+  - 先看 `rd.session.get_context -> remote.active_session_ids` 与 `rd.remote.disconnect` 的返回是否是 `remote_handle_in_use`。
+  - 只有当前 state 明确落在旧 tombstone / consumed handle 上时，才把它归类为 `remote_handle_consumed`。
 
 对 Android remote，`rd.remote.connect` 会负责 `adb` bootstrap；因此如果你是通过 `rdx-tools` 入口复现问题，不应再把“先手工开 `qrenderdoc`”当成默认前置。
 
@@ -315,6 +317,27 @@ daemon 退出后，本地与可恢复 remote session 默认都会保留在持久
 - 编译相关失败会把 `entry_point`、`encoding`、`compile_flags`、`compiler_output` 等诊断信息写进 `error.details`，便于判断是 `BuildTargetShader(...)` 绑定问题，还是 shader 本身编译失败。
 
 不应再把 `mock_applied`、logical replacement 或“看起来成功但没有真正替换”的状态当成成功。
+
+### Android remote / `SPIR-V (RenderDoc)` 的手动 IR patch 怎么排
+
+如果目标是像 `EventID 1248` 这类 Android remote Vulkan shader，建议按这个顺序看：
+
+- 先用 `rd.shader.get_disassembly` 确认目标变量在当前 `SPIR-V (RenderDoc)` 文本里是否真的带有 `[[RelaxedPrecision]]`。
+- 再用 `rd.shader.edit_and_replace` 的 `messages` 看这次 `force_full_precision` 到底命中了哪几行。
+- 如果返回 `status="noop"`，而且 `messages` 里写着 `matched no RelaxedPrecision lines for variables: ...`，说明这个变量在当前反汇编里没有直接可移除的 `RelaxedPrecision` 行；继续盲目回滚或复打同一个 patch 没意义。
+- 如果返回 `status="applied"`，但 `messages` 只命中极少数行，例如 `matched 1 RelaxedPrecision line(s) at 1488`，不要默认这就等价于“把这个概念变量整体提升到 full precision”；它只说明当前文本 patch 只改到了那一行。
+- 对高影响 patch，不要只看单个 hair 像素。应同时取：
+  - hair 采样点
+  - face / torso / background 采样点
+  - `rd.export.screenshot`
+- 如果多个不相关采样点一起掉成 `0,0,0,0`，应把它判断为“当前 patch 把整个输出面打坏了”，而不是“已经得到正确黑发效果”。
+
+当前在 `WhiteHair.rdc / EventID 1248 / ResourceId::208592` 上，已知现象是：
+
+- `variables=["493"]`
+  - 当前会是 direct `noop`，因为没有直接命中 `RelaxedPrecision` 行。
+- `variables=["404"]`
+  - 当前会命中第 `1488` 行，但可能把整张输出面一起打成 `0`。
 
 ## `rd.shader.debug_start` 拿到的 event 不可信
 
