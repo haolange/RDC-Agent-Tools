@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "modes": {
+    "local_cli": {
+      "entry_mode": "cli",
+      "backend": "local",
+      "status": "verified",
+      "runtime_parallelism_ceiling": "multi_context_multi_owner",
+      "host_coordination_gate": "frameworks_platform_matrix_applies",
+      "rehydrate_contract": "required",
+      "blocking_codes": [
+        "capture_file_too_large",
+        "capture_limit_exceeded",
+        "session_resume_failed"
+      ]
+    },
+    "local_mcp": {
+      "entry_mode": "mcp",
+      "backend": "local",
+      "status": "verified",
+      "runtime_parallelism_ceiling": "multi_context_multi_owner",
+      "host_coordination_gate": "frameworks_platform_matrix_applies",
+      "rehydrate_contract": "required",
+      "blocking_codes": [
+        "daemon_timeout",
+        "session_resume_failed"
+      ]
+    },
+    "remote_daemon": {
+      "entry_mode": "cli",
+      "backend": "remote",
+      "status": "verified",
+      "runtime_parallelism_ceiling": "single_runtime_owner",
+      "host_coordination_gate": "frameworks_platform_matrix_applies",
+      "rehydrate_contract": "required",
+      "blocking_codes": [
+        "runtime_owner_conflict",
+        "runtime_baton_invalid",
+        "remote_dependency",
+        "session_resume_failed"
+      ]
+    },
+    "remote_mcp": {
+      "entry_mode": "mcp",
+      "backend": "remote",
+      "status": "serial_only",
+      "runtime_parallelism_ceiling": "single_runtime_owner",
+      "host_coordination_gate": "frameworks_platform_matrix_applies",
+      "rehydrate_contract": "required",
+      "blocking_codes": [
+        "daemon_timeout",
+        "runtime_owner_conflict",
+        "runtime_baton_invalid",
+        "remote_dependency",
+        "session_resume_failed"
+      ]
+    }
+  }
+}

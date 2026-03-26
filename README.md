@@ -32,6 +32,10 @@
 - 主调试接口始终是 canonical `rd.*`。
 - `rd.vfs.*` 是只读导航层，用于浏览结构，不替代正式调试接口。
 - `tabular/tsv projection` 是结果展示投影，用于提升扫描效率，不是新的规范能力面，也不表示语义重要度排序。
+- `rd.texture.get_data` 的默认语义是数值 readback 容器，不是图片导出。
+- 需要直接打开的纹理图片时，统一使用 `rd.export.texture`。
+- `runtime_mode_truth.json` 只定义 transport/runtime ceiling，不定义平台是否具备 team agents。
+- local multi-context 是 runtime ceiling，不等于所有宿主都能升格成 `concurrent_team`。
 
 ## 规范源优先级
 
@@ -48,6 +52,7 @@
 - `CLI` 只是 convenience wrapper，不是完整能力面的等价镜像，也不是规范源。
 - `capture open` 只负责建立 tools-layer session state，不会初始化上层 framework 的 `workspace/case/run`。
 - 规范定义以 `spec/tool_catalog.json` 为准。
+- `spec/runtime_mode_truth.json` 是 transport/runtime 已验证模式的权威文件；平台 coordination 能力由上层 Frameworks 决定。
 
 ## 入口概览
 
@@ -127,11 +132,19 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - `rd.remote.set_overlay_options` 在当前 `RenderDoc` Python binding 未暴露 overlay RPC 时，会返回显式 `remote_overlay_options_unavailable`，而不是静默成功。
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
 - 一个 context 现在可持有多条本地 session 记录；`rd.session.get_context` 会同时返回 `current_session_id`、`sessions`、`recovery`、`limits` 与 `recent_operations`。
+- 现已公开 `rd.session.create_context`、`rd.session.list_contexts`、`rd.session.select_context`、`rd.session.clear_context`，把 multi-context 变成正式 public surface，而不是 CLI 侧隐式约定。
+- 现已公开 `rd.session.claim_runtime_owner` / `rd.session.release_runtime_owner`；当 context 已 claim owner 时，live `rd.*` 调用必须提供匹配的 `runtime_owner` 与 `owner_lease_id`，否则返回 `runtime_owner_conflict`。
+- 现已公开 `rd.session.export_runtime_baton` / `rd.session.rehydrate_runtime_baton`；跨 agent、跨轮次与重连恢复的 live handoff 现在有了正式 baton surface。
 - daemon 退出或重启后，平台会优先按持久化索引恢复本地与可恢复 remote session，并尽量复用原 `session_id`；只有 remote endpoint 真断开、bootstrap 失败或恢复元数据缺失时，才会把该 session 标记为 `degraded` 并返回明确错误。
 - `rd.remote.connect` 与 `rd.capture.open_replay` 在 daemon / streamable transports 下会更新结构化 progress；如宿主不支持 push，至少应通过 `daemon status` 读取 `active_operation`。
 - `active_event_id` 与对外暴露的 canonical `event_id` 只表示可被 `rd.event.get_action_details` round-trip 的 action event；对 `rd.resource.get_usage` / `rd.resource.get_history` 中不可 round-trip 的底层记录，应查看 `raw_event_id` 与 `event_resolvable`。
 - event-bound `rd.pipeline.*`、`rd.shader.*`、`rd.texture.get_pixel_value`、`rd.export.shader_bundle` 与 `rd.shader.debug_start` 会返回 `resolved_event_id`；若 backend 不能精确绑定请求 event，运行时会显式失败，不做 silent fallback。
 - `rd.shader.edit_and_replace` 现在要么执行真实 runtime shader replacement，要么返回明确的 capability/runtime 失败；不会再返回 `mock_applied` 一类伪成功状态。
+- `rd.texture.get_data` 默认返回 `.npz` 容器，并显式带上 `content_kind="texture_readback_container"`、`container_format="npz"`、`artifact_path`、`saved_path` 与 `stats`。
+- `rd.texture.get_data` 若显式传 `output_path`，必须使用 `.npz` 扩展名；不再接受把 readback 容器伪装成 `.png`。
+- `rd.export.texture` 是唯一的纹理图片导出 public surface；`rd.texture.get_data` 只负责数值读回与容器 artifact。
+- daemon 超时错误现在会通过结构化 `error.details` 返回 `operation`、`context_id`、`timeout_seconds`、`active_operation` 与 `daemon_state_excerpt`。
+- transport/runtime 层当前已验证模式固定写入 `spec/runtime_mode_truth.json`；上层 framework 应消费它，而不是自行发明 local/remote 模式真相。
 
 更完整的操作说明见 [docs/quickstart.md](docs/quickstart.md)。
 

@@ -73,11 +73,16 @@
   - daemon / worker 重启后，平台会优先用持久化 remote 元数据恢复同一个 `session_id`；只有 endpoint 真断开、bootstrap 失败或恢复元数据不足时，才需要重新执行整条 remote 建链。
 - 显式保存关键状态。
   - 至少保存 `capture_file_id`、`session_id`、当前 `frame_index`、必要时保存 `event_id`。
-  - 长链任务优先通过 `rd.session.get_context` / `rd.session.list_sessions` / `rd.session.update_context` 维护 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
+- 长链任务优先通过 `rd.session.get_context` / `rd.session.list_sessions` / `rd.session.update_context` 维护 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
 - 多 session context 下显式选择 current session。
-  - 当 `rd.session.list_sessions` 返回多条记录时，后续 inspection 前优先通过 `rd.session.select_session` 锁定当前工作面。
+- 当 `rd.session.list_sessions` 返回多条记录时，后续 inspection 前优先通过 `rd.session.select_session` 锁定当前工作面。
+- 若任务要并行拆成多条 live 链路，应显式创建和列举 context，而不是把多个 owner 塞进同一个 context。
+- 若 context 已 claim runtime owner，live `rd.*` 调用必须带匹配的 `runtime_owner` 与 `owner_lease_id`；拿不到匹配 lease 时应先停，不要继续猜测执行。
+- `rd.session.get_context` / `rd.session.list_contexts` 返回的 `runtime_parallelism_ceiling` 只表示 runtime 上限，不表示宿主已经具备 team-agent coordination。
+- local ceiling 可到 `multi_context_multi_owner`，但是否真的能用成并行 live specialists，取决于上层 Frameworks 的平台矩阵。
 - 对 daemon 重启后的本地链路，优先读取恢复面。
-  - 本地与可恢复 remote session 都可通过 `rd.session.get_context` / `rd.session.resume` 自动或显式恢复。
+- 本地与可恢复 remote session 都可通过 `rd.session.get_context` / `rd.session.resume` 自动或显式恢复。
+- 跨 agent / 跨轮次需要传递 live 调试上下文时，优先导出 runtime baton，而不是只转述 `session_id`、`remote_id` 或 `active_event_id`。
   - 若 remote endpoint 真断开、bootstrap 失败或恢复元数据缺失，运行时会显式返回 `degraded` / error；这时再重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay(options.remote_id=...)`。
 - 先用 discovery 接口，再决定注入多少 tool 描述。
   - `rd.core.list_tools` 适合按 `namespace`、`group`、`capability`、`role` 做结构化枚举。

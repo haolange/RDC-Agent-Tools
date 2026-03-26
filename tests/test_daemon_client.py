@@ -172,3 +172,52 @@ def test_stop_daemon_uses_loaded_state_before_cleanup(monkeypatch, tmp_path: Pat
     assert message == "daemon stopped"
     assert calls == [(321, "ctx-live")]
     assert cleared == ["daemon:ctx-live", "session:ctx-live"]
+
+
+def test_daemon_request_timeout_returns_structured_details(monkeypatch, tmp_path: Path) -> None:
+    _configure_runtime_dir(monkeypatch, tmp_path)
+
+    class _FakeClient:
+        def __init__(self, *, address: str, family: str) -> None:
+            self.address = address
+            self.family = family
+
+        def send(self, payload: dict[str, object]) -> None:
+            return None
+
+        def poll(self, timeout: float) -> bool:
+            return False
+
+        def close(self) -> None:
+            return None
+
+    state = {
+        "pipe_name": "pipe-demo",
+        "token": "tok-demo",
+        "context_id": "ctx-demo",
+        "active_operation": {"operation": "rd.capture.open_replay", "trace_id": "trace-1", "transport": "cli"},
+        "pid": 123,
+        "session_id": "sess-demo",
+        "capture_file_id": "capf-demo",
+        "active_request_count": 1,
+    }
+
+    monkeypatch.setattr(daemon_client, "Client", _FakeClient)
+
+    try:
+        daemon_client.daemon_request(
+            "exec",
+            params={"operation": "rd.texture.get_data"},
+            timeout=0.01,
+            state=state,
+            context="ctx-demo",
+        )
+    except daemon_client.DaemonRequestTimeout as exc:
+        assert exc.code == "daemon_timeout"
+        assert exc.details["operation"] == "rd.texture.get_data"
+        assert exc.details["context_id"] == "ctx-demo"
+        assert exc.details["timeout_seconds"] == 0.01
+        assert exc.details["active_operation"]["operation"] == "rd.capture.open_replay"
+        assert exc.details["daemon_state_excerpt"]["session_id"] == "sess-demo"
+    else:  # pragma: no cover
+        raise AssertionError("expected DaemonRequestTimeout")

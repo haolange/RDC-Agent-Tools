@@ -26,6 +26,7 @@ from rdx.daemon.client import (
     load_daemon_state,
     stop_daemon,
 )
+from rdx.io_utils import safe_json_text, safe_stream_write
 from rdx.runtime_paths import artifacts_dir
 from rdx.timeout_policy import daemon_exec_timeout_s
 
@@ -35,7 +36,25 @@ EXIT_RUNTIME_ERR = 2
 
 
 def _print_json(payload: Dict[str, Any]) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    safe_stream_write(safe_json_text(payload, indent=2) + "\n", sys.stdout)
+
+
+def _write_stdout(text: str) -> None:
+    safe_stream_write(text + "\n", sys.stdout)
+
+
+def _exception_error_payload(result_kind: str, exc: Exception, *, transport: str = "cli") -> Dict[str, Any]:
+    code = str(getattr(exc, "code", "") or "runtime_error")
+    category = str(getattr(exc, "category", "") or "runtime")
+    details = getattr(exc, "details", {})
+    return canonical_error(
+        result_kind=result_kind,
+        code=code,
+        category=category,
+        message=str(exc),
+        details=details if isinstance(details, dict) else {},
+        transport=transport,
+    )
 
 
 def _parse_json_object(raw: str, *, source: str) -> Dict[str, Any]:
@@ -190,7 +209,7 @@ def _daemon_status_payload(context: str) -> Dict[str, Any]:
         )
     try:
         resp = daemon_request("status", params={}, context=context, state=state)
-    except Exception:
+    except Exception as exc:
         cleaned = cleanup_stale_daemon_states(context=context)
         refreshed = load_daemon_state(context=context)
         if not refreshed:
@@ -201,10 +220,14 @@ def _daemon_status_payload(context: str) -> Dict[str, Any]:
             )
         return canonical_error(
             result_kind="rdx.daemon.status",
-            code="runtime_error",
-            category="runtime",
+            code=str(getattr(exc, "code", "") or "runtime_error"),
+            category=str(getattr(exc, "category", "") or "runtime"),
             message="daemon status failed",
-            details={"state": refreshed, "cleaned": cleaned},
+            details={
+                "state": refreshed,
+                "cleaned": cleaned,
+                **(getattr(exc, "details", {}) if isinstance(getattr(exc, "details", {}), dict) else {}),
+            },
             transport="cli",
         )
     result = resp.get("result", {}) if isinstance(resp, dict) else {}
@@ -262,17 +285,17 @@ def _render_tabular(payload: Dict[str, Any]) -> None:
         raise RuntimeError("tool did not return tabular projection")
     text = str(tabular.get("tsv_text") or "").strip()
     if text:
-        print(text)
+        safe_stream_write(text + "\n", sys.stdout)
         return
     columns = tabular.get("columns")
     rows = tabular.get("rows")
     if not isinstance(columns, list) or not isinstance(rows, list):
         raise RuntimeError("tabular projection is missing columns/rows")
-    print("\t".join(str(col) for col in columns))
+    _write_stdout("\t".join(str(col) for col in columns))
     for row in rows:
         if not isinstance(row, list):
             raise RuntimeError("tabular row must be a list")
-        print("\t".join("" if item is None else str(item) for item in row))
+        _write_stdout("\t".join("" if item is None else str(item) for item in row))
 
 
 def _render_result(payload: Dict[str, Any], *, output_format: str = "json") -> None:
@@ -684,15 +707,7 @@ def main() -> None:
     try:
         code = asyncio.run(_main_async(args))
     except Exception as exc:  # noqa: BLE001
-        _print_json(
-            canonical_error(
-                result_kind="rdx.cli",
-                code="runtime_error",
-                category="runtime",
-                message=str(exc),
-                transport="cli",
-            ),
-        )
+        _print_json(_exception_error_payload("rdx.cli", exc, transport="cli"))
         code = EXIT_RUNTIME_ERR
     raise SystemExit(int(code))
 

@@ -83,6 +83,7 @@ from rdx.runtime_state import (
     save_context_state,
     summarize_operation_durations,
 )
+from rdx.io_utils import atomic_write_json
 from rdx.utils.artifact_store import ArtifactStore
 from rdx.core.tsv_projection import project_rows, to_tsv_string
 
@@ -99,6 +100,20 @@ def _runtime_context_id() -> str:
     if current:
         return normalize_context_id(current)
     return normalize_context_id(os.environ.get("RDX_CONTEXT_ID") or "default")
+
+
+def _normalize_entry_mode(value: Any, *, default: str = "cli") -> str:
+    mode = str(value or default).strip().lower()
+    if mode not in {"cli", "mcp"}:
+        return default
+    return mode
+
+
+def _normalize_backend(value: Any, *, default: str = "local") -> str:
+    backend = str(value or default).strip().lower()
+    if backend not in {"local", "remote"}:
+        return default
+    return backend
 
 
 @dataclass
@@ -200,6 +215,22 @@ _artifact_store: Optional[ArtifactStore] = None
 _patch_engine: Optional[PatchEngine] = None
 _runtime: RuntimeState = RuntimeState()
 _runtime_bootstrapped: bool = False
+
+_LIVE_OWNER_PREFIXES = (
+    "rd.capture.",
+    "rd.replay.",
+    "rd.remote.",
+    "rd.event.",
+    "rd.pipeline.",
+    "rd.shader.",
+    "rd.texture.",
+    "rd.resource.",
+    "rd.buffer.",
+    "rd.mesh.",
+    "rd.export.",
+    "rd.debug.",
+    "rd.perf.",
+)
 
 
 def _current_progress_reporter() -> ProgressReporter | None:
@@ -522,6 +553,57 @@ def _select_session_from_state(
     return state
 
 
+def _infer_context_backend(snapshot: Dict[str, Any], state: Dict[str, Any]) -> str:
+    backend = _normalize_backend(state.get("backend"), default="")
+    if backend:
+        return backend
+    runtime_payload = snapshot.get("runtime") if isinstance(snapshot.get("runtime"), dict) else {}
+    remote_payload = snapshot.get("remote") if isinstance(snapshot.get("remote"), dict) else {}
+    if str(runtime_payload.get("backend_type") or "").strip() == "remote":
+        return "remote"
+    if str(remote_payload.get("state") or "none").strip() != "none":
+        return "remote"
+    return "local"
+
+
+def _runtime_parallelism_ceiling_for_backend(backend: str) -> str:
+    return "single_runtime_owner" if str(backend or "").strip() == "remote" else "multi_context_multi_owner"
+
+
+def _coordination_projection(state: Dict[str, Any], snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    runtime_owner = dict(state.get("runtime_owner") or {})
+    owner_lease = dict(state.get("owner_lease") or runtime_owner or {})
+    backend = _infer_context_backend(snapshot, state)
+    return {
+        "entry_mode": _normalize_entry_mode(state.get("entry_mode"), default="cli"),
+        "backend": backend,
+        "runtime_parallelism_ceiling": _runtime_parallelism_ceiling_for_backend(backend),
+        "runtime_owner": runtime_owner,
+        "owner_lease": owner_lease,
+        "active_baton": dict(state.get("active_baton") or {}),
+        "rehydrate_status": dict(state.get("rehydrate_status") or {}),
+    }
+
+
+def _apply_coordination_projection(snapshot: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    projection = _coordination_projection(state, snapshot)
+    snapshot["entry_mode"] = projection["entry_mode"]
+    snapshot["backend"] = projection["backend"]
+    snapshot["runtime_parallelism_ceiling"] = projection["runtime_parallelism_ceiling"]
+    snapshot["runtime_owner"] = projection["runtime_owner"]
+    snapshot["owner_lease"] = projection["owner_lease"]
+    snapshot["active_baton"] = projection["active_baton"]
+    snapshot["rehydrate_status"] = projection["rehydrate_status"]
+    state["entry_mode"] = projection["entry_mode"]
+    state["backend"] = projection["backend"]
+    state["runtime_parallelism_ceiling"] = projection["runtime_parallelism_ceiling"]
+    state["runtime_owner"] = projection["runtime_owner"]
+    state["owner_lease"] = projection["owner_lease"]
+    state["active_baton"] = projection["active_baton"]
+    state["rehydrate_status"] = projection["rehydrate_status"]
+    return snapshot
+
+
 def _sync_context_snapshot_from_state(context_id: Optional[str] = None) -> Dict[str, Any]:
     ctx = normalize_context_id(context_id or _runtime_context_id())
     state = _context_state(ctx)
@@ -556,6 +638,7 @@ def _sync_context_snapshot_from_state(context_id: Optional[str] = None) -> Dict[
         )
     else:
         snapshot["runtime"] = default_context_snapshot(ctx).get("runtime", {})
+    snapshot = _apply_coordination_projection(snapshot, state)
     _store_context_state(state, ctx)
     return _store_context_snapshot(snapshot, ctx)
 
@@ -612,6 +695,7 @@ def _update_context_session_record(
 ) -> Dict[str, Any]:
     ctx = normalize_context_id(context_id or _runtime_context_id())
     state = _context_state(ctx)
+    state["backend"] = _normalize_backend(backend_type, default="local")
     sessions = state.setdefault("sessions", {})
     record = dict(sessions.get(str(session_id)) or {})
     if not record:
@@ -725,6 +809,13 @@ def _record_operation_start(
 ) -> None:
     ctx = normalize_context_id(context_id)
     state = _context_state(ctx)
+    if transport in {"cli", "mcp"}:
+        state["entry_mode"] = _normalize_entry_mode(transport, default=str(state.get("entry_mode") or "cli"))
+    if str(operation or "").startswith("rd.remote."):
+        state["backend"] = "remote"
+    elif operation == "rd.capture.open_replay":
+        options = args.get("options") if isinstance(args.get("options"), dict) else {}
+        state["backend"] = "remote" if str(options.get("remote_id") or "").strip() else "local"
     entry = _upsert_operation_entry(
         state,
         str(trace_id),
@@ -924,6 +1015,8 @@ def _context_snapshot(context_id: Optional[str] = None) -> Dict[str, Any]:
         else:
             snapshot["remote"] = default_context_snapshot(ctx).get("remote", {})
 
+    snapshot = _apply_coordination_projection(snapshot, state)
+    _store_context_state(state, ctx)
     _runtime.context_snapshots[ctx] = snapshot
     return snapshot
 
@@ -1037,7 +1130,11 @@ def _remote_snapshot_payload_from_handle(handle: RemoteHandle) -> Dict[str, Any]
 
 
 def _set_context_remote_live(remote_id: str, endpoint: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
-    snapshot = _context_snapshot(context_id)
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    state["backend"] = "remote"
+    _store_context_state(state, ctx)
+    snapshot = _context_snapshot(ctx)
     handle = _runtime.remotes.get(str(remote_id or "").strip())
     if handle is not None:
         payload = _remote_snapshot_payload_from_handle(handle)
@@ -1052,7 +1149,7 @@ def _set_context_remote_live(remote_id: str, endpoint: str, *, context_id: Optio
             "consumed_by_session_id": "",
             "active_session_ids": [],
         }
-    return _store_context_snapshot(snapshot, context_id)
+    return _store_context_snapshot(snapshot, ctx)
 
 
 
@@ -1063,7 +1160,11 @@ def _set_context_remote_session_owned(
     *,
     context_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    snapshot = _context_snapshot(context_id)
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    state["backend"] = "remote"
+    _store_context_state(state, ctx)
+    snapshot = _context_snapshot(ctx)
     snapshot["remote"] = {
         "state": "session_owned",
         "remote_id": "",
@@ -1072,7 +1173,7 @@ def _set_context_remote_session_owned(
         "consumed_by_session_id": str(session_id or ""),
         "active_session_ids": [str(session_id or "")] if str(session_id or "").strip() else [],
     }
-    return _store_context_snapshot(snapshot, context_id)
+    return _store_context_snapshot(snapshot, ctx)
 
 
 
@@ -1083,7 +1184,11 @@ def _set_context_remote_consumed(
     *,
     context_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    snapshot = _context_snapshot(context_id)
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    state = _context_state(ctx)
+    state["backend"] = "remote"
+    _store_context_state(state, ctx)
+    snapshot = _context_snapshot(ctx)
     snapshot["remote"] = {
         "state": "consumed",
         "remote_id": "",
@@ -1092,7 +1197,7 @@ def _set_context_remote_consumed(
         "consumed_by_session_id": str(session_id or ""),
         "active_session_ids": [],
     }
-    return _store_context_snapshot(snapshot, context_id)
+    return _store_context_snapshot(snapshot, ctx)
 
 
 
@@ -1141,11 +1246,16 @@ def _release_remote_session_lease(session_id: str, *, context_id: Optional[str] 
 
 
 def _clear_context_remote_live(remote_id: str, *, context_id: Optional[str] = None) -> Dict[str, Any]:
-    snapshot = _context_snapshot(context_id)
+    ctx = normalize_context_id(context_id or _runtime_context_id())
+    snapshot = _context_snapshot(ctx)
     remote = snapshot.get("remote", {})
     if remote.get("state") == "live_handle" and remote.get("remote_id") == str(remote_id or ""):
         snapshot["remote"] = default_context_snapshot(context_id).get("remote", {})
-        return _store_context_snapshot(snapshot, context_id)
+        state = _context_state(ctx)
+        if str((snapshot.get("runtime") or {}).get("backend_type") or "none") != "remote":
+            state["backend"] = "local"
+            _store_context_state(state, ctx)
+        return _store_context_snapshot(snapshot, ctx)
     return snapshot
 
 
@@ -1168,7 +1278,13 @@ def _clear_context_runtime(session_id: str, *, context_id: Optional[str] = None)
         snapshot["remote"]["state"] = "consumed"
         snapshot["remote"]["active_session_ids"] = []
         _store_context_snapshot(snapshot, ctx)
-    return _remove_context_session(str(session_id or ""), context_id=ctx)
+    result = _remove_context_session(str(session_id or ""), context_id=ctx)
+    state = _context_state(ctx)
+    if not any(str((record or {}).get("backend_type") or "") == "remote" for record in (state.get("sessions") or {}).values()):
+        state["backend"] = "local"
+        _store_context_state(state, ctx)
+        result = _sync_context_snapshot_from_state(ctx)
+    return result
 
 
 
@@ -4340,8 +4456,306 @@ def _runtime_metrics_payload(context_id: Optional[str] = None) -> Dict[str, Any]
     }
 
 
+def _runtime_baton_artifact_path(baton_id: str) -> Path:
+    return artifacts_dir() / "runtime_batons" / f"{str(baton_id or '').strip()}.json"
+
+
+def _context_summary(context_id: str) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id)
+    snapshot = _context_snapshot(ctx)
+    state = _context_state(ctx)
+    return {
+        "context_id": ctx,
+        "entry_mode": str(snapshot.get("entry_mode") or "cli"),
+        "backend": str(snapshot.get("backend") or "local"),
+        "runtime_parallelism_ceiling": str(snapshot.get("runtime_parallelism_ceiling") or _runtime_parallelism_ceiling_for_backend(str(snapshot.get("backend") or "local"))),
+        "runtime_owner": dict(snapshot.get("runtime_owner") or {}),
+        "owner_lease": dict(snapshot.get("owner_lease") or {}),
+        "active_baton": dict(snapshot.get("active_baton") or {}),
+        "rehydrate_status": dict(snapshot.get("rehydrate_status") or {}),
+        "current_session_id": str(state.get("current_session_id") or ""),
+        "current_capture_file_id": str(state.get("current_capture_file_id") or ""),
+        "session_count": len(state.get("sessions") or {}),
+        "capture_count": len(state.get("captures") or {}),
+        "updated_at_ms": int(snapshot.get("updated_at_ms") or 0),
+    }
+
+
+def _claim_runtime_owner_state(
+    context_id: str,
+    *,
+    agent_id: str,
+    force: bool = False,
+    entry_mode: Optional[str] = None,
+    backend: Optional[str] = None,
+) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id)
+    state = _context_state(ctx)
+    existing = dict(state.get("runtime_owner") or {})
+    existing_agent = str(existing.get("agent_id") or "").strip()
+    existing_lease = str(existing.get("lease_id") or "").strip()
+    existing_status = str(existing.get("status") or "unclaimed").strip() or "unclaimed"
+    if existing_agent and existing_status == "claimed" and existing_agent != agent_id and not force:
+        raise CoreError(
+            code="runtime_owner_conflict",
+            message=f"context {ctx} is already claimed by runtime owner {existing_agent}",
+            category="runtime",
+            details={
+                "context_id": ctx,
+                "runtime_owner": existing_agent,
+                "owner_lease_id": existing_lease,
+                "requested_runtime_owner": agent_id,
+            },
+        )
+    lease_id = _new_id("lease")
+    owner_payload = {
+        "agent_id": agent_id,
+        "lease_id": lease_id,
+        "status": "claimed",
+        "claimed_at_ms": _now_ms(),
+        "released_at_ms": 0,
+    }
+    state["runtime_owner"] = owner_payload
+    state["owner_lease"] = dict(owner_payload)
+    if entry_mode is not None:
+        state["entry_mode"] = _normalize_entry_mode(entry_mode, default=str(state.get("entry_mode") or "cli"))
+    if backend is not None:
+        state["backend"] = _normalize_backend(backend, default=str(state.get("backend") or "local"))
+    _store_context_state(state, ctx)
+    return _sync_context_snapshot_from_state(ctx)
+
+
+def _release_runtime_owner_state(
+    context_id: str,
+    *,
+    agent_id: str = "",
+    owner_lease_id: str = "",
+    force: bool = False,
+) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id)
+    state = _context_state(ctx)
+    current = dict(state.get("runtime_owner") or {})
+    current_agent = str(current.get("agent_id") or "").strip()
+    current_lease_id = str(current.get("lease_id") or "").strip()
+    if current_agent and not force:
+        if agent_id and agent_id != current_agent:
+            raise CoreError(
+                code="runtime_owner_conflict",
+                message=f"context {ctx} is owned by {current_agent}",
+                category="runtime",
+                details={
+                    "context_id": ctx,
+                    "runtime_owner": current_agent,
+                    "owner_lease_id": current_lease_id,
+                    "requested_runtime_owner": agent_id,
+                },
+            )
+        if owner_lease_id and owner_lease_id != current_lease_id:
+            raise CoreError(
+                code="runtime_owner_conflict",
+                message=f"context {ctx} lease mismatch",
+                category="runtime",
+                details={
+                    "context_id": ctx,
+                    "runtime_owner": current_agent,
+                    "owner_lease_id": current_lease_id,
+                    "requested_owner_lease_id": owner_lease_id,
+                },
+            )
+    released = {
+        "agent_id": "",
+        "lease_id": "",
+        "status": "released" if current_agent else "unclaimed",
+        "claimed_at_ms": int(current.get("claimed_at_ms") or 0),
+        "released_at_ms": _now_ms() if current_agent else int(current.get("released_at_ms") or 0),
+    }
+    state["runtime_owner"] = {
+        "agent_id": "",
+        "lease_id": "",
+        "status": "unclaimed",
+        "claimed_at_ms": 0,
+        "released_at_ms": released["released_at_ms"],
+    }
+    state["owner_lease"] = released
+    _store_context_state(state, ctx)
+    return _sync_context_snapshot_from_state(ctx)
+
+
+def _build_runtime_baton(context_id: str, *, task_goal: str, baton_id: str = "") -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id)
+    snapshot = _context_snapshot(ctx)
+    state = _context_state(ctx)
+    current_session_id = str(state.get("current_session_id") or "")
+    current_capture_file_id = str(state.get("current_capture_file_id") or "")
+    session = dict((state.get("sessions") or {}).get(current_session_id) or {})
+    remote_payload = dict(snapshot.get("remote") or {})
+    remote_connect: Dict[str, Any] = {}
+    if str(snapshot.get("backend") or "local") == "remote":
+        remote_connect = {
+            "transport": str(((session.get("remote") or {}).get("transport") or "renderdoc")),
+            "host": str(((session.get("remote") or {}).get("host") or remote_payload.get("endpoint") or "")).split(":", 1)[0],
+            "port": int(((session.get("remote") or {}).get("port") or 0)),
+            "options_ref": "",
+        }
+    baton = {
+        "baton_id": baton_id or _new_id("baton"),
+        "context_id": ctx,
+        "entry_mode": str(snapshot.get("entry_mode") or "cli"),
+        "backend": str(snapshot.get("backend") or "local"),
+        "runtime_owner": dict(snapshot.get("runtime_owner") or {}),
+        "owner_lease": dict(snapshot.get("owner_lease") or {}),
+        "capture_ref": {
+            "rdc_path": str(session.get("rdc_path") or ""),
+            "capture_file_id": current_capture_file_id,
+            "session_id": current_session_id,
+        },
+        "rehydrate": {
+            "required": True,
+            "remote_connect": remote_connect,
+            "frame_index": int((snapshot.get("runtime") or {}).get("frame_index") or 0),
+            "active_event_id": int((snapshot.get("runtime") or {}).get("active_event_id") or 0),
+            "focus": dict(snapshot.get("focus") or {}),
+        },
+        "active_baton": dict(snapshot.get("active_baton") or {}),
+        "task_goal": str(task_goal or "").strip(),
+        "exported_at_ms": _now_ms(),
+    }
+    return baton
+
+
+def _export_runtime_baton_state(context_id: str, *, task_goal: str) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id)
+    baton = _build_runtime_baton(ctx, task_goal=task_goal)
+    if not str(((baton.get("capture_ref") or {}).get("rdc_path") or "")).strip():
+        raise CoreError(
+            code="runtime_baton_invalid",
+            message="runtime baton export requires an active session or capture-backed rdc_path",
+            category="validation",
+            details={"context_id": ctx},
+        )
+    artifact_path = _runtime_baton_artifact_path(str(baton["baton_id"]))
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(artifact_path, baton)
+    state = _context_state(ctx)
+    state["active_baton"] = {
+        "baton_id": str(baton["baton_id"]),
+        "artifact_path": str(artifact_path),
+        "task_goal": str(task_goal),
+        "status": "exported",
+        "exported_at_ms": int(baton["exported_at_ms"]),
+    }
+    state["rehydrate_status"] = {
+        "status": "idle",
+        "baton_id": str(baton["baton_id"]),
+        "last_attempt_ms": 0,
+        "last_success_ms": 0,
+        "last_error": "",
+    }
+    _store_context_state(state, ctx)
+    snapshot = _sync_context_snapshot_from_state(ctx)
+    baton["artifact_path"] = str(artifact_path)
+    baton["snapshot"] = snapshot
+    return baton
+
+
+def _load_runtime_baton(args: Dict[str, Any], *, context_id: str) -> Dict[str, Any]:
+    payload = args.get("baton")
+    if isinstance(payload, dict):
+        baton = dict(payload)
+    else:
+        baton_id = str(args.get("baton_id") or "").strip()
+        baton_path_text = str(args.get("baton_path") or "").strip()
+        baton_path = Path(baton_path_text) if baton_path_text else _runtime_baton_artifact_path(baton_id)
+        if not baton_path.is_file():
+            raise CoreError(
+                code="runtime_baton_invalid",
+                message="runtime baton artifact not found",
+                category="validation",
+                details={"context_id": context_id, "baton_id": baton_id, "baton_path": str(baton_path)},
+            )
+        baton = json.loads(baton_path.read_text(encoding="utf-8"))
+    if not isinstance(baton, dict):
+        raise CoreError(
+            code="runtime_baton_invalid",
+            message="runtime baton payload must be an object",
+            category="validation",
+            details={"context_id": context_id},
+        )
+    if not str(((baton.get("capture_ref") or {}).get("rdc_path") or "")).strip():
+        raise CoreError(
+            code="runtime_baton_invalid",
+            message="runtime baton missing capture_ref.rdc_path",
+            category="validation",
+            details={"context_id": context_id, "baton_id": str(baton.get("baton_id") or "")},
+        )
+    return baton
+
+
+async def _rehydrate_runtime_baton_state(context_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    ctx = normalize_context_id(context_id)
+    baton = _load_runtime_baton(args, context_id=ctx)
+    state = _context_state(ctx)
+    state["rehydrate_status"] = {
+        "status": "running",
+        "baton_id": str(baton.get("baton_id") or ""),
+        "last_attempt_ms": _now_ms(),
+        "last_success_ms": int((state.get("rehydrate_status") or {}).get("last_success_ms") or 0),
+        "last_error": "",
+    }
+    state["entry_mode"] = _normalize_entry_mode(baton.get("entry_mode"), default=str(state.get("entry_mode") or "cli"))
+    state["backend"] = _normalize_backend(baton.get("backend"), default=str(state.get("backend") or "local"))
+    _store_context_state(state, ctx)
+    try:
+        requested_session_id = str(((baton.get("capture_ref") or {}).get("session_id") or "")).strip()
+        if requested_session_id:
+            await _recover_single_session_from_state(ctx, requested_session_id)
+            _select_context_session_state(requested_session_id, context_id=ctx)
+        else:
+            await _recover_context_sessions(ctx)
+        snapshot = _context_snapshot(ctx)
+        focus = dict(((baton.get("rehydrate") or {}).get("focus") or {}))
+        if focus.get("pixel") is not None:
+            snapshot["focus"]["pixel"] = normalize_pixel(focus.get("pixel"))
+        if focus.get("resource_id"):
+            snapshot["focus"]["resource_id"] = str(focus.get("resource_id") or "")
+        if focus.get("shader_id"):
+            snapshot["focus"]["shader_id"] = str(focus.get("shader_id") or "")
+        snapshot = _store_context_snapshot(snapshot, ctx)
+        state = _context_state(ctx)
+        state["active_baton"] = {
+            "baton_id": str(baton.get("baton_id") or ""),
+            "artifact_path": str(baton.get("artifact_path") or args.get("baton_path") or _runtime_baton_artifact_path(str(baton.get("baton_id") or ""))),
+            "task_goal": str(baton.get("task_goal") or ""),
+            "status": "rehydrated",
+            "exported_at_ms": int(baton.get("exported_at_ms") or 0),
+        }
+        state["rehydrate_status"] = {
+            "status": "succeeded",
+            "baton_id": str(baton.get("baton_id") or ""),
+            "last_attempt_ms": int((state.get("rehydrate_status") or {}).get("last_attempt_ms") or _now_ms()),
+            "last_success_ms": _now_ms(),
+            "last_error": "",
+        }
+        _store_context_state(state, ctx)
+        return {
+            "baton": baton,
+            "snapshot": _sync_context_snapshot_from_state(ctx),
+        }
+    except Exception as exc:
+        state = _context_state(ctx)
+        state["rehydrate_status"] = {
+            "status": "failed",
+            "baton_id": str(baton.get("baton_id") or ""),
+            "last_attempt_ms": int((state.get("rehydrate_status") or {}).get("last_attempt_ms") or _now_ms()),
+            "last_success_ms": int((state.get("rehydrate_status") or {}).get("last_success_ms") or 0),
+            "last_error": str(exc),
+        }
+        _store_context_state(state, ctx)
+        raise
+
+
 async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
-    context_id = _runtime_context_id()
+    context_id = normalize_context_id(args.get("context_id") or _runtime_context_id())
 
     if action == "get_context":
         snapshot = _context_snapshot(context_id)
@@ -4364,6 +4778,58 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
             recent_operations=list(state.get("recent_operations") or []),
         )
 
+    if action == "create_context":
+        requested_context = normalize_context_id(args.get("new_context_id") or args.get("target_context_id") or args.get("context_id") or context_id)
+        _ensure_context_capacity(requested_context)
+        state = _context_state(requested_context)
+        _store_context_state(state, requested_context)
+        snapshot = _sync_context_snapshot_from_state(requested_context)
+        return _ok(
+            **snapshot,
+            current_session_id=str(state.get("current_session_id") or ""),
+            sessions=list(state.get("sessions", {}).values()),
+            recovery=dict(state.get("recovery") or {}),
+            limits=dict(state.get("limits") or {}),
+        )
+
+    if action == "list_contexts":
+        context_ids = sorted({normalize_context_id(item) for item in list_context_ids()} | {context_id})
+        return _ok(context_id=context_id, contexts=[_context_summary(item) for item in context_ids])
+
+    if action == "select_context":
+        _require(args, "target_context_id")
+        requested_context = normalize_context_id(args.get("target_context_id"))
+        if not _context_state_exists(requested_context):
+            return _err(
+                f"Unknown context_id: {requested_context}",
+                code="context_not_found",
+                category="not_found",
+                details={"context_id": requested_context},
+            )
+        state = _context_state(requested_context)
+        snapshot = _sync_context_snapshot_from_state(requested_context)
+        return _ok(
+            **snapshot,
+            selected_context_id=requested_context,
+            current_session_id=str(state.get("current_session_id") or ""),
+            sessions=list(state.get("sessions", {}).values()),
+            recovery=dict(state.get("recovery") or {}),
+            limits=dict(state.get("limits") or {}),
+            recent_operations=list(state.get("recent_operations") or []),
+        )
+
+    if action == "clear_context":
+        requested_context = normalize_context_id(args.get("target_context_id") or args.get("context_id") or context_id)
+        snapshot = _reset_context_snapshot(requested_context)
+        state = _context_state(requested_context)
+        return _ok(
+            **snapshot,
+            current_session_id=str(state.get("current_session_id") or ""),
+            sessions=list(state.get("sessions", {}).values()),
+            recovery=dict(state.get("recovery") or {}),
+            limits=dict(state.get("limits") or {}),
+        )
+
     if action == "update_context":
         _require(args, "key")
         key = str(args["key"] or "").strip()
@@ -4381,12 +4847,20 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
 
     if action == "list_sessions":
         state = _sync_context_metrics(context_id)
+        snapshot = _context_snapshot(context_id)
         return _ok(
             context_id=context_id,
             current_session_id=str(state.get("current_session_id") or ""),
             sessions=list(state.get("sessions", {}).values()),
             recovery=dict(state.get("recovery") or {}),
             limits=dict(state.get("limits") or {}),
+            runtime_parallelism_ceiling=str(snapshot.get("runtime_parallelism_ceiling") or _runtime_parallelism_ceiling_for_backend(str(snapshot.get("backend") or "local"))),
+            runtime_owner=dict(snapshot.get("runtime_owner") or {}),
+            owner_lease=dict(snapshot.get("owner_lease") or {}),
+            entry_mode=str(snapshot.get("entry_mode") or "cli"),
+            backend=str(snapshot.get("backend") or "local"),
+            active_baton=dict(snapshot.get("active_baton") or {}),
+            rehydrate_status=dict(snapshot.get("rehydrate_status") or {}),
         )
 
     if action == "select_session":
@@ -4414,6 +4888,74 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
             recovery=dict(state.get("recovery") or {}),
             limits=dict(state.get("limits") or {}),
             recent_operations=list(state.get("recent_operations") or []),
+        )
+
+    if action == "claim_runtime_owner":
+        _require(args, "runtime_owner")
+        runtime_owner = str(args.get("runtime_owner") or "").strip()
+        try:
+            snapshot = _claim_runtime_owner_state(
+                context_id,
+                agent_id=runtime_owner,
+                force=_as_bool(args.get("force"), False),
+                entry_mode=args.get("entry_mode"),
+                backend=args.get("backend"),
+            )
+        except CoreError as exc:
+            return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
+        return _ok(
+            **snapshot,
+        )
+
+    if action == "release_runtime_owner":
+        try:
+            snapshot = _release_runtime_owner_state(
+                context_id,
+                agent_id=str(args.get("runtime_owner") or "").strip(),
+                owner_lease_id=str(args.get("owner_lease_id") or "").strip(),
+                force=_as_bool(args.get("force"), False),
+            )
+        except CoreError as exc:
+            return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
+        return _ok(
+            **snapshot,
+        )
+
+    if action == "export_runtime_baton":
+        _require(args, "task_goal")
+        try:
+            payload = _export_runtime_baton_state(context_id, task_goal=str(args.get("task_goal") or "").strip())
+        except CoreError as exc:
+            return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
+        return _ok(
+            context_id=context_id,
+            baton_id=str(payload.get("baton_id") or ""),
+            artifact_path=str(payload.get("artifact_path") or ""),
+            runtime_owner=dict(payload.get("runtime_owner") or {}),
+            owner_lease=dict(payload.get("owner_lease") or {}),
+            entry_mode=str(payload.get("entry_mode") or "cli"),
+            backend=str(payload.get("backend") or "local"),
+            active_baton=dict((payload.get("snapshot") or {}).get("active_baton") or {}),
+            rehydrate_status=dict((payload.get("snapshot") or {}).get("rehydrate_status") or {}),
+            baton=payload,
+        )
+
+    if action == "rehydrate_runtime_baton":
+        try:
+            payload = await _rehydrate_runtime_baton_state(context_id, args)
+        except CoreError as exc:
+            return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
+        except Exception as exc:  # noqa: BLE001
+            return _err(
+                str(exc),
+                code="runtime_baton_invalid",
+                category="runtime",
+                details={"context_id": context_id},
+            )
+        snapshot = dict(payload.get("snapshot") or {})
+        return _ok(
+            **snapshot,
+            baton=dict(payload.get("baton") or {}),
         )
 
     if action == "resume":
@@ -5403,7 +5945,17 @@ async def _dispatch_resource(action: str, args: Dict[str, Any]) -> str:
             payload = json.loads(response)
             if payload.get("success"):
                 key = "initial_contents" if action == "get_initial_contents" else "current_contents"
-                return _ok(**{key: {"artifact_path": payload.get("artifact_path"), "stats": payload.get("stats")}})
+                return _ok(
+                    **{
+                        key: {
+                            "artifact_path": payload.get("artifact_path"),
+                            "saved_path": payload.get("saved_path"),
+                            "content_kind": payload.get("content_kind"),
+                            "container_format": payload.get("container_format"),
+                            "stats": payload.get("stats"),
+                        }
+                    }
+                )
             return response
         if any(b["resource_id"] == rid for b in buffers):
             response = await _dispatch_buffer(
@@ -6042,8 +6594,29 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
         )
         if artifact_path is None:
             return _err("Failed to store texture data artifact")
+        output_path = str(args.get("output_path") or "").strip()
+        saved_path = artifact_path
+        if output_path:
+            out = Path(output_path)
+            if out.suffix.lower() != ".npz":
+                return _err(
+                    "rd.texture.get_data writes numeric readback containers; output_path must use the .npz extension",
+                    code="texture_output_path_extension_mismatch",
+                    category="validation",
+                    details={
+                        "output_path": output_path,
+                        "expected_extension": ".npz",
+                        "container_format": "npz",
+                    },
+                )
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(artifact_path, out)
+            saved_path = str(out)
         result: Dict[str, Any] = {
             "artifact_path": artifact_path,
+            "saved_path": saved_path,
+            "content_kind": "texture_readback_container",
+            "container_format": "npz",
             "stats": stats,
             "byte_size": int(getattr(artifact_ref, "bytes", 0)),
             "resolved_event_id": int(resolved_event_id),
@@ -6053,11 +6626,6 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
 
             payload = Path(artifact_path).read_bytes()
             result["base64"] = base64.b64encode(payload).decode("ascii")
-        if args.get("output_path"):
-            out = Path(str(args["output_path"]))
-            out.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(artifact_path, out)
-            result["saved_path"] = str(out)
         return _ok(**result)
 
     if action == "get_pixel_value":
@@ -8708,7 +9276,7 @@ async def _vfs_resource_like_node(parts: List[str], path: str, args: Dict[str, A
     if len(parts) == 2:
         entries = []
         if root_name in {"resources", "textures"}:
-            entries.append(_vfs_entry("data", f"/{root_name}/{item_id}/data", kind="object", title="Texture data readback metadata", requires_session=True, canonical_tools=["rd.texture.get_data"]))
+            entries.append(_vfs_entry("data", f"/{root_name}/{item_id}/data", kind="object", title="Texture readback container metadata", requires_session=True, canonical_tools=["rd.texture.get_data"]))
         if root_name in {"resources", "buffers"}:
             entries.append(_vfs_entry("usage", f"/{root_name}/{item_id}/usage", kind="object", title="Resource usage", requires_session=True, canonical_tools=["rd.resource.get_usage"]))
             entries.append(_vfs_entry("history", f"/{root_name}/{item_id}/history", kind="object", title="Resource history", requires_session=True, canonical_tools=["rd.resource.get_history"]))
@@ -8725,7 +9293,7 @@ async def _vfs_resource_like_node(parts: List[str], path: str, args: Dict[str, A
         return _vfs_node(path, kind="object", title=f"History for {item_id}", requires_session=True, canonical_tools=["rd.resource.get_history"], data={"resource_id": item_id, "history": payload.get("history", [])})
     if tail == "data" and root_name in {"resources", "textures"}:
         payload = await _vfs_call("rd.texture.get_data", {"session_id": session_id, "texture_id": item_id, "subresource": {"mip": 0, "slice": 0, "sample": 0}})
-        return _vfs_node(path, kind="object", title=f"Texture data for {item_id}", requires_session=True, canonical_tools=["rd.texture.get_data"], data=payload)
+        return _vfs_node(path, kind="object", title=f"Texture readback container for {item_id}", requires_session=True, canonical_tools=["rd.texture.get_data"], data=payload)
     if tail == "data" and root_name == "buffers":
         payload = await _vfs_call("rd.buffer.get_data", {"session_id": session_id, "buffer_id": item_id, "offset": 0, "size": 0})
         return _vfs_node(path, kind="object", title=f"Buffer data for {item_id}", requires_session=True, canonical_tools=["rd.buffer.get_data"], data=payload)

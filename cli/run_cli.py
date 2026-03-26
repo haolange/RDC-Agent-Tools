@@ -37,6 +37,8 @@ def _bootstrap_tools_root() -> Path:
 
 TOOLS_ROOT = _bootstrap_tools_root()
 
+from rdx.io_utils import safe_json_text, safe_stream_write
+
 REQUIRED_DEPENDENCIES: list[tuple[str, str]] = [
     ("mcp", "mcp.server.fastmcp"),
     ("mcp", "mcp.server.transport_security"),
@@ -82,33 +84,44 @@ def _check_deps() -> list[str]:
 
 
 def _emit_result(payload: dict[str, object]) -> None:
-    print(payload)
+    safe_stream_write(safe_json_text(payload) + "\n", sys.stdout)
+
+
+def _write_out(text: str) -> None:
+    safe_stream_write(text + "\n", sys.stdout)
+
+
+def _write_err(text: str) -> None:
+    safe_stream_write(text + "\n", sys.stderr)
 
 
 def _print_launcher_help() -> None:
-    print("usage: python cli/run_cli.py <command> [--daemon-context <id>] ...")
-    print("commands:")
-    print("  daemon start|stop|status")
-    print("  context clear")
-    print("  call <operation> [--args-json ... | --args-file ...] [--format json|tsv] [--remote]")
-    print("  capture open|status")
-    print("  vfs ls|cat|tree|resolve")
-    print("  diff pipeline|image")
-    print("  assert pipeline|image")
-    print("")
-    print("examples:")
-    print("  python cli/run_cli.py daemon start --daemon-context local")
-    print("  python cli/run_cli.py context clear --daemon-context local")
-    print("  python cli/run_cli.py capture open --file D:\\path\\capture.rdc --frame-index 0")
-    print("  python cli/run_cli.py call rd.session.get_context --args-file .\\args.json --format json")
-    print("  python cli/run_cli.py vfs ls --path / --format tsv")
+    for line in (
+        "usage: python cli/run_cli.py <command> [--daemon-context <id>] ...",
+        "commands:",
+        "  daemon start|stop|status",
+        "  context clear",
+        "  call <operation> [--args-json ... | --args-file ...] [--format json|tsv] [--remote]",
+        "  capture open|status",
+        "  vfs ls|cat|tree|resolve",
+        "  diff pipeline|image",
+        "  assert pipeline|image",
+        "",
+        "examples:",
+        "  python cli/run_cli.py daemon start --daemon-context local",
+        "  python cli/run_cli.py context clear --daemon-context local",
+        "  python cli/run_cli.py capture open --file D:\\path\\capture.rdc --frame-index 0",
+        "  python cli/run_cli.py call rd.session.get_context --args-file .\\args.json --format json",
+        "  python cli/run_cli.py vfs ls --path / --format tsv",
+    ):
+        _write_out(line)
 
 
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
-        print("[RDX] missing command, use --help for launcher usage.")
+        _write_err("[RDX] missing command, use --help for launcher usage.")
         return 2
     if "-h" in argv or "--help" in argv:
         _print_launcher_help()
@@ -117,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     root = _init_pythonpath()
     missing = _check_deps()
     if missing:
-        print(f"[RDX] missing dependencies: {', '.join(sorted(missing))}", file=sys.stderr)
+        _write_err(f"[RDX] missing dependencies: {', '.join(sorted(missing))}")
         _emit_result({"ok": False, "error_code": "dependencies_missing", "error_message": ", ".join(sorted(missing)), "context_id": os.environ.get("RDX_CONTEXT_ID", "default")})
         return 1
 
@@ -130,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from rdx import cli as rdx_cli
     except Exception as exc:
-        print(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        _write_err(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}")
         return 1
 
     try:
@@ -138,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
             return rdx_cli.main()
         return rdx_cli.main()
     except Exception as exc:
-        print(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        _write_err(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}")
         _emit_result(
             {
                 "ok": False,
@@ -154,5 +167,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        _write_err(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}")
         raise SystemExit(1)

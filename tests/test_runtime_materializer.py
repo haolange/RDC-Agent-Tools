@@ -4,7 +4,10 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from rdx import runtime_materializer
+from rdx.io_utils import AtomicWriteError
 
 
 def _sha256(path: Path) -> str:
@@ -57,3 +60,26 @@ def test_materialize_runtime_is_stable_and_copies_files(tmp_path: Path, monkeypa
     assert (first.binaries_dir / "renderdoc.dll").read_bytes() == b"renderdoc-dll"
     assert (first.pymodules_dir / "renderdoc.pyd").read_bytes() == b"renderdoc-pyd"
     assert (first.cache_root / ".materialized.json").is_file()
+
+
+def test_materialize_runtime_preserves_existing_cache_when_swap_fails(tmp_path: Path, monkeypatch) -> None:
+    source_root = _prepare_source(tmp_path)
+    cache_root = tmp_path / "cache"
+    existing_root = cache_root / "existing-runtime"
+    existing_root.mkdir(parents=True, exist_ok=True)
+    (existing_root / "renderdoc.dll").write_bytes(b"old-dll")
+
+    monkeypatch.setattr(runtime_materializer, "binaries_root", lambda: source_root)
+    monkeypatch.setattr(runtime_materializer, "pymodules_dir", lambda: source_root / "pymodules")
+    monkeypatch.setattr(runtime_materializer, "worker_cache_dir", lambda: cache_root)
+    monkeypatch.setattr(runtime_materializer, "compute_runtime_id", lambda source: "existing-runtime")
+
+    def _fail_swap(temp_path: Path, final_path: Path, **_: object) -> None:
+        raise AtomicWriteError("atomic swap failed", details={"final_path": str(final_path)})
+
+    monkeypatch.setattr(runtime_materializer, "atomic_swap_path", _fail_swap)
+
+    with pytest.raises(AtomicWriteError):
+        runtime_materializer.materialize_runtime()
+
+    assert (existing_root / "renderdoc.dll").read_bytes() == b"old-dll"

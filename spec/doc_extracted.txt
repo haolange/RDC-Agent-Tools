@@ -376,9 +376,9 @@
 0389: 主要参数
 0390: 返回结果
 0391: rd.texture.get_data
-0392: 用于读取纹理子资源的原始数据。此功能兼容 V3 版本，并默认返回文件保存路径以避免 JSON 响应过大。
-0393: session_id (str)<br>texture_id (str): 纹理资源 ID<br>subresource (dict, 可选): 包含 mip (int, 默认 0), slice (int, 默认 0), sample (int, 默认 0)<br>format (str, 可选): 输出格式，可选值为 'raw', 'dds', 'exr', 'png' (如果支持)<br>output_path (str, 可选)
-0394: success (bool)<br>artifact_path (str): 输出文件路径<br>byte_size (int, 可选)<br>error_message (str, 可选)
+0392: 用于读取纹理子资源的数值 readback 容器。默认返回 `.npz` artifact，供后续统计、像素分析或离线数值处理；它不是图片导出接口。
+0393: session_id (str)<br>texture_id (str): 纹理资源 ID<br>subresource (dict, 可选): 包含 mip (int, 默认 0), slice (int, 默认 0), sample (int, 默认 0)<br>output_path (str, 可选): 若提供则必须使用 `.npz` 扩展名
+0394: success (bool)<br>artifact_path (str)<br>saved_path (str)<br>content_kind (str): `texture_readback_container`<br>container_format (str): `npz`<br>stats (dict, 可选)<br>byte_size (int, 可选)<br>error_message (str, 可选)
 0395: rd.texture.get_subresource_data
 0396: 用于读取并返回纹理子数据的元数据 (metadata)，例如尺寸、行距 (row pitch) 和格式 (format) 等，并支持选择性导出。
 0397: session_id (str)<br>texture_id (str)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>export (bool, 可选, 默认 false)<br>output_path (str, 可选)
@@ -618,7 +618,7 @@
 0669: session_id (str)<br>target (dict, 可选): {texture_id? , rt_index?}；缺省为当前 RT0<br>event_id (int, 可选): 指定 event 输出；缺省为当前 active event<br>output_path (str)<br>file_format (str, 可选, 默认 'png')<br>include_alpha (bool, 可选, 默认 true)<br>overlay (str, 可选): 'None'|'Drawcall'|'Wireframe'|'Overdraw'
 0670: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
 0671: rd.export.texture
-0672: 将纹理导出到文件；这是统一的纹理落盘导出入口，支持子资源选择、显示映射与通道控制。
+0672: 将纹理导出为可直接打开的图片/导出文件；这是统一的纹理导出入口，支持子资源选择、显示映射与通道控制。
 0673: session_id (str)<br>texture_id (str)<br>subresource (dict, 可选): 包含 {mip, slice, sample}<br>output_path (str)<br>file_format (str, 可选): 文件格式，可选 'png', 'exr', 'dds', 'jpg'<br>channels (str, 可选, 默认 'rgba')<br>remap (dict, 可选): 包含 {black_point, white_point, gamma, hdr_clamp?}<br>flip_y (bool, 可选, 默认 false)
 0674: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
 0675: rd.export.buffer
@@ -840,3 +840,8 @@
 0958: success (bool): 操作是否成功<br>deleted (list[str]): 被删除的 artifacts 路径列表<br>freed_bytes (int, 可选): 释放的字节数<br>error_message (str, 可选): 错误信息（如果存在）
 0960: 四，总结
 0961: 本文通过对 RenderDoc UI 的精细解构和功能映射，详细抽象并实现了Renderdoc MCP，使其从“可用”到“专家级”的跨越。它为 AI Agent 提供了前所未有的对Renderdoc的控制粒度，使其能够模拟人类专家的完整调试流程，包括复杂的视图交互、状态设置和多窗口协同。这套工具集是实现真正智能图形调试 Agent 的坚实基础。
+0962: 五，后续补充
+0963: 当前公开的 context / owner / baton 工具补充为：rd.session.create_context、rd.session.list_contexts、rd.session.select_context、rd.session.clear_context、rd.session.claim_runtime_owner、rd.session.release_runtime_owner、rd.session.export_runtime_baton、rd.session.rehydrate_runtime_baton。
+0964: multi-context 已是正式 public surface；remote 统一采用 single_runtime_owner，live rd.* 调用在 context 已 claim owner 时必须带匹配的 runtime_owner 与 owner_lease_id。
+0965: spec/runtime_mode_truth.json 只定义 transport/runtime ceiling；local 为 multi_context_multi_owner，remote 为 single_runtime_owner。
+0966: 平台是否能把 local multi-context 用成 concurrent_team，不由 Tools 定义，而由上层 Frameworks 的 platform matrix 决定。

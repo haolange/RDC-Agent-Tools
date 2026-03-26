@@ -26,7 +26,7 @@ _MANUAL_TOOLS = [
         "group": _CONTEXT_GROUP,
         "description": "\u8bfb\u53d6\u5f53\u524d context \u5feb\u7167\u4e0e\u6301\u4e45\u5316\u72b6\u6001\u7d22\u5f15\uff0c\u8fd4\u56de runtime\u3001remote\u3001focus\u3001session \u8868\u3001\u6062\u590d\u4fe1\u606f\u3001\u6700\u8fd1\u64cd\u4f5c\u4e0e\u9650\u5236\u914d\u7f6e\u3002",
         "parameter_raw": "",
-        "returns_raw": "ok (bool)<br>data (dict): {context_id, runtime, remote, focus, last_artifacts, current_session_id, sessions, recovery, limits, active_operation, recent_operations, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {context_id, entry_mode, backend, runtime_parallelism_ceiling, runtime, remote, focus, last_artifacts, current_session_id, sessions, recovery, limits, active_operation, recent_operations, runtime_owner, owner_lease, active_baton, rehydrate_status, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
     },
     {
         "name": "rd.session.update_context",
@@ -40,7 +40,7 @@ _MANUAL_TOOLS = [
         "group": _CONTEXT_GROUP,
         "description": "\u5217\u51fa\u5f53\u524d context \u4e0b\u7684\u6301\u4e45\u5316 session \u8868\u3001\u5f53\u524d\u9009\u4e2d session \u4e0e\u6062\u590d\u6458\u8981\u3002",
         "parameter_raw": "",
-        "returns_raw": "ok (bool)<br>data (dict): {context_id, current_session_id, sessions, recovery, limits}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
+        "returns_raw": "ok (bool)<br>data (dict): {context_id, entry_mode, backend, runtime_parallelism_ceiling, current_session_id, sessions, recovery, limits, runtime_owner, owner_lease, active_baton, rehydrate_status}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, \u53ef\u9009)",
     },
     {
         "name": "rd.session.select_session",

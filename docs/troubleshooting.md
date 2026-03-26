@@ -91,6 +91,77 @@ rdx.bat --non-interactive mcp --ensure-env
 - 或显式执行 `rdx daemon start`
 - 再重新打开 capture 或恢复上层调用链路
 
+## `rd.texture.get_data` 写出了 `.npz`，但你以为会得到 PNG
+
+这是当前平台的固定语义，不是异常。
+
+- `rd.texture.get_data`
+  - 用于数值 readback / container artifact
+  - 默认返回 `.npz`
+  - 容器内主数组入口固定为 `pixels`
+- `rd.export.texture`
+  - 才是可直接打开的纹理图片导出入口
+
+如果你传了：
+
+```json
+{"output_path":"preview.png"}
+```
+
+当前预期是直接返回 validation 失败，而不是偷偷把 `.npz` 写成 `.png` 文件名。
+
+建议排查顺序：
+
+- 需要像素数组、统计或后续数值分析
+  - 继续使用 `rd.texture.get_data`
+- 需要 PNG / JPG / EXR / DDS 图片
+  - 改用 `rd.export.texture`
+
+## daemon timeout 现在看哪里
+
+daemon-backed `CLI` / `MCP` 超时不再只返回裸字符串。
+
+优先检查 `error.details`：
+
+- `operation`
+- `context_id`
+- `timeout_seconds`
+- `active_operation`
+- `daemon_state_excerpt`
+
+## `runtime_owner_conflict`
+
+若某个 context 已被 `rd.session.claim_runtime_owner` claim，后续 live `rd.*` 调用必须提供匹配的 `runtime_owner` 与 `owner_lease_id`。否则会返回：
+
+- `error.code = runtime_owner_conflict`
+
+排查顺序：
+
+- 先用 `rd.session.get_context` 确认当前 `runtime_owner` / `owner_lease`
+- 若当前 owner 不是你，先走 handoff / baton，而不是直接继续 live 调用
+- 若 owner 已无效，再显式 `rd.session.release_runtime_owner` 或重新 claim
+
+## `runtime_baton_invalid`
+
+若跨 agent / 跨轮次恢复 live 调试失败，优先检查：
+
+- `baton_id` 是否存在
+- `capture_ref.rdc_path` 是否仍可访问
+- `context_id` 是否正确
+- `rehydrate_status.last_error`
+
+如果 `active_operation` 非空，优先把它当成当前唯一权威中间状态；不要再只根据 stderr 文本猜测 daemon 卡在哪一步。
+
+## 终端输出因为脏 Unicode 崩溃
+
+当前 `CLI` / launcher / `MCP` launcher 已统一把终端输出切到可逆转义模式。
+
+如果上层 payload 含有非法 surrogate 或宿主终端编码过窄：
+
+- 平台会优先保留内部 Unicode JSON
+- 真正写终端时再用 `backslashreplace`
+- 因此你应看到转义后的 `\\udxxx`，而不是 `UnicodeEncodeError`
+
 ## 为什么 `capture status` 没有 session，但 `daemon status` 还显示 daemon 在
 
 这是可能发生的。

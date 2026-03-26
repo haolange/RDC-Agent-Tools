@@ -76,6 +76,32 @@ def _structured_prereq_error(tool_name: str, requirement: str, via_tools: list[s
     }
 
 
+def _structured_runtime_owner_error(tool_name: str, context_id: str, details: dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(details or {})
+    payload.setdefault("tool_name", tool_name)
+    payload.setdefault("context_id", context_id)
+    return {
+        "success": False,
+        "error_message": f"{tool_name} conflicts with the claimed runtime owner for context {context_id}",
+        "code": "runtime_owner_conflict",
+        "category": "runtime",
+        "details": payload,
+    }
+
+
+def _structured_baton_error(tool_name: str, context_id: str, details: dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(details or {})
+    payload.setdefault("tool_name", tool_name)
+    payload.setdefault("context_id", context_id)
+    return {
+        "success": False,
+        "error_message": f"{tool_name} references an invalid runtime baton for context {context_id}",
+        "code": "runtime_baton_invalid",
+        "category": "validation",
+        "details": payload,
+    }
+
+
 def _when_applies(args: Dict[str, Any], when: str) -> bool:
     if not when:
         return True
@@ -127,6 +153,52 @@ def _enforce_prerequisites(tool_name: str, args: Dict[str, Any]) -> Dict[str, An
     return None
 
 
+def _tool_requires_runtime_owner(tool_name: str) -> bool:
+    if tool_name.startswith(("rd.core.", "rd.util.", "rd.vfs.", "rd.diag.")):
+        return False
+    if tool_name.startswith("rd.session."):
+        return tool_name in {"rd.session.resume"}
+    return any(tool_name.startswith(prefix) for prefix in server_runtime._LIVE_OWNER_PREFIXES)
+
+
+def _runtime_owner_preflight(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any] | None:
+    if not _tool_requires_runtime_owner(tool_name):
+        return None
+    ctx = server_runtime.normalize_context_id(args.get("context_id") or server_runtime._runtime_context_id())
+    state = server_runtime._context_state(ctx)
+    runtime_owner = dict(state.get("runtime_owner") or {})
+    active_owner = str(runtime_owner.get("agent_id") or "").strip()
+    active_lease = str(runtime_owner.get("lease_id") or "").strip()
+    active_status = str(runtime_owner.get("status") or "unclaimed").strip() or "unclaimed"
+    if active_owner and active_status == "claimed":
+        requested_owner = str(args.get("runtime_owner") or "").strip()
+        requested_lease = str(args.get("owner_lease_id") or "").strip()
+        if requested_owner != active_owner or requested_lease != active_lease:
+            return _structured_runtime_owner_error(
+                tool_name,
+                ctx,
+                {
+                    "runtime_owner": active_owner,
+                    "owner_lease_id": active_lease,
+                    "requested_runtime_owner": requested_owner,
+                    "requested_owner_lease_id": requested_lease,
+                },
+            )
+    active_baton = dict(state.get("active_baton") or {})
+    requested_baton = str(args.get("baton_id") or "").strip()
+    active_baton_id = str(active_baton.get("baton_id") or "").strip()
+    if requested_baton and active_baton_id and requested_baton != active_baton_id:
+        return _structured_baton_error(
+            tool_name,
+            ctx,
+            {
+                "active_baton_id": active_baton_id,
+                "requested_baton_id": requested_baton,
+            },
+        )
+    return None
+
+
 def build_operation_registry() -> OperationRegistry:
     registry = OperationRegistry()
     for tool in _CATALOG_TOOLS:
@@ -143,6 +215,9 @@ def build_operation_registry() -> OperationRegistry:
             preflight = _enforce_prerequisites(_tool_name, args)
             if preflight is not None:
                 return preflight
+            owner_preflight = _runtime_owner_preflight(_tool_name, args)
+            if owner_preflight is not None:
+                return owner_preflight
             return await _domain_handler(_action, dict(args or {}), env)
 
         registry.register(tool_name, _handler)

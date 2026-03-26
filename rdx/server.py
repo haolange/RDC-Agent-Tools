@@ -18,6 +18,7 @@ from rdx.core.contracts import canonical_error
 from rdx.core.errors import map_exception
 from rdx.core.engine import CoreEngine, ExecutionContext
 from rdx.daemon.client import daemon_request
+from rdx.io_utils import safe_json_text
 from rdx.progress import ProgressReporter, ProgressSink
 from rdx.runtime_catalog import load_tool_catalog
 from rdx.timeout_policy import daemon_exec_timeout_s
@@ -83,7 +84,11 @@ async def dispatch_operation(
     server_runtime = _runtime_module()
     await server_runtime.runtime_startup()
     call_args = dict(args or {})
-    chosen_context_id = server_runtime.normalize_context_id(context_id or server_runtime._runtime_context_id())
+    chosen_context_id = server_runtime.normalize_context_id(
+        context_id
+        or call_args.get("context_id")
+        or server_runtime._runtime_context_id()
+    )
     ctx = ExecutionContext(
         transport=transport,
         remote=remote,
@@ -151,6 +156,7 @@ async def dispatch_operation(
 
 async def _dispatch_tool(tool_name: str, args: Dict[str, Any]) -> str:
     daemon_args = dict(args or {})
+    chosen_context = _runtime_module().normalize_context_id(daemon_args.get("context_id") or _mcp_daemon_context())
     try:
         response = daemon_request(
             "exec",
@@ -161,21 +167,22 @@ async def _dispatch_tool(tool_name: str, args: Dict[str, Any]) -> str:
                 "remote": tool_name.startswith("rd.remote."),
             },
             timeout=daemon_exec_timeout_s(tool_name, daemon_args),
-            context=_mcp_daemon_context(),
+            context=chosen_context,
         )
         payload = response.get("result")
         if isinstance(payload, dict):
-            return json.dumps(payload, ensure_ascii=False, default=str)
+            return safe_json_text(payload)
         raise RuntimeError("daemon returned invalid MCP payload")
     except Exception as exc:  # noqa: BLE001
         payload = canonical_error(
             result_kind=tool_name,
-            code="runtime_error",
-            category="runtime",
+            code=str(getattr(exc, "code", "") or "runtime_error"),
+            category=str(getattr(exc, "category", "") or "runtime"),
             message=str(exc),
+            details=getattr(exc, "details", {}) if isinstance(getattr(exc, "details", {}), dict) else {},
             transport="mcp",
         )
-        return json.dumps(payload, ensure_ascii=False, default=str)
+        return safe_json_text(payload)
 
 
 def _build_tool_callable(tool_name: str, param_names: Sequence[str]) -> Any:

@@ -68,7 +68,7 @@ remote endpoint
 
 - `rd.session.get_context`
   - 读取当前 context 的只读快照。
-  - 返回 `runtime`、`remote`、`focus`、`last_artifacts` 等结构化状态。
+  - 返回 `runtime`、`remote`、`focus`、`last_artifacts`、`runtime_parallelism_ceiling` 等结构化状态。
 - `rd.session.update_context`
   - 只允许补充 user-owned 字段，例如：
     - `focus_pixel`
@@ -82,14 +82,31 @@ remote endpoint
     - `remote_id`
     - `last_artifacts`
 - `rd.session.list_sessions`
-  - 返回当前 context 的 session 表与 `current_session_id`。
+  - 返回当前 context 的 session 表、`current_session_id` 与 `runtime_parallelism_ceiling`。
 - `rd.session.select_session`
   - 只切换当前 context 的 current session 指针，不销毁其他 session 记录。
 - `rd.session.resume`
   - 基于持久化索引恢复当前 context 的本地与可恢复 remote session，并优先复用原 `session_id`。
   - 若 remote endpoint 真断开、Android bootstrap 失败或恢复元数据缺失，会显式返回 `degraded` / error，而不是把上层链路静默切到别的 session。
 
+新增的 context / owner / baton 工具有八个：
+
+- `rd.session.create_context`
+- `rd.session.list_contexts`
+- `rd.session.select_context`
+- `rd.session.clear_context`
+- `rd.session.claim_runtime_owner`
+- `rd.session.release_runtime_owner`
+- `rd.session.export_runtime_baton`
+- `rd.session.rehydrate_runtime_baton`
+
 因此，`rd.session.*` 不是“伪 session 管理器”，而是“context 状态读取、session 选择与恢复入口”。
+
+补充边界：
+
+- `runtime_parallelism_ceiling` 只描述 transport/runtime 层的能力上限。
+- local ceiling 为 `multi_context_multi_owner`，remote ceiling 固定为 `single_runtime_owner`。
+- 这不等于所有宿主都能并发多 live owners；平台是否允许 team-style coordination 由上层 Frameworks 决定。
 
 ## 3. `CLI capture open` 实际做了什么
 
@@ -166,6 +183,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 - 一个 context 现在可以同时持有多条本地 session 记录；`current_session_id` 只表示当前选中的工作面，而不是该 context 唯一能存在的 session。
 - 上层 Agent 如果要跨多轮任务持续工作，优先复用同一 context，而不是把 handle 当作永久主键缓存。
 - `rdx daemon stop` 只停止 daemon，不会清空该 context 的本地恢复索引；真正销毁状态要执行 `rdx context clear` 或 `rd.core.shutdown`。
+- remote 一律采用 `single_runtime_owner`；高能力平台的差异只体现在 local 是否允许 multi-context 并行，而不是允许多个 owner 共享同一条 remote live runtime。
 
 补充一条入口选择原则：
 

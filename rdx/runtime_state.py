@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -14,6 +12,7 @@ from typing import Any, Dict, Iterable, Optional
 import msvcrt
 
 from rdx.context_snapshot import normalize_context_id
+from rdx.io_utils import atomic_append_jsonl, atomic_write_json
 from rdx.runtime_paths import cli_runtime_dir
 
 _STATE_MUTEXES: dict[str, threading.Lock] = {}
@@ -102,6 +101,36 @@ def _default_limits() -> Dict[str, Any]:
     }
 
 
+def _default_runtime_owner() -> Dict[str, Any]:
+    return {
+        "agent_id": "",
+        "lease_id": "",
+        "status": "unclaimed",
+        "claimed_at_ms": 0,
+        "released_at_ms": 0,
+    }
+
+
+def _default_active_baton() -> Dict[str, Any]:
+    return {
+        "baton_id": "",
+        "artifact_path": "",
+        "task_goal": "",
+        "status": "idle",
+        "exported_at_ms": 0,
+    }
+
+
+def _default_rehydrate_status() -> Dict[str, Any]:
+    return {
+        "status": "idle",
+        "baton_id": "",
+        "last_attempt_ms": 0,
+        "last_success_ms": 0,
+        "last_error": "",
+    }
+
+
 def default_context_state(context: Optional[str] = "default", *, limits: Any = None) -> Dict[str, Any]:
     payload_limits = dict(_default_limits())
     if isinstance(limits, dict):
@@ -114,8 +143,15 @@ def default_context_state(context: Optional[str] = "default", *, limits: Any = N
         "context_id": ctx,
         "current_capture_file_id": "",
         "current_session_id": "",
+        "entry_mode": "cli",
+        "backend": "local",
+        "runtime_parallelism_ceiling": "multi_context_multi_owner",
         "captures": {},
         "sessions": {},
+        "runtime_owner": _default_runtime_owner(),
+        "owner_lease": _default_runtime_owner(),
+        "active_baton": _default_active_baton(),
+        "rehydrate_status": _default_rehydrate_status(),
         "recovery": {
             "status": "idle",
             "last_scan_ms": 0,
@@ -144,6 +180,40 @@ def default_context_state(context: Optional[str] = "default", *, limits: Any = N
         },
         "updated_at_ms": now_ms,
         "created_at_ms": now_ms,
+    }
+
+
+def _normalize_runtime_owner(value: Any) -> Dict[str, Any]:
+    item = dict(value or {}) if isinstance(value, dict) else {}
+    status = str(item.get("status") or "unclaimed").strip() or "unclaimed"
+    return {
+        "agent_id": str(item.get("agent_id") or "").strip(),
+        "lease_id": str(item.get("lease_id") or "").strip(),
+        "status": status,
+        "claimed_at_ms": _normalize_int(item.get("claimed_at_ms")),
+        "released_at_ms": _normalize_int(item.get("released_at_ms")),
+    }
+
+
+def _normalize_active_baton(value: Any) -> Dict[str, Any]:
+    item = dict(value or {}) if isinstance(value, dict) else {}
+    return {
+        "baton_id": str(item.get("baton_id") or "").strip(),
+        "artifact_path": str(item.get("artifact_path") or "").strip(),
+        "task_goal": str(item.get("task_goal") or "").strip(),
+        "status": str(item.get("status") or "idle").strip() or "idle",
+        "exported_at_ms": _normalize_int(item.get("exported_at_ms")),
+    }
+
+
+def _normalize_rehydrate_status(value: Any) -> Dict[str, Any]:
+    item = dict(value or {}) if isinstance(value, dict) else {}
+    return {
+        "status": str(item.get("status") or "idle").strip() or "idle",
+        "baton_id": str(item.get("baton_id") or "").strip(),
+        "last_attempt_ms": _normalize_int(item.get("last_attempt_ms")),
+        "last_success_ms": _normalize_int(item.get("last_success_ms")),
+        "last_error": str(item.get("last_error") or "").strip(),
     }
 
 
@@ -278,6 +348,12 @@ def normalize_context_state(
     state["context_id"] = normalize_context_id(payload.get("context_id") or context)
     state["current_capture_file_id"] = str(payload.get("current_capture_file_id") or "").strip()
     state["current_session_id"] = str(payload.get("current_session_id") or "").strip()
+    state["entry_mode"] = str(payload.get("entry_mode") or "cli").strip() or "cli"
+    state["backend"] = str(payload.get("backend") or "local").strip() or "local"
+    state["runtime_parallelism_ceiling"] = (
+        str(payload.get("runtime_parallelism_ceiling") or "").strip()
+        or ("single_runtime_owner" if state["backend"] == "remote" else "multi_context_multi_owner")
+    )
 
     captures = payload.get("captures")
     if isinstance(captures, dict):
@@ -294,6 +370,13 @@ def normalize_context_state(
             for session_id, item in sessions.items()
             if str(session_id).strip()
         }
+
+    state["runtime_owner"] = _normalize_runtime_owner(payload.get("runtime_owner"))
+    state["owner_lease"] = _normalize_runtime_owner(payload.get("owner_lease"))
+    if not state["owner_lease"].get("lease_id") and state["runtime_owner"].get("lease_id"):
+        state["owner_lease"] = dict(state["runtime_owner"])
+    state["active_baton"] = _normalize_active_baton(payload.get("active_baton"))
+    state["rehydrate_status"] = _normalize_rehydrate_status(payload.get("rehydrate_status"))
 
     recovery = payload.get("recovery")
     if isinstance(recovery, dict):
@@ -380,17 +463,7 @@ def save_context_state(
     path = context_state_path(context)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _locked_context_state_file(context):
-        fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
-            os.replace(tmp_name, path)
-        finally:
-            try:
-                if os.path.exists(tmp_name):
-                    os.unlink(tmp_name)
-            except Exception:
-                pass
+        atomic_write_json(path, state)
     return state
 
 
@@ -426,8 +499,7 @@ def list_context_ids() -> list[str]:
 def append_runtime_log(context: Optional[str], entry: Dict[str, Any]) -> None:
     path = context_log_path(context)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(dict(entry or {}), ensure_ascii=False) + "\n")
+    atomic_append_jsonl(path, dict(entry or {}))
 
 
 def read_runtime_logs(context: Optional[str], *, since_ms: Optional[int] = None, max_lines: int = 500) -> list[Dict[str, Any]]:

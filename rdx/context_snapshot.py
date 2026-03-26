@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -14,6 +12,7 @@ from typing import Any, Dict, Iterable, Optional
 
 import msvcrt
 
+from rdx.io_utils import atomic_write_json
 from rdx.runtime_paths import cli_runtime_dir
 
 USER_CONTEXT_KEYS = {
@@ -118,12 +117,43 @@ def default_context_snapshot(context: Optional[str] = "default") -> Dict[str, An
     ctx = normalize_context_id(context)
     return {
         "context_id": ctx,
+        "entry_mode": "cli",
+        "backend": "local",
+        "runtime_parallelism_ceiling": "multi_context_multi_owner",
         "runtime": {
             "session_id": "",
             "capture_file_id": "",
             "frame_index": 0,
             "active_event_id": 0,
             "backend_type": "none",
+        },
+        "runtime_owner": {
+            "agent_id": "",
+            "lease_id": "",
+            "status": "unclaimed",
+            "claimed_at_ms": 0,
+            "released_at_ms": 0,
+        },
+        "owner_lease": {
+            "agent_id": "",
+            "lease_id": "",
+            "status": "unclaimed",
+            "claimed_at_ms": 0,
+            "released_at_ms": 0,
+        },
+        "active_baton": {
+            "baton_id": "",
+            "artifact_path": "",
+            "task_goal": "",
+            "status": "idle",
+            "exported_at_ms": 0,
+        },
+        "rehydrate_status": {
+            "status": "idle",
+            "baton_id": "",
+            "last_attempt_ms": 0,
+            "last_success_ms": 0,
+            "last_error": "",
         },
         "remote": {
             "state": "none",
@@ -240,6 +270,12 @@ def normalize_context_snapshot(
         return snapshot
 
     snapshot["context_id"] = normalize_context_id(payload.get("context_id") or context)
+    snapshot["entry_mode"] = str(payload.get("entry_mode") or "cli").strip() or "cli"
+    snapshot["backend"] = str(payload.get("backend") or "local").strip() or "local"
+    snapshot["runtime_parallelism_ceiling"] = (
+        str(payload.get("runtime_parallelism_ceiling") or "").strip()
+        or ("single_runtime_owner" if snapshot["backend"] == "remote" else "multi_context_multi_owner")
+    )
 
     runtime_payload = payload.get("runtime")
     if isinstance(runtime_payload, dict):
@@ -248,6 +284,40 @@ def normalize_context_snapshot(
         snapshot["runtime"]["frame_index"] = _normalize_int(runtime_payload.get("frame_index"))
         snapshot["runtime"]["active_event_id"] = _normalize_int(runtime_payload.get("active_event_id"))
         snapshot["runtime"]["backend_type"] = str(runtime_payload.get("backend_type") or "none").strip() or "none"
+
+    runtime_owner_payload = payload.get("runtime_owner")
+    if isinstance(runtime_owner_payload, dict):
+        snapshot["runtime_owner"]["agent_id"] = str(runtime_owner_payload.get("agent_id") or "").strip()
+        snapshot["runtime_owner"]["lease_id"] = str(runtime_owner_payload.get("lease_id") or "").strip()
+        snapshot["runtime_owner"]["status"] = str(runtime_owner_payload.get("status") or "unclaimed").strip() or "unclaimed"
+        snapshot["runtime_owner"]["claimed_at_ms"] = _normalize_int(runtime_owner_payload.get("claimed_at_ms"))
+        snapshot["runtime_owner"]["released_at_ms"] = _normalize_int(runtime_owner_payload.get("released_at_ms"))
+
+    owner_lease_payload = payload.get("owner_lease")
+    if isinstance(owner_lease_payload, dict):
+        snapshot["owner_lease"]["agent_id"] = str(owner_lease_payload.get("agent_id") or "").strip()
+        snapshot["owner_lease"]["lease_id"] = str(owner_lease_payload.get("lease_id") or "").strip()
+        snapshot["owner_lease"]["status"] = str(owner_lease_payload.get("status") or "unclaimed").strip() or "unclaimed"
+        snapshot["owner_lease"]["claimed_at_ms"] = _normalize_int(owner_lease_payload.get("claimed_at_ms"))
+        snapshot["owner_lease"]["released_at_ms"] = _normalize_int(owner_lease_payload.get("released_at_ms"))
+    elif snapshot["runtime_owner"]["lease_id"]:
+        snapshot["owner_lease"] = dict(snapshot["runtime_owner"])
+
+    active_baton_payload = payload.get("active_baton")
+    if isinstance(active_baton_payload, dict):
+        snapshot["active_baton"]["baton_id"] = str(active_baton_payload.get("baton_id") or "").strip()
+        snapshot["active_baton"]["artifact_path"] = str(active_baton_payload.get("artifact_path") or "").strip()
+        snapshot["active_baton"]["task_goal"] = str(active_baton_payload.get("task_goal") or "").strip()
+        snapshot["active_baton"]["status"] = str(active_baton_payload.get("status") or "idle").strip() or "idle"
+        snapshot["active_baton"]["exported_at_ms"] = _normalize_int(active_baton_payload.get("exported_at_ms"))
+
+    rehydrate_payload = payload.get("rehydrate_status")
+    if isinstance(rehydrate_payload, dict):
+        snapshot["rehydrate_status"]["status"] = str(rehydrate_payload.get("status") or "idle").strip() or "idle"
+        snapshot["rehydrate_status"]["baton_id"] = str(rehydrate_payload.get("baton_id") or "").strip()
+        snapshot["rehydrate_status"]["last_attempt_ms"] = _normalize_int(rehydrate_payload.get("last_attempt_ms"))
+        snapshot["rehydrate_status"]["last_success_ms"] = _normalize_int(rehydrate_payload.get("last_success_ms"))
+        snapshot["rehydrate_status"]["last_error"] = str(rehydrate_payload.get("last_error") or "").strip()
 
     remote_payload = payload.get("remote")
     if isinstance(remote_payload, dict):
@@ -307,17 +377,7 @@ def save_context_snapshot(
     path = context_snapshot_path(context)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _locked_snapshot_file(context):
-        fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
-            os.replace(tmp_name, path)
-        finally:
-            try:
-                if os.path.exists(tmp_name):
-                    os.unlink(tmp_name)
-            except Exception:
-                pass
+        atomic_write_json(path, snapshot)
     return snapshot
 
 

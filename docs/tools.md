@@ -24,6 +24,8 @@
 
 - `rd.export.*` 是唯一的文件导出分类面；纹理、buffer、mesh 的落盘导出统一从这里进入。
 - `rd.texture.*` / `rd.buffer.*` / `rd.mesh.*` 负责资源读取、检查、结构化解析与预览，不再额外暴露平行的导出 public surface。
+- `rd.texture.get_data` 固定表示数值 readback / container artifact；默认返回 `.npz`，并暴露 `content_kind`、`container_format`、`artifact_path`、`saved_path` 与 `stats`。
+- 需要可直接打开的图片时，统一从 `rd.export.texture` 进入；不要再把 `rd.texture.get_data` 当成 PNG 导出接口。
 - `rd.macro.*` 只保留多步工作流与高阶报告入口，不再保留一跳 passthrough 式 macro。
 - `rd.analysis.*` 已收敛移除；分析入口通过 retained `rd.macro.*`、`rd.diag.*` 与少量 canonical inspection tools 组合完成。
 
@@ -60,9 +62,17 @@
 - `rd.vfs.resolve`
 - `rd.session.get_context`
 - `rd.session.update_context`
+- `rd.session.create_context`
+- `rd.session.list_contexts`
+- `rd.session.select_context`
+- `rd.session.clear_context`
 - `rd.session.list_sessions`
 - `rd.session.select_session`
 - `rd.session.resume`
+- `rd.session.claim_runtime_owner`
+- `rd.session.release_runtime_owner`
+- `rd.session.export_runtime_baton`
+- `rd.session.rehydrate_runtime_baton`
 - `rd.core.get_operation_history`
 - `rd.core.get_runtime_metrics`
 - `rd.core.list_tools`

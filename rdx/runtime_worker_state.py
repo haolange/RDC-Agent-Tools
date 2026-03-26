@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from rdx.context_snapshot import normalize_context_id
+from rdx.io_utils import atomic_write_json
 from rdx.runtime_paths import worker_state_dir
 
 
@@ -45,15 +45,7 @@ def load_worker_state(context: Optional[str] = "default") -> Dict[str, Any]:
 
 def save_worker_state(payload: Dict[str, Any], context: Optional[str] = "default") -> None:
     path = worker_state_path(context)
-    tmp = path.with_name(f"{path.name}.tmp")
-    tmp.write_text(json.dumps(dict(payload or {}), ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        os.replace(tmp, path)
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
+    atomic_write_json(path, dict(payload or {}))
 
 
 def clear_worker_state(context: Optional[str] = "default") -> None:

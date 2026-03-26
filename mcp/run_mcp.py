@@ -44,6 +44,8 @@ def _bootstrap_tools_root() -> Path:
 
 TOOLS_ROOT = _bootstrap_tools_root()
 
+from rdx.io_utils import safe_json_text, safe_stream_write
+
 
 REQUIRED_DEPENDENCIES: list[tuple[str, str]] = [
     ("mcp", "mcp.server.fastmcp"),
@@ -108,7 +110,11 @@ def _check_deps() -> list[str]:
 
 
 def _emit_payload(payload: dict[str, Any]) -> None:
-    print(json.dumps(payload, ensure_ascii=False))
+    safe_stream_write(safe_json_text(payload) + "\n", sys.stdout)
+
+
+def _write_err(text: str) -> None:
+    safe_stream_write(text + "\n", sys.stderr)
 
 
 def _normalize_transport(value: str) -> str:
@@ -216,14 +222,14 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     missing = _check_deps()
     if missing:
-        print(f"[RDX] missing dependencies: {', '.join(sorted(missing))}", file=sys.stderr)
+        _write_err(f"[RDX] missing dependencies: {', '.join(sorted(missing))}")
         _emit_runtime_env_error("dependencies_missing", "missing python dependencies", context_id=context_id)
         return RETURN_ARGS_ERROR
 
     ok_layout, layout_errors = _check_runtime_layout(runtime_source.binaries_dir, runtime_source.pymodules_dir)
     if not ok_layout:
         for item in layout_errors:
-            print(f"[RDX] {item}", file=sys.stderr)
+            _write_err(f"[RDX] {item}")
         _emit_runtime_env_error("runtime_layout_missing", "; ".join(layout_errors), context_id=context_id)
         return RETURN_ENV_ERROR
 
@@ -267,7 +273,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     try:
         from rdx import server
     except Exception as exc:  # noqa: BLE001
-        print(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        _write_err(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}")
         _emit_runtime_env_error("startup_failed", f"{exc}", context_id=context_id)
         return RETURN_STARTUP_ERROR
 
@@ -279,7 +285,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         else:
             server.main()
     except Exception as exc:  # noqa: BLE001
-        print(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        _write_err(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}")
         _emit_runtime_env_error("startup_failed", f"{exc}", context_id=context_id)
         return RETURN_STARTUP_ERROR
     finally:
@@ -291,5 +297,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        _write_err(f"[RDX] startup failed: {exc.__class__.__name__}: {exc}")
         raise SystemExit(RETURN_TOOL_ERROR)

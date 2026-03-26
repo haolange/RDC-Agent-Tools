@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 from rdx.context_snapshot import clear_context_snapshot, context_snapshot_path
+from rdx.io_utils import atomic_write_json
 from rdx.runtime_state import clear_context_state, context_log_path, context_state_path, list_context_ids
 from rdx.runtime_paths import cli_runtime_dir
 from rdx.runtime_worker_state import clear_worker_state, worker_state_path
@@ -25,6 +26,14 @@ POLL_DELAYS = (0.1, 0.2, 0.3, 0.5, 0.8, 1.2, 1.6, 2.0)
 MAX_STOP_TIMEOUT_S = 8.0
 DEFAULT_LEASE_TIMEOUT_S = 120
 DEFAULT_IDLE_TIMEOUT_S = 15 * 60
+
+
+class DaemonRequestTimeout(TimeoutError):
+    def __init__(self, message: str, *, details: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.code = "daemon_timeout"
+        self.category = "runtime"
+        self.details = dict(details)
 
 
 def _now_ms() -> int:
@@ -133,15 +142,35 @@ def _load_json(path: Path) -> Dict[str, Any]:
 
 def _save_json(path: Path, payload: Dict[str, Any]) -> None:
     _ensure_state_dir()
-    tmp_path = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+    atomic_write_json(path, payload)
+
+
+def _active_operation_excerpt(state: Dict[str, Any]) -> Dict[str, Any]:
+    payload = state.get("active_operation")
+    if not isinstance(payload, dict):
+        return {}
+    excerpt: Dict[str, Any] = {}
+    for key in ("operation", "trace_id", "started_at", "started_at_ms", "transport", "remote", "context_id"):
+        if key in payload:
+            excerpt[key] = payload.get(key)
+    return excerpt
+
+
+def _daemon_state_excerpt(state: Dict[str, Any]) -> Dict[str, Any]:
+    excerpt: Dict[str, Any] = {}
+    for key in (
+        "context_id",
+        "daemon_context",
+        "pid",
+        "session_id",
+        "capture_file_id",
+        "active_request_count",
+        "last_activity_at",
+        "recovery_status",
+    ):
+        if key in state:
+            excerpt[key] = state.get(key)
+    return excerpt
 
 
 def _normalize_attached_clients(value: Any) -> list[Dict[str, Any]]:
@@ -400,7 +429,17 @@ def daemon_request(
                 if conn.poll(0.1):
                     break
             else:
-                raise TimeoutError(f"Timed out waiting for daemon response to {method}")
+                operation = str((params or {}).get("operation") or method).strip()
+                raise DaemonRequestTimeout(
+                    f"Timed out waiting for daemon response to {method}",
+                    details={
+                        "operation": operation,
+                        "context_id": _normalize_context(context),
+                        "timeout_seconds": float(timeout),
+                        "active_operation": _active_operation_excerpt(st),
+                        "daemon_state_excerpt": _daemon_state_excerpt(st),
+                    },
+                )
         response = conn.recv()
     finally:
         conn.close()

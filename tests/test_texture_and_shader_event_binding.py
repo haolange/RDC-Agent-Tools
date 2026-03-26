@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -146,6 +147,11 @@ def test_shader_reflection_and_disassembly_support_stage_only_queries(monkeypatc
     monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
     monkeypatch.setattr(server.server_runtime, "_rd_stage", lambda stage: stage)
     monkeypatch.setattr(server.server_runtime, "_is_null_resource_id", lambda rid: str(rid) in {"", "ResourceId::0", "0"})
+    monkeypatch.setattr(
+        server.server_runtime.PatchEngine,
+        "_resolve_source",
+        staticmethod(lambda *args, **kwargs: ("disassembly:mock-target", "raw", "mock-target", False)),
+    )
 
     reflection_payload = json.loads(
         asyncio.run(
@@ -181,3 +187,97 @@ def test_shader_reflection_and_disassembly_support_stage_only_queries(monkeypatc
     assert disassembly_payload["shader_id"] == "ResourceId::77"
     assert disassembly_payload["target"] == "mock-target"
     assert disassembly_payload["disassembly"] == "disassembly:mock-target"
+
+
+def test_texture_get_data_defaults_to_npz_container(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
+        return int(event_id or 314)
+
+    async def _fake_resolve_texture_id(session_id: str, texture_id: object, *, event_id: int | None = None) -> str:
+        return str(texture_id)
+
+    async def _fake_readback_texture(
+        *,
+        session_id: str,
+        event_id: int,
+        texture_id: str,
+        session_manager: object,
+        artifact_store: object,
+        subresource: dict[str, int] | None,
+        region: dict[str, int] | None,
+    ) -> tuple[SimpleNamespace, dict[str, object]]:
+        return SimpleNamespace(sha256="deadbeef", bytes=128), {"event_id": int(event_id), "pixels": 4}
+
+    artifact_path = tmp_path / "readback.npz"
+    artifact_path.write_bytes(b"npz-payload")
+
+    monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
+    monkeypatch.setattr(server.server_runtime, "_resolve_texture_id", _fake_resolve_texture_id)
+    monkeypatch.setattr(server.server_runtime, "_artifact_path", lambda artifact_ref: str(artifact_path))
+    server.server_runtime._session_manager = SimpleNamespace()
+    server.server_runtime._render_service = SimpleNamespace(readback_texture=_fake_readback_texture)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_texture(
+                "get_data",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 314,
+                    "texture_id": "ResourceId::178817",
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["container_format"] == "npz"
+    assert payload["content_kind"] == "texture_readback_container"
+    assert payload["artifact_path"].endswith(".npz")
+    assert payload["saved_path"].endswith(".npz")
+
+
+def test_texture_get_data_rejects_non_npz_output_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
+        return int(event_id or 314)
+
+    async def _fake_resolve_texture_id(session_id: str, texture_id: object, *, event_id: int | None = None) -> str:
+        return str(texture_id)
+
+    async def _fake_readback_texture(
+        *,
+        session_id: str,
+        event_id: int,
+        texture_id: str,
+        session_manager: object,
+        artifact_store: object,
+        subresource: dict[str, int] | None,
+        region: dict[str, int] | None,
+    ) -> tuple[SimpleNamespace, dict[str, object]]:
+        return SimpleNamespace(sha256="deadbeef", bytes=128), {"event_id": int(event_id)}
+
+    artifact_path = tmp_path / "readback.npz"
+    artifact_path.write_bytes(b"npz-payload")
+
+    monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
+    monkeypatch.setattr(server.server_runtime, "_resolve_texture_id", _fake_resolve_texture_id)
+    monkeypatch.setattr(server.server_runtime, "_artifact_path", lambda artifact_ref: str(artifact_path))
+    server.server_runtime._session_manager = SimpleNamespace()
+    server.server_runtime._render_service = SimpleNamespace(readback_texture=_fake_readback_texture)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_texture(
+                "get_data",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 314,
+                    "texture_id": "ResourceId::178817",
+                    "output_path": str(tmp_path / "preview.png"),
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["code"] == "texture_output_path_extension_mismatch"

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 
+from rdx.io_utils import atomic_swap_path, atomic_write_json
 from rdx.runtime_paths import binaries_root, pymodules_dir, worker_cache_dir
 
 
@@ -161,10 +162,8 @@ def materialize_runtime() -> MaterializedRuntime:
             "source_manifest": str(source.manifest_path),
             "cache_root": str(cache_root),
         }
-        (temp_root / ".materialized.json").write_text(json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8")
-        if cache_root.exists():
-            shutil.rmtree(cache_root)
-        os.replace(temp_root, cache_root)
+        atomic_write_json(temp_root / ".materialized.json", marker)
+        atomic_swap_path(temp_root, cache_root)
     finally:
         if temp_root.exists():
             shutil.rmtree(temp_root, ignore_errors=True)
