@@ -124,6 +124,8 @@
 - 如果文档写到 `event_id`，必须区分 canonical action event 与底层 `raw_event_id`；不得暗示任意 RenderDoc 原始 `eventId` 都能直接喂回 `rd.event.set_active`。
 - 如果文档写到 event-bound `rd.pipeline.*`、`rd.shader.*`、`rd.texture.get_pixel_value`、`rd.export.shader_bundle` 或 `rd.shader.debug_start`，必须说明 `resolved_event_id` 与“unsupported/degraded 必须显式失败”的口径。
 - 如果文档写到 `rd.shader.edit_and_replace`，必须说明它只能是“真实替换成功”或“明确 capability/runtime 失败”，不得保留 mock 成功口径。
+- 核心文档不得出现 capture 名、样本文件名、具体 `EventID`、具体 `ResourceId`、变量编号、个人机器路径或桌面样本路径。
+- framework / game / 样本级案例只能进入独立调查记录，不得进入 `README.md`、`docs/tools.md`、`docs/troubleshooting.md`、`docs/session-model.md`、`docs/agent-model.md`。
 
 ## 5. 量化指标
 

@@ -389,7 +389,7 @@ daemon 退出后，本地与可恢复 remote session 默认都会保留在持久
 
 不应再把 `mock_applied`、logical replacement 或“看起来成功但没有真正替换”的状态当成成功。
 
-### Android remote / `SPIR-V (RenderDoc)` 的手动 IR patch 怎么排
+### Android remote / `SPIR-V (RenderDoc)` 的手动 IR patch 经验性排障建议
 
 如果目标是 Android remote Vulkan shader，建议按这个顺序看：
 
