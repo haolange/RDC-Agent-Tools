@@ -16,8 +16,30 @@ class AtomicWriteError(RuntimeError):
         self.details = dict(details or {})
 
 
+def _sanitize_json_value(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        return {str(key): _sanitize_json_value(value) for key, value in payload.items()}
+    if isinstance(payload, list):
+        return [_sanitize_json_value(item) for item in payload]
+    if isinstance(payload, tuple):
+        return [_sanitize_json_value(item) for item in payload]
+    if isinstance(payload, str):
+        try:
+            payload.encode("utf-8")
+            return payload
+        except UnicodeEncodeError:
+            return payload.encode("utf-8", errors="backslashreplace").decode("utf-8")
+    return payload
+
+
 def safe_json_text(payload: Any, *, indent: int | None = None, sort_keys: bool = False) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=indent, sort_keys=sort_keys, default=str)
+    return json.dumps(
+        _sanitize_json_value(payload),
+        ensure_ascii=False,
+        indent=indent,
+        sort_keys=sort_keys,
+        default=str,
+    )
 
 
 def safe_stream_write(text: str, stream: TextIO) -> None:

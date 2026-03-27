@@ -332,6 +332,38 @@ def test_build_args_for_remote_open_replay_uses_live_remote_handle(tmp_path: Pat
     assert args == {"capture_file_id": "capf_remote", "options": {"remote_id": "remote_live"}}
 
 
+def test_build_args_for_export_screenshot_includes_event_bound_target(tmp_path: Path) -> None:
+    state = tool_contract_check.SampleState(
+        matrix="local",
+        rdc_path=tmp_path / "sample.rdc",
+        session_id="sess_demo",
+    )
+    state.event_id = 6152
+    state.texture_id = "ResourceId::178817"
+    files = {
+        "artifacts": tmp_path / "artifacts",
+        "sample": tmp_path / "sample.bin",
+        "text_a": tmp_path / "a.txt",
+        "text_b": tmp_path / "b.txt",
+        "png_a": tmp_path / "a.png",
+        "png_b": tmp_path / "b.png",
+        "zip_out": tmp_path / "bundle.zip",
+    }
+
+    args = tool_contract_check._build_args(
+        "rd.export.screenshot",
+        ["session_id", "target", "event_id", "output_path", "file_format"],
+        state,
+        files,
+    )
+
+    assert args["session_id"] == "sess_demo"
+    assert args["event_id"] == 6152
+    assert args["target"] == {"texture_id": "ResourceId::178817"}
+    assert str(args["output_path"]).endswith("local_rd_export_screenshot.out")
+    assert args["file_format"] == "png"
+
+
 def test_tool_matrix_promotes_session_bound_tools_in_remote_only_mode() -> None:
     assert tool_contract_check._tool_matrix("rd.event.get_actions", ["session_id"], remote_only=True) == "remote"
     assert tool_contract_check._tool_matrix("rd.session.get_context", [], remote_only=True) == "remote"

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from rdx.io_utils import safe_json_text
 from rdx.runtime_materializer import MaterializedRuntime, materialize_runtime
 from rdx.runtime_worker_state import clear_worker_state, save_worker_state
 
@@ -153,7 +154,9 @@ class RuntimeWorkerProcess:
                 raise RuntimeError("worker process is unavailable")
             self._request_seq += 1
             req_id = f"wrk_{self._request_seq}"
-            proc.stdin.write(json.dumps({"id": req_id, "method": str(method), "params": dict(params or {})}, ensure_ascii=False) + "\n")
+            proc.stdin.write(
+                safe_json_text({"id": req_id, "method": str(method), "params": dict(params or {})}) + "\n"
+            )
             proc.stdin.flush()
 
             deadline = time.time() + max(1.0, float(timeout))

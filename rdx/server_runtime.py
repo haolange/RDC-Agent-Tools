@@ -484,8 +484,14 @@ def _session_record_from_runtime(session_id: str, *, context_id: Optional[str] =
     replay = _runtime.replays.get(str(session_id))
     if replay is None:
         raise KeyError(f"unknown session_id: {session_id}")
+    state = _context_state(ctx)
+    state_sessions = state.get("sessions", {}) if isinstance(state.get("sessions"), dict) else {}
+    existing = dict(state_sessions.get(str(session_id)) or {})
     capture = _runtime.captures.get(replay.capture_file_id)
     capture_meta = _capture_file_metadata(capture.file_path if capture is not None else "")
+    backend_type = str(existing.get("backend_type") or state.get("backend") or "").strip()
+    if not backend_type:
+        backend_type = "remote" if str(session_id) in _runtime.session_owned_remotes else "local"
     return {
         "session_id": str(session_id),
         "capture_file_id": str(replay.capture_file_id),
@@ -494,7 +500,7 @@ def _session_record_from_runtime(session_id: str, *, context_id: Optional[str] =
         "file_size_bytes": int(capture_meta.get("file_size_bytes") or 0),
         "frame_index": int(replay.frame_index or 0),
         "active_event_id": int(replay.active_event_id or 0),
-        "backend_type": str(_context_snapshot(ctx).get("runtime", {}).get("backend_type") or "local"),
+        "backend_type": _normalize_backend(backend_type, default="local"),
         "state": "active",
         "is_live": True,
         "last_error": "",
@@ -686,6 +692,7 @@ def _update_context_session_record(
     session_id: str,
     *,
     context_id: Optional[str] = None,
+    backend_type: Optional[str] = None,
     frame_index: Optional[int] = None,
     active_event_id: Optional[int] = None,
     state_name: Optional[str] = None,
@@ -695,11 +702,24 @@ def _update_context_session_record(
 ) -> Dict[str, Any]:
     ctx = normalize_context_id(context_id or _runtime_context_id())
     state = _context_state(ctx)
-    state["backend"] = _normalize_backend(backend_type, default="local")
     sessions = state.setdefault("sessions", {})
     record = dict(sessions.get(str(session_id)) or {})
     if not record:
-        return state
+        try:
+            record = _session_record_from_runtime(str(session_id), context_id=ctx)
+        except KeyError as exc:
+            raise CoreError(
+                code="session_not_found",
+                message=f"Unknown session_id: {session_id}",
+                category="not_found",
+                details={"session_id": str(session_id)},
+            ) from exc
+    resolved_backend = _normalize_backend(
+        backend_type or record.get("backend_type") or state.get("backend"),
+        default="local",
+    )
+    state["backend"] = resolved_backend
+    record["backend_type"] = resolved_backend
     if frame_index is not None:
         record["frame_index"] = int(frame_index)
     if active_event_id is not None:
@@ -5087,11 +5107,8 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
             status = await _offload(cap.OpenFile, str(path), "", None)
             _check_status(status, "OpenFile")
             try:
-                status2, controller = await _offload(cap.OpenCapture, rd.ReplayOptions(), None)
-                if status2 == rd.ResultCode.Succeeded:
-                    props = await _offload(controller.GetAPIProperties)
-                    driver = str(getattr(props, "pipelineType", ""))
-                    await _offload(controller.Shutdown)
+                if hasattr(cap, "DriverName"):
+                    driver = str(await _offload(cap.DriverName) or "")
             finally:
                 if hasattr(cap, "CloseFile"):
                     await _offload(cap.CloseFile)

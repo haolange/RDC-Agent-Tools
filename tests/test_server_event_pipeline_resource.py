@@ -572,6 +572,77 @@ def test_export_shader_bundle_forwards_requested_event(monkeypatch: pytest.Monke
     assert bundle["shaders"][0]["resolved_event_id"] == 202
 
 
+def test_export_screenshot_forwards_requested_event(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    seen_calls: list[dict[str, object]] = []
+
+    async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
+        assert session_id == "sess_demo"
+        return int(event_id or 0)
+
+    async def _fake_output_target_resource_ids(session_id: str, event_id: int) -> list[tuple[str, int]]:
+        assert session_id == "sess_demo"
+        assert event_id == 202
+        return [("ResourceId::77", 0)]
+
+    async def _fake_get_texture_descriptor(session_id: str, texture_id: object, *, event_id: int | None = None):
+        assert session_id == "sess_demo"
+        assert int(event_id or 0) == 202
+        return str(texture_id), SimpleNamespace(name="main_color")
+
+    async def _fake_dispatch_texture(action: str, args: dict[str, object]) -> str:
+        seen_calls.append({"action": action, **dict(args)})
+        return json.dumps(
+            {
+                "success": True,
+                "artifact_path": str(tmp_path / "shot.png"),
+                "saved_path": str(tmp_path / "shot.png"),
+                "image_path": str(tmp_path / "shot.png"),
+                "meta": {"event_id": int(args["event_id"])},
+            }
+        )
+
+    monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
+    monkeypatch.setattr(server.server_runtime, "_output_target_resource_ids", _fake_output_target_resource_ids)
+    monkeypatch.setattr(server.server_runtime, "_get_texture_descriptor", _fake_get_texture_descriptor)
+    monkeypatch.setattr(server.server_runtime, "_binding_name_index_for_event", lambda session_id, event_id: asyncio.sleep(0, result={}))
+    monkeypatch.setattr(server.server_runtime, "_dispatch_texture", _fake_dispatch_texture)
+    monkeypatch.setattr(server.server_runtime, "_recommend_formats_for_texture", lambda texture_desc, name_info, for_screenshot=False: ["png"])
+    monkeypatch.setattr(
+        server.server_runtime,
+        "_render_service",
+        SimpleNamespace(
+            get_texture_stats=lambda **kwargs: asyncio.sleep(
+                0,
+                result={
+                    "channels": {
+                        "r": {"min": 0.0, "max": 1.0},
+                        "g": {"min": 0.0, "max": 1.0},
+                        "b": {"min": 0.0, "max": 1.0},
+                        "a": {"min": 1.0, "max": 1.0},
+                    },
+                    "has_any_nan": False,
+                    "has_any_inf": False,
+                },
+            )
+        ),
+    )
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_export(
+                "screenshot",
+                {"session_id": "sess_demo", "event_id": 202, "output_path": str(tmp_path / "shot.png")},
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["meta"]["event_id"] == 202
+    assert seen_calls
+    assert all(call["action"] == "render_overlay" for call in seen_calls)
+    assert all(int(call["event_id"]) == 202 for call in seen_calls)
+
+
 def test_export_shader_bundle_returns_runtime_error_when_event_has_no_bound_shaders(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
         return int(event_id or 0)

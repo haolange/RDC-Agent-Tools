@@ -305,6 +305,70 @@ def _render_result(payload: Dict[str, Any], *, output_format: str = "json") -> N
     _print_json(payload)
 
 
+def _extract_error_triplet(payload: Dict[str, Any]) -> tuple[str, str, str]:
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    return (
+        str(error.get("code") or "runtime_error"),
+        str(error.get("category") or "runtime"),
+        str(error.get("message") or "runtime error"),
+    )
+
+
+def _safe_capture_open_context_snapshot(context: str) -> Dict[str, Any]:
+    try:
+        payload = _daemon_exec("rd.session.get_context", {}, context=context)
+    except Exception as exc:  # noqa: BLE001
+        nested = _exception_error_payload("rd.session.get_context", exc, transport="cli")
+        return {"ok": False, "error": nested.get("error"), "meta": nested.get("meta", {})}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    return {"ok": bool(payload.get("ok")), "data": data, "error": payload.get("error"), "meta": payload.get("meta", {})}
+
+
+def _capture_open_error_payload(
+    *,
+    step: str,
+    context: str,
+    file_path: str,
+    capture_file_id: str = "",
+    session_id: str = "",
+    source_payload: Optional[Dict[str, Any]] = None,
+    source_exception: Optional[Exception] = None,
+) -> Dict[str, Any]:
+    if isinstance(source_payload, dict) and not bool(source_payload.get("ok")):
+        code, category, message = _extract_error_triplet(source_payload)
+        source_details = dict((source_payload.get("error") or {}).get("details") or {})
+    elif source_exception is not None:
+        nested = _exception_error_payload("rdx.capture.open", source_exception, transport="cli")
+        code, category, message = _extract_error_triplet(nested)
+        source_details = dict((nested.get("error") or {}).get("details") or {})
+    else:
+        code, category, message = ("runtime_error", "runtime", f"{step} failed")
+        source_details = {}
+    daemon_status = _daemon_status_payload(context)
+    daemon_state = daemon_status.get("data", {}).get("state", {}) if isinstance(daemon_status.get("data"), dict) else {}
+    context_snapshot = _safe_capture_open_context_snapshot(context)
+    details = {
+        "failed_step": step,
+        "context_id": context,
+        "file_path": file_path,
+        "capture_file_id": str(capture_file_id or ""),
+        "session_id": str(session_id or ""),
+        "step_payload": source_payload if isinstance(source_payload, dict) else {},
+        "source_error_details": source_details,
+        "daemon_state": daemon_state if isinstance(daemon_state, dict) else {},
+        "context_snapshot": context_snapshot,
+        "recovery_hint": "Inspect failed_step; if the context still reports an active operation or stale handles, run `rdx context clear` before retrying.",
+    }
+    return canonical_error(
+        result_kind="rdx.capture.open",
+        code=code,
+        category=category,
+        message=f"capture open failed during {step}: {message}",
+        details=details,
+        transport="cli",
+    )
+
+
 async def _cmd_call(args: argparse.Namespace) -> int:
     call_args = _tabular_request(
         str(args.format),
@@ -333,6 +397,8 @@ async def _cmd_vfs(args: argparse.Namespace) -> int:
 async def _cmd_capture_open(args: argparse.Namespace) -> int:
     file_path = str(Path(args.file).resolve())
     context = str(args.daemon_context)
+    capture_file_id = ""
+    session_id = ""
 
     init_payload = _daemon_exec(
         "rd.core.init",
@@ -343,12 +409,26 @@ async def _cmd_capture_open(args: argparse.Namespace) -> int:
         context=context,
     )
     if not bool(init_payload.get("ok")):
-        _print_json(init_payload)
+        _print_json(
+            _capture_open_error_payload(
+                step="init",
+                context=context,
+                file_path=file_path,
+                source_payload=init_payload,
+            )
+        )
         return EXIT_RUNTIME_ERR
 
     open_file = _daemon_exec("rd.capture.open_file", {"file_path": file_path, "read_only": True}, context=context)
     if not bool(open_file.get("ok")):
-        _print_json(open_file)
+        _print_json(
+            _capture_open_error_payload(
+                step="open_file",
+                context=context,
+                file_path=file_path,
+                source_payload=open_file,
+            )
+        )
         return EXIT_RUNTIME_ERR
     capture_file_id = str(_extract(open_file, "capture_file_id") or "")
 
@@ -358,7 +438,15 @@ async def _cmd_capture_open(args: argparse.Namespace) -> int:
         context=context,
     )
     if not bool(open_replay.get("ok")):
-        _print_json(open_replay)
+        _print_json(
+            _capture_open_error_payload(
+                step="open_replay",
+                context=context,
+                file_path=file_path,
+                capture_file_id=capture_file_id,
+                source_payload=open_replay,
+            )
+        )
         return EXIT_RUNTIME_ERR
     session_id = str(_extract(open_replay, "session_id") or "")
 
@@ -368,10 +456,44 @@ async def _cmd_capture_open(args: argparse.Namespace) -> int:
         context=context,
     )
     if not bool(set_frame.get("ok")):
-        _print_json(set_frame)
+        _print_json(
+            _capture_open_error_payload(
+                step="set_frame",
+                context=context,
+                file_path=file_path,
+                capture_file_id=capture_file_id,
+                session_id=session_id,
+                source_payload=set_frame,
+            )
+        )
         return EXIT_RUNTIME_ERR
 
-    context_payload = _daemon_exec("rd.session.get_context", {}, context=context)
+    try:
+        context_payload = _daemon_exec("rd.session.get_context", {}, context=context)
+    except Exception as exc:  # noqa: BLE001
+        _print_json(
+            _capture_open_error_payload(
+                step="get_context",
+                context=context,
+                file_path=file_path,
+                capture_file_id=capture_file_id,
+                session_id=session_id,
+                source_exception=exc,
+            )
+        )
+        return EXIT_RUNTIME_ERR
+    if not bool(context_payload.get("ok")):
+        _print_json(
+            _capture_open_error_payload(
+                step="get_context",
+                context=context,
+                file_path=file_path,
+                capture_file_id=capture_file_id,
+                session_id=session_id,
+                source_payload=context_payload,
+            )
+        )
+        return EXIT_RUNTIME_ERR
     runtime_snapshot = context_payload.get("data", {}).get("runtime", {}) if isinstance(context_payload.get("data"), dict) else {}
     payload = canonical_success(
         result_kind="rdx.capture.open",

@@ -9,7 +9,8 @@ REMOTE_CONNECT_DEFAULT_TIMEOUT_MS = 200000
 REMOTE_CONNECT_DAEMON_BUFFER_S = 90.0
 DAEMON_RESPONSE_BUFFER_S = 5.0
 REMOTE_OPEN_REPLAY_TIMEOUT_S = 200.0
-LOCAL_OPEN_REPLAY_TIMEOUT_S = 60.0
+LOCAL_OPEN_FILE_TIMEOUT_S = 120.0
+LOCAL_OPEN_REPLAY_TIMEOUT_S = 120.0
 SESSION_CONTEXT_TIMEOUT_S = 10.0
 PIXEL_HISTORY_TIMEOUT_S = 20.0
 DEFAULT_DAEMON_REQUEST_TIMEOUT_S = 30.0
@@ -64,6 +65,9 @@ def operation_timeout_s(operation: str, args: dict[str, Any] | None) -> float:
         if isinstance(options, dict) and str(options.get("remote_id") or "").strip():
             return REMOTE_OPEN_REPLAY_TIMEOUT_S
         return LOCAL_OPEN_REPLAY_TIMEOUT_S
+
+    if operation == "rd.capture.open_file":
+        return LOCAL_OPEN_FILE_TIMEOUT_S
 
     if operation.startswith("rd.session."):
         return SESSION_CONTEXT_TIMEOUT_S

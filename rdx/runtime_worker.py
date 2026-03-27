@@ -9,10 +9,18 @@ import os
 import sys
 from typing import Any, Dict
 
+from rdx.io_utils import safe_json_text, safe_stream_write
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+if hasattr(sys.stdin, "reconfigure"):
+    sys.stdin.reconfigure(encoding="utf-8")
+
 
 def _emit(payload: Dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    safe_stream_write(safe_json_text(payload) + "\n", sys.stdout)
 
 
 def _context_id() -> str:
