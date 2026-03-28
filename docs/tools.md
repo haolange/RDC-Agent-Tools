@@ -93,11 +93,13 @@
 
 - 读取当前 context 的 runtime / remote / focus / recent artifacts 状态。
 - 读取当前 context 的 preview observer 状态；唯一入口是 `rd.session.get_context.preview`。
+- `rd.session.get_context.preview.display` 会额外暴露人类观察面的几何元数据，例如 `output_slot`、`texture_id`、`framebuffer_extent`、`viewport_rect`、`scissor_rect`、`effective_region_rect`、`window_rect`、`fit_mode` 与 `screen_cap_ratio`。
 - 读取并切换 `current_session_id` 与 `sessions` 表。
 - 暴露 `recovery`、`limits`、`active_operation` 与 `recent_operations`。
 - 让上层 Agent 只补充 user-owned 字段，例如 `focus_pixel`、`focus_resource_id`、`focus_shader_id`、`notes`。
 - 不允许人工或 Agent 通过它们直接篡改 runtime-owned 字段，如 `session_id`、`capture_file_id`、`active_event_id`、`remote_id`。
 - `rd.session.open_preview` / `rd.session.close_preview` 只负责给人类打开或关闭同步监控窗口；它们不引入新的 public id，也不改变 canonical `rd.*` 的真相层级。
+- preview 固定按“完整 framebuffer / RT + viewport/scissor 区域标识”解释，不默认裁切到 viewport。
 
 其中新增 `rd.core.*` discovery / observability 入口用于：
 

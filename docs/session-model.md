@@ -62,6 +62,8 @@ remote endpoint
 - `preview`
   - 绑定当前 context 的人类同步观察窗口。
   - 固定跟随 `current_session_id + active_event_id`。
+  - 默认显示当前 event 的完整 framebuffer / RT，不按 viewport 裁小；若当前 event 存在 viewport / scissor，会以区域标识叠加到完整 framebuffer 上。
+  - `rd.session.get_context.preview.display` 会暴露 `output_slot`、`texture_id`、`texture_format`、`framebuffer_extent`、`viewport_rect`、`scissor_rect`、`effective_region_rect`、`window_rect`、`fit_mode` 与 `screen_cap_ratio`。
   - 它是 human observer，不是新的 runtime truth，也不是 fix verification / evidence 输入。
 - `persistent context state`
   - daemon-backed 持久化索引，保存当前 context 的 `captures`、`sessions`、`current_session_id`、`recovery`、`limits` 与 `recent_operations`。
@@ -74,6 +76,7 @@ remote endpoint
 - `rd.session.get_context`
   - 读取当前 context 的只读快照。
   - 返回 `runtime`、`remote`、`focus`、`last_artifacts`、`preview`、`runtime_parallelism_ceiling` 等结构化状态。
+  - 其中 `preview.display` 是人类观察面的几何元数据，不是新的 gate / evidence 真相。
 - `rd.session.update_context`
   - 只允许补充 user-owned 字段，例如：
     - `focus_pixel`
@@ -155,6 +158,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
   - 供 Agent 或自动化读取的 context 级快照，汇总 runtime / remote / focus / recent artifacts。
 - preview 观察面（preview observer）
   - 只给人类同步看当前 active event 的可视结果。
+  - 它显示的是完整 framebuffer / RT，并把 viewport / scissor 作为区域标识叠加进去，而不是默认裁小显示区域。
   - 公开状态固定通过 `rd.session.get_context.preview` 暴露。
   - 它不会升级成 runtime truth，也不会替代 canonical `rd.*` 证据。
 - persistent context state
@@ -204,6 +208,8 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 - `rdx daemon stop` 只停止 daemon，不会清空该 context 的本地恢复索引；真正销毁状态要执行 `rdx context clear` 或 `rd.core.shutdown`。
 - preview 是 context 级 enabled intent：`rdx daemon stop` / worker 重启会关闭 live 窗口，但保留 enabled intent；后续同一 context 恢复 live session 时会自动重绑。
 - `rd.session.close_preview`、`rdx context clear` 与 `rd.core.shutdown` 会关闭窗口并清掉该 intent。
+- 当 preview 已 enabled 时，`rd.event.set_active`、`rd.replay.set_frame`、`rd.session.select_session` 与 `rd.session.resume` 会在返回前先完成一次 preview 同步刷新尝试；刷新失败只更新 preview 状态，不回滚 runtime 主真相。
+- preview 窗口会按 framebuffer 几何自动调整大小，并把默认上限限制在当前屏幕工作区的 `50%`；若用户手动拖拽过窗口，在 framebuffer 几何不变时不会被持续覆盖。
 - remote 一律采用 `single_runtime_owner`；高能力平台的差异只体现在 local 是否允许 multi-context 并行，而不是允许多个 owner 共享同一条 remote live runtime。
 
 补充一条入口选择原则：

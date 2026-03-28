@@ -37,11 +37,13 @@ from rdx.context_snapshot import (
     SnapshotRetentionPolicy,
     clear_context_snapshot,
     default_context_snapshot,
+    default_preview_display_state,
     default_preview_state,
     load_context_snapshot,
     merge_recent_artifacts,
     normalize_context_id,
     normalize_context_snapshot,
+    normalize_preview_display_state,
     normalize_preview_state,
     normalize_pixel,
     save_context_snapshot,
@@ -225,6 +227,7 @@ class PreviewBinding:
     bound_event_id: int = 0
     backend: str = "local"
     last_error: str = ""
+    display: Dict[str, Any] = field(default_factory=default_preview_display_state)
 
 
 _config: Optional[RdxConfig] = None
@@ -237,6 +240,9 @@ _artifact_store: Optional[ArtifactStore] = None
 _patch_engine: Optional[PatchEngine] = None
 _runtime: RuntimeState = RuntimeState()
 _runtime_bootstrapped: bool = False
+_PREVIEW_SCREEN_CAP_RATIO = 0.5
+_PREVIEW_FIT_MODE = "fit_with_screen_cap"
+_PREVIEW_REGION_MARKER_MODE = "viewport_scissor_overlay"
 
 _LIVE_OWNER_PREFIXES = (
     "rd.capture.",
@@ -494,6 +500,7 @@ def _preview_update_payload(
     recovered_from_session_id: Optional[str] = None,
     rebind_count: Optional[int] = None,
     last_error: Optional[str] = None,
+    display: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     payload = dict(preview or {})
     if enabled is not None:
@@ -514,6 +521,8 @@ def _preview_update_payload(
         payload["rebind_count"] = max(0, int(rebind_count or 0))
     if last_error is not None:
         payload["last_error"] = str(last_error or "").strip()
+    if display is not None:
+        payload["display"] = normalize_preview_display_state(display)
     payload["view_mode"] = "active_event"
     payload["updated_at_ms"] = _now_ms()
     return normalize_preview_state(payload, backend=str(payload.get("backend") or "local"))
@@ -528,6 +537,96 @@ def _store_preview_state(
     state["preview"] = normalize_preview_state(preview, backend=str(state.get("backend") or "local"))
     _store_context_state(state, ctx)
     return _sync_context_snapshot_from_state(ctx)
+
+
+def _preview_display_state(**fields: Any) -> Dict[str, Any]:
+    payload = default_preview_display_state()
+    payload.update(fields)
+    payload["fit_mode"] = _PREVIEW_FIT_MODE
+    payload["screen_cap_ratio"] = _PREVIEW_SCREEN_CAP_RATIO
+    return normalize_preview_display_state(payload)
+
+
+def _rect_from_snapshot(value: Any) -> Dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        x = int(round(float(value.get("x", 0))))
+        y = int(round(float(value.get("y", 0))))
+        width = int(round(float(value.get("width", 0))))
+        height = int(round(float(value.get("height", 0))))
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+    }
+
+
+def _clip_rect_to_extent(rect: Dict[str, int] | None, extent: Dict[str, int]) -> Dict[str, int] | None:
+    if rect is None:
+        return None
+    width = max(0, int(extent.get("width") or 0))
+    height = max(0, int(extent.get("height") or 0))
+    if width <= 0 or height <= 0:
+        return None
+    raw_x = int(rect.get("x", 0))
+    raw_y = int(rect.get("y", 0))
+    raw_width = max(0, int(rect.get("width", 0)))
+    raw_height = max(0, int(rect.get("height", 0)))
+    x0 = max(0, raw_x)
+    y0 = max(0, raw_y)
+    x1 = min(width, raw_x + raw_width)
+    y1 = min(height, raw_y + raw_height)
+    clipped_width = x1 - x0
+    clipped_height = y1 - y0
+    if clipped_width <= 0 or clipped_height <= 0:
+        return None
+    return {
+        "x": x0,
+        "y": y0,
+        "width": clipped_width,
+        "height": clipped_height,
+    }
+
+
+def _intersect_rects(a: Dict[str, int] | None, b: Dict[str, int] | None) -> Dict[str, int] | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    left = max(int(a.get("x", 0)), int(b.get("x", 0)))
+    top = max(int(a.get("y", 0)), int(b.get("y", 0)))
+    right = min(int(a.get("x", 0)) + int(a.get("width", 0)), int(b.get("x", 0)) + int(b.get("width", 0)))
+    bottom = min(int(a.get("y", 0)) + int(a.get("height", 0)), int(b.get("y", 0)) + int(b.get("height", 0)))
+    width = right - left
+    height = bottom - top
+    if width <= 0 or height <= 0:
+        return None
+    return {
+        "x": left,
+        "y": top,
+        "width": width,
+        "height": height,
+    }
+
+
+def _preview_region_rects(
+    framebuffer_extent: Dict[str, int],
+    *,
+    viewport_rect: Dict[str, int] | None,
+    scissor_rect: Dict[str, int] | None,
+) -> Tuple[Dict[str, int] | None, Dict[str, int] | None, Dict[str, int] | None]:
+    viewport_clipped = _clip_rect_to_extent(viewport_rect, framebuffer_extent)
+    scissor_clipped = _clip_rect_to_extent(scissor_rect, framebuffer_extent)
+    effective = _intersect_rects(viewport_clipped, scissor_clipped)
+    if effective is None:
+        effective = scissor_clipped or viewport_clipped
+    return viewport_clipped, scissor_clipped, effective
 
 
 def _capture_file_metadata(file_path: str) -> Dict[str, Any]:
@@ -640,6 +739,12 @@ def _select_session_from_state(
         chosen_capture_id = next(iter(captures.keys()))
     state["current_session_id"] = chosen_session_id
     state["current_capture_file_id"] = chosen_capture_id
+    selected_session = sessions.get(chosen_session_id) if isinstance(sessions, dict) and chosen_session_id else None
+    if isinstance(selected_session, dict):
+        state["backend"] = _normalize_backend(
+            selected_session.get("backend_type"),
+            default=str(state.get("backend") or "local"),
+        )
     return state
 
 
@@ -1226,8 +1331,21 @@ def _preview_title(
     backend: str,
     session_id: str,
     event_id: int,
+    display: Optional[Dict[str, Any]] = None,
 ) -> str:
-    return f"RDX Preview [{context_id}] [{backend}] {session_id} @ event {int(event_id)}"
+    display_payload = normalize_preview_display_state(display)
+    framebuffer = dict(display_payload.get("framebuffer_extent") or {})
+    window_rect = dict(display_payload.get("window_rect") or {})
+    output_slot = display_payload.get("output_slot")
+    marker_mode = str(display_payload.get("region_marker_mode") or "none")
+    slot_text = f"RT{int(output_slot)}" if output_slot is not None else "resource"
+    framebuffer_text = f"{int(framebuffer.get('width') or 0)}x{int(framebuffer.get('height') or 0)}"
+    window_text = f"{int(window_rect.get('width') or 0)}x{int(window_rect.get('height') or 0)}"
+    marker_text = "viewport/scissor" if marker_mode != "none" else "full-frame"
+    return (
+        f"RDX Preview [{context_id}] [{backend}] {session_id} "
+        f"@ event {int(event_id)} [{slot_text}] fb={framebuffer_text} win={window_text} {marker_text}"
+    )
 
 
 def _preview_error(
@@ -1290,6 +1408,7 @@ def _preview_window_closed(context_id: str, closed_by_user: bool) -> None:
         bound_event_id=0,
         recovered_from_session_id="",
         last_error="",
+        display=default_preview_display_state(),
     )
     _store_preview_state(ctx, preview)
 
@@ -1574,31 +1693,115 @@ async def _choose_visual_output_target(
     return target_texture_id, texture_desc, chosen_output_slot, best_target_source
 
 
+def _preview_overlay_for_marker(rd: Any, region_marker_mode: str) -> Any:
+    if str(region_marker_mode or "none") == _PREVIEW_REGION_MARKER_MODE:
+        return getattr(rd.DebugOverlay, "ViewportScissor", rd.DebugOverlay.NoOverlay)
+    return rd.DebugOverlay.NoOverlay
+
+
+async def _build_preview_display_state(
+    binding: PreviewBinding,
+    *,
+    session_id: str,
+    event_id: int,
+    texture_desc: Optional[Any],
+    texture_id: Any,
+    chosen_output_slot: Optional[int],
+    target_source: str,
+    force_geometry: bool = False,
+) -> Dict[str, Any]:
+    framebuffer_extent = {
+        "width": max(0, int(getattr(texture_desc, "width", 0) or 0)),
+        "height": max(0, int(getattr(texture_desc, "height", 0) or 0)),
+    }
+    viewport_rect = None
+    scissor_rect = None
+    effective_region_rect = None
+    region_marker_mode = "none"
+    if (
+        _pipeline_service is not None
+        and chosen_output_slot is not None
+        and str(target_source or "") == "event_output_slot"
+    ):
+        try:
+            snapshot = await _pipeline_service.snapshot_pipeline(
+                session_id=session_id,
+                event_id=int(event_id),
+                session_manager=_session_manager,
+            )
+            snapshot_dict = snapshot.model_dump(mode="json")
+            viewport_rect, scissor_rect, effective_region_rect = _preview_region_rects(
+                framebuffer_extent,
+                viewport_rect=_rect_from_snapshot(snapshot_dict.get("viewport")),
+                scissor_rect=_rect_from_snapshot(snapshot_dict.get("scissor")),
+            )
+            if viewport_rect is not None or scissor_rect is not None:
+                region_marker_mode = _PREVIEW_REGION_MARKER_MODE
+        except Exception:
+            viewport_rect = None
+            scissor_rect = None
+            effective_region_rect = None
+            region_marker_mode = "none"
+
+    geometry = binding.host.apply_framebuffer_geometry(
+        framebuffer_extent.get("width", 0),
+        framebuffer_extent.get("height", 0),
+        screen_cap_ratio=_PREVIEW_SCREEN_CAP_RATIO,
+        force=force_geometry,
+    )
+    window_rect = dict(geometry.get("window_rect") or {"width": 0, "height": 0})
+    return _preview_display_state(
+        output_slot=chosen_output_slot,
+        texture_id=str(texture_id or ""),
+        texture_format=_texture_format_name(texture_desc),
+        framebuffer_extent=framebuffer_extent,
+        viewport_rect=viewport_rect,
+        scissor_rect=scissor_rect,
+        effective_region_rect=effective_region_rect,
+        region_marker_mode=region_marker_mode,
+        window_rect=window_rect,
+    )
+
+
 async def _display_preview_binding(
     binding: PreviewBinding,
     *,
     session_id: str,
     event_id: int,
+    force_geometry: bool = False,
 ) -> Dict[str, Any]:
     rd = _get_rd()
     await _ensure_event(session_id, event_id)
-    output = await _ensure_preview_output(binding, session_id)
     target_texture_id, texture_desc, chosen_output_slot, target_source = await _choose_visual_output_target(
         session_id,
         int(event_id),
         allow_framebuffer_fallback=False,
     )
+    display_state = await _build_preview_display_state(
+        binding,
+        session_id=session_id,
+        event_id=int(event_id),
+        texture_desc=texture_desc,
+        texture_id=target_texture_id,
+        chosen_output_slot=chosen_output_slot,
+        target_source=target_source,
+        force_geometry=force_geometry,
+    )
+    output = await _ensure_preview_output(binding, session_id)
     display = rd.TextureDisplay()
     display.resourceId = target_texture_id
     display.subresource = rd.Subresource()
     display.typeCast = rd.CompType.Typeless
-    display.overlay = rd.DebugOverlay.NoOverlay
+    display.overlay = _preview_overlay_for_marker(
+        rd,
+        str(display_state.get("region_marker_mode") or "none"),
+    )
     display.rawOutput = False
     display.red = True
     display.green = True
     display.blue = True
     display.alpha = False
-    display.scale = 1.0
+    display.scale = 0.0
     display.rangeMin = 0.0
     display.rangeMax = 1.0
     display.hdrMultiplier = -1.0
@@ -1620,6 +1823,7 @@ async def _display_preview_binding(
         "texture_format": _texture_format_name(texture_desc),
         "chosen_output_slot": chosen_output_slot,
         "target_source": target_source,
+        "display": display_state,
     }
 
 
@@ -1641,6 +1845,7 @@ async def _sync_context_preview(
             enabled=bool(enable_intent),
             state_name="disabled" if not enable_intent else ("starting" if not preview.get("enabled") else str(preview.get("state") or "starting")),
             last_error="",
+            display=default_preview_display_state() if not enable_intent else preview.get("display"),
         )
         _store_preview_state(ctx, preview)
         preview = _preview_state_value(ctx)
@@ -1657,12 +1862,21 @@ async def _sync_context_preview(
             bound_event_id=0,
             recovered_from_session_id="",
             last_error="",
+            display=default_preview_display_state(),
         )
         return _store_preview_state(ctx, preview)
 
     current_session_id = str(state.get("current_session_id") or "").strip()
     current_capture_file_id = str(state.get("current_capture_file_id") or "").strip()
-    current_backend = str(state.get("backend") or "local").strip() or "local"
+    current_session_record = (
+        dict((state.get("sessions") or {}).get(current_session_id) or {})
+        if current_session_id
+        else {}
+    )
+    current_backend = _normalize_backend(
+        current_session_record.get("backend_type"),
+        default=str(state.get("backend") or "local"),
+    )
     active_event_id = int(
         ((state.get("sessions") or {}).get(current_session_id) or {}).get("active_event_id")
         or ((preview.get("bound_event_id") or 0) if str(preview.get("bound_session_id") or "") == current_session_id else 0)
@@ -1686,6 +1900,7 @@ async def _sync_context_preview(
             bound_event_id=0,
             backend=current_backend,
             last_error=error.message,
+            display=default_preview_display_state(),
         )
         snapshot = _store_preview_state(ctx, preview)
         if strict:
@@ -1706,6 +1921,7 @@ async def _sync_context_preview(
             bound_event_id=0,
             backend=current_backend,
             last_error=exc.message,
+            display=default_preview_display_state(),
         )
         snapshot = _store_preview_state(ctx, preview)
         if strict:
@@ -1731,6 +1947,7 @@ async def _sync_context_preview(
             bound_event_id=0,
             backend=current_backend,
             last_error=error.message,
+            display=default_preview_display_state(),
         )
         snapshot = _store_preview_state(ctx, preview)
         if strict:
@@ -1759,6 +1976,7 @@ async def _sync_context_preview(
             bound_event_id=active_event_id,
             backend=current_backend,
             last_error=error.message,
+            display=default_preview_display_state(),
         )
         snapshot = _store_preview_state(ctx, preview)
         if strict:
@@ -1781,6 +1999,7 @@ async def _sync_context_preview(
             bound_capture_file_id=current_capture_file_id,
             bound_event_id=active_event_id,
             last_error="",
+            display=default_preview_state(backend=current_backend, enabled=True).get("display"),
         )
         _store_preview_state(ctx, preview)
         binding = await _create_preview_binding(
@@ -1790,6 +2009,7 @@ async def _sync_context_preview(
                 backend=current_backend,
                 session_id=current_session_id,
                 event_id=active_event_id,
+                display=preview.get("display"),
             ),
         )
     elif session_changed:
@@ -1804,14 +2024,16 @@ async def _sync_context_preview(
             bound_capture_file_id=current_capture_file_id,
             bound_event_id=active_event_id,
             last_error="",
+            display=default_preview_state(backend=current_backend, enabled=True).get("display"),
         )
         _store_preview_state(ctx, preview)
 
     try:
-        await _display_preview_binding(
+        binding_result = await _display_preview_binding(
             binding,
             session_id=current_session_id,
             event_id=active_event_id,
+            force_geometry=(not had_binding) or session_changed,
         )
     except CoreError as exc:
         await _close_preview_binding(ctx)
@@ -1825,6 +2047,7 @@ async def _sync_context_preview(
             bound_event_id=active_event_id,
             backend=current_backend,
             last_error=exc.message,
+            display=default_preview_display_state(),
         )
         snapshot = _store_preview_state(ctx, preview)
         if strict:
@@ -1836,12 +2059,14 @@ async def _sync_context_preview(
     binding.bound_event_id = int(active_event_id)
     binding.backend = current_backend
     binding.last_error = ""
+    binding.display = normalize_preview_display_state(binding_result.get("display"))
     binding.host.set_title(
         _preview_title(
             ctx,
             backend=current_backend,
             session_id=current_session_id,
             event_id=active_event_id,
+            display=binding.display,
         )
     )
     rebind_count = int(preview.get("rebind_count") or 0)
@@ -1860,6 +2085,7 @@ async def _sync_context_preview(
         recovered_from_session_id=previous_session_id if previous_session_id and previous_session_id != current_session_id else "",
         rebind_count=rebind_count,
         last_error="",
+        display=binding.display,
     )
     return _store_preview_state(ctx, preview)
 
@@ -1909,6 +2135,7 @@ async def _close_context_preview(context_id: Optional[str] = None) -> Dict[str, 
             bound_event_id=0,
             recovered_from_session_id="",
             last_error="",
+            display=default_preview_display_state(),
         ),
     )
     state = _context_state(ctx)
@@ -6293,6 +6520,8 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
                             details=dict(exc.details),
                         )
         snapshot = _select_context_session_state(session_id, context_id=context_id)
+        await _auto_sync_preview_if_enabled(context_id)
+        snapshot = _context_snapshot(context_id)
         state = _context_state(context_id)
         return _ok(
             **snapshot,
@@ -6406,6 +6635,7 @@ async def _dispatch_session(action: str, args: Dict[str, Any]) -> str:
                         details={"session_id": requested_session_id, "last_error": str(session.get("last_error") or "")},
                     )
             _select_context_session_state(requested_session_id, context_id=context_id)
+        await _auto_sync_preview_if_enabled(context_id)
         state = _context_state(context_id)
         snapshot = _context_snapshot(context_id)
         return _ok(
@@ -6676,6 +6906,7 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                     else {}
                 ),
             )
+            await _auto_sync_preview_if_enabled(_runtime_context_id())
             _progress("context_synced", "Replay context synchronized", progress_pct=1.0, details={"session_id": session_info.session_id, "capture_file_id": capture_file_id})
             api_properties = {}
             try:
@@ -6735,6 +6966,7 @@ async def _dispatch_replay(action: str, args: Dict[str, Any]) -> str:
         )
         replay.active_event_id = active_event_id
         _set_context_frame(session_id, replay.frame_index, active_event_id)
+        await _auto_sync_preview_if_enabled(_runtime_context_id())
         return _ok(active_event_id=active_event_id)
 
     if action == "get_frame_info":
@@ -6813,6 +7045,7 @@ async def _dispatch_event(action: str, args: Dict[str, Any]) -> str:
         resolved_event = _require_action_event(session_id, event_id, by_event)
         await _offload(controller.SetFrameEvent, resolved_event, True)
         _store_active_event(session_id, resolved_event)
+        await _auto_sync_preview_if_enabled(_runtime_context_id())
         return _ok(active_event_id=resolved_event)
 
     if action == "get_active":

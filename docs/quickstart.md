@@ -77,6 +77,9 @@ rdx session preview off
 - preview 固定绑定当前 context 的 `current_session_id + active_event_id`。
 - `rd.session.get_context.preview` 是唯一公开状态源。
 - preview 只承担 human observer 角色，不参与 fix verification / evidence 裁决。
+- preview 默认显示完整 framebuffer / 当前 RT，不按 viewport 裁小；若当前 event 存在 viewport / scissor，会在完整 framebuffer 上做区域标识。
+- `rd.session.get_context.preview.display` 会返回 `output_slot`、`texture_id`、`framebuffer_extent`、`viewport_rect`、`scissor_rect`、`effective_region_rect`、`window_rect`、`fit_mode` 与 `screen_cap_ratio`。
+- 当 preview 已开启时，`rd.event.set_active`、`rd.replay.set_frame`、`rd.session.select_session` 与 `rd.session.resume` 会在返回前至少尝试同步一次 preview；即便预览刷新失败，也不会回滚当前 session/event/frame 的 canonical runtime truth。
 
 如果后续要把同一条链路交给上层 Agent 继续使用，建议额外查看：
 
@@ -199,6 +202,7 @@ rdx.bat --non-interactive cli --daemon-context smoke daemon status
 - daemon / worker 重启后，平台会优先使用持久化 remote 元数据恢复同一个 `session_id`；只有 endpoint 真断开、bootstrap 失败或恢复元数据不足时，才需要重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay`。
 - 对 event-bound 链路，优先显式传入 `event_id`，并检查返回里的 `resolved_event_id`；`rd.shader.debug_start`、`rd.export.shader_bundle`、`rd.pipeline.get_shader`、`rd.shader.get_reflection`、`rd.shader.get_disassembly`、`rd.texture.get_pixel_value` 都不应再静默回退到别的 event。
 - `rd.shader.compile` 需要基于当前 replay backend 选择真实可接受的 `source_encoding`；不要假设 Android remote Vulkan session 仍接受 `hlsl`，应检查 `supported_source_encodings`。
+- 若当前任务改动了 preview 的几何适配、跟随语义或窗口行为，除分层命令验证外，建议补跑 `python scripts/preview_geometry_smoke.py --local-rdc "<local.rdc>" --remote-rdc "<remote.rdc>" --transport both`。
 
 如果后续要把资源追踪结果再喂回事件链路，请额外注意：
 

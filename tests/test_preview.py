@@ -9,6 +9,7 @@ import pytest
 
 from rdx import server
 from rdx.context_snapshot import clear_context_snapshot, load_context_snapshot
+from rdx.preview_window import fit_content_rect, fit_size_within_bounds
 from rdx.runtime_state import clear_context_state, load_context_state, save_context_state
 
 
@@ -49,9 +50,13 @@ def test_context_snapshot_and_state_preview_defaults() -> None:
     assert snapshot["preview"]["view_mode"] == "active_event"
     assert snapshot["preview"]["bound_session_id"] == ""
     assert snapshot["preview"]["bound_event_id"] == 0
+    assert snapshot["preview"]["display"]["framebuffer_extent"] == {"width": 0, "height": 0}
+    assert snapshot["preview"]["display"]["viewport_rect"] is None
+    assert snapshot["preview"]["display"]["fit_mode"] == "fit_with_screen_cap"
     assert state["preview"]["enabled"] is False
     assert state["preview"]["state"] == "disabled"
     assert state["preview"]["view_mode"] == "active_event"
+    assert state["preview"]["display"]["screen_cap_ratio"] == 0.5
 
 
 def test_get_context_exposes_preview_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,6 +77,7 @@ def test_get_context_exposes_preview_defaults(monkeypatch: pytest.MonkeyPatch) -
     assert payload["data"]["preview"]["enabled"] is False
     assert payload["data"]["preview"]["state"] == "disabled"
     assert payload["data"]["preview"]["view_mode"] == "active_event"
+    assert payload["data"]["preview"]["display"]["window_rect"] == {"width": 0, "height": 0}
 
 
 def test_open_preview_rejects_non_current_session(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -228,6 +234,17 @@ def test_open_preview_respects_runtime_owner_gate(monkeypatch: pytest.MonkeyPatc
             bound_event_id=23,
             backend="local",
             last_error="",
+            display=server.server_runtime._preview_display_state(
+                output_slot=0,
+                texture_id="ResourceId::55",
+                texture_format="R8G8B8A8_UNORM",
+                framebuffer_extent={"width": 1280, "height": 720},
+                viewport_rect={"x": 10, "y": 20, "width": 640, "height": 360},
+                scissor_rect={"x": 20, "y": 30, "width": 320, "height": 180},
+                effective_region_rect={"x": 20, "y": 30, "width": 320, "height": 180},
+                region_marker_mode="viewport_scissor_overlay",
+                window_rect={"width": 640, "height": 360},
+            ),
         )
         return server.server_runtime._store_preview_state(ctx, preview)
 
@@ -273,6 +290,7 @@ def test_open_preview_respects_runtime_owner_gate(monkeypatch: pytest.MonkeyPatc
     assert allowed["ok"] is True
     assert allowed["data"]["preview"]["enabled"] is True
     assert allowed["data"]["preview"]["state"] == "live"
+    assert allowed["data"]["preview"]["display"]["output_slot"] == 0
 
 
 def test_choose_visual_output_target_uses_event_binding_texture_when_outputs_are_empty(
@@ -428,6 +446,29 @@ def test_choose_visual_output_target_defaults_to_rt0_before_visual_scoring(
     assert target_source == "event_output_slot"
 
 
+def test_preview_window_fit_helpers_cover_screen_cap_and_centering() -> None:
+    assert fit_size_within_bounds(2048, 2048, 960, 540) == (540, 540)
+    assert fit_size_within_bounds(1280, 720, 960, 540) == (960, 540)
+    assert fit_content_rect(960, 540, 2048, 2048) == {
+        "x": 210,
+        "y": 0,
+        "width": 540,
+        "height": 540,
+    }
+
+
+def test_preview_region_rects_clip_and_intersect() -> None:
+    viewport_rect, scissor_rect, effective = server.server_runtime._preview_region_rects(
+        {"width": 2048, "height": 2048},
+        viewport_rect={"x": -10, "y": 0, "width": 1034, "height": 1024},
+        scissor_rect={"x": 128, "y": 64, "width": 900, "height": 700},
+    )
+
+    assert viewport_rect == {"x": 0, "y": 0, "width": 1024, "height": 1024}
+    assert scissor_rect == {"x": 128, "y": 64, "width": 900, "height": 700}
+    assert effective == {"x": 128, "y": 64, "width": 896, "height": 700}
+
+
 def test_export_screenshot_preserves_event_binding_target_source(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -498,6 +539,205 @@ def test_export_screenshot_preserves_event_binding_target_source(
     assert payload["saved_path"] == str(saved_path)
 
 
+def test_set_active_waits_for_preview_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    server._runtime.replays = {
+        "sess_preview": server.ReplayHandle(
+            session_id="sess_preview",
+            capture_file_id="capf_preview",
+            frame_index=0,
+            active_event_id=11,
+        )
+    }
+    server.server_runtime._set_context_runtime_session(
+        "sess_preview",
+        capture_file_id="capf_preview",
+        backend_type="local",
+        frame_index=0,
+        active_event_id=11,
+    )
+
+    class _FakeController:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, bool]] = []
+
+        def SetFrameEvent(self, event_id: int, apply: bool) -> None:  # type: ignore[no-untyped-def]
+            self.calls.append((int(event_id), bool(apply)))
+
+    fake_controller = _FakeController()
+
+    async def _fake_load_action_index(session_id: str, *, controller=None):  # type: ignore[no-untyped-def]
+        action = SimpleNamespace(eventId=77, flags=0, children=[], customName="draw", name="draw")
+        return [action], [action], {77: action}
+
+    async def _fake_get_controller(session_id: str):  # type: ignore[no-untyped-def]
+        return fake_controller
+
+    async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return fn(*args, **kwargs)
+
+    preview_sync_calls: list[str] = []
+
+    async def _fake_preview_sync(context_id=None):  # type: ignore[no-untyped-def]
+        preview_sync_calls.append(str(context_id or "default"))
+
+    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(server.server_runtime, "_load_action_index", _fake_load_action_index)
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_auto_sync_preview_if_enabled", _fake_preview_sync)
+
+    payload = asyncio.run(
+        server.dispatch_operation(
+            "rd.event.set_active",
+            {"session_id": "sess_preview", "event_id": 77},
+            transport="test",
+        )
+    )
+
+    assert payload["ok"] is True
+    assert fake_controller.calls == [(77, True)]
+    assert preview_sync_calls == ["default"]
+
+
+def test_set_frame_waits_for_preview_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    server._runtime.replays = {
+        "sess_preview": server.ReplayHandle(
+            session_id="sess_preview",
+            capture_file_id="capf_preview",
+            frame_index=0,
+            active_event_id=11,
+        )
+    }
+
+    class _FakeController:
+        def GetRootActions(self):  # type: ignore[no-untyped-def]
+            return [SimpleNamespace(eventId=11, flags=0, children=[], customName="draw", name="draw")]
+
+    async def _fake_get_controller(session_id: str):  # type: ignore[no-untyped-def]
+        return _FakeController()
+
+    async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return fn(*args, **kwargs)
+
+    async def _fake_pick_previewable_default_event_id(session_id: str, actions, *, fallback_event_id=0):  # type: ignore[no-untyped-def]
+        return 11
+
+    preview_sync_calls: list[str] = []
+
+    async def _fake_preview_sync(context_id=None):  # type: ignore[no-untyped-def]
+        preview_sync_calls.append(str(context_id or "default"))
+
+    async def _fake_ensure_live_session(session_id: str):  # type: ignore[no-untyped-def]
+        return server._runtime.replays[str(session_id)]
+
+    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_pick_previewable_default_event_id", _fake_pick_previewable_default_event_id)
+    monkeypatch.setattr(server.server_runtime, "_auto_sync_preview_if_enabled", _fake_preview_sync)
+    monkeypatch.setattr(server.server_runtime, "_ensure_live_session", _fake_ensure_live_session)
+
+    payload = asyncio.run(
+        server.dispatch_operation(
+            "rd.replay.set_frame",
+            {"session_id": "sess_preview", "frame_index": 0},
+            transport="test",
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["data"]["active_event_id"] == 11
+    assert preview_sync_calls == ["default"]
+
+
+def test_select_session_waits_for_preview_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    capture_a = tmp_path / "a.rdc"
+    capture_b = tmp_path / "b.rdc"
+    capture_a.write_text("a", encoding="utf-8")
+    capture_b.write_text("b", encoding="utf-8")
+
+    server._runtime.captures = {
+        "capf_a": server.CaptureFileHandle(capture_file_id="capf_a", file_path=str(capture_a), read_only=True),
+        "capf_b": server.CaptureFileHandle(capture_file_id="capf_b", file_path=str(capture_b), read_only=True),
+    }
+    server._runtime.replays = {
+        "sess_a": server.ReplayHandle(session_id="sess_a", capture_file_id="capf_a", frame_index=0, active_event_id=11),
+        "sess_b": server.ReplayHandle(session_id="sess_b", capture_file_id="capf_b", frame_index=0, active_event_id=22),
+    }
+    server.server_runtime._set_context_runtime_session("sess_a", capture_file_id="capf_a", backend_type="local", frame_index=0, active_event_id=11)
+    server.server_runtime._set_context_runtime_session("sess_b", capture_file_id="capf_b", backend_type="local", frame_index=0, active_event_id=22)
+
+    preview_sync_calls: list[str] = []
+
+    async def _fake_preview_sync(context_id=None):  # type: ignore[no-untyped-def]
+        preview_sync_calls.append(str(context_id or "default"))
+
+    monkeypatch.setattr(server.server_runtime, "_auto_sync_preview_if_enabled", _fake_preview_sync)
+
+    payload = asyncio.run(
+        server.dispatch_operation(
+            "rd.session.select_session",
+            {"session_id": "sess_a"},
+            transport="test",
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["data"]["current_session_id"] == "sess_a"
+    assert preview_sync_calls == ["default"]
+
+
+def test_resume_waits_for_preview_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    save_context_state(
+        {
+            "context_id": "default",
+            "current_capture_file_id": "capf_preview",
+            "current_session_id": "sess_preview",
+            "captures": {
+                "capf_preview": {
+                    "capture_file_id": "capf_preview",
+                    "file_path": "C:/captures/preview.rdc",
+                    "read_only": True,
+                }
+            },
+            "sessions": {
+                "sess_preview": {
+                    "session_id": "sess_preview",
+                    "capture_file_id": "capf_preview",
+                    "rdc_path": "C:/captures/preview.rdc",
+                    "frame_index": 0,
+                    "active_event_id": 23,
+                    "backend_type": "local",
+                    "state": "active",
+                    "is_live": True,
+                }
+            },
+        },
+        "default",
+    )
+
+    async def _fake_recover_context_sessions(context_id: str):  # type: ignore[no-untyped-def]
+        return server.server_runtime._context_state(context_id)
+
+    preview_sync_calls: list[str] = []
+
+    async def _fake_preview_sync(context_id=None):  # type: ignore[no-untyped-def]
+        preview_sync_calls.append(str(context_id or "default"))
+
+    monkeypatch.setattr(server.server_runtime, "_recover_context_sessions", _fake_recover_context_sessions)
+    monkeypatch.setattr(server.server_runtime, "_auto_sync_preview_if_enabled", _fake_preview_sync)
+
+    payload = asyncio.run(
+        server.dispatch_operation(
+            "rd.session.resume",
+            {},
+            transport="test",
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["data"]["current_session_id"] == "sess_preview"
+    assert preview_sync_calls == ["default"]
+
+
 def test_preview_docs_and_catalog_are_synchronized() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     readme = (repo_root / "README.md").read_text(encoding="utf-8-sig")
@@ -508,20 +748,37 @@ def test_preview_docs_and_catalog_are_synchronized() -> None:
     tools_doc = (repo_root / "docs" / "tools.md").read_text(encoding="utf-8-sig")
     governance = (repo_root / "docs" / "doc-governance.md").read_text(encoding="utf-8-sig")
     configuration = (repo_root / "docs" / "configuration.md").read_text(encoding="utf-8-sig")
+    docs_readme = (repo_root / "docs" / "README.md").read_text(encoding="utf-8-sig")
+    android_smoke = (repo_root / "docs" / "android-remote-cli-smoke-prompt.md").read_text(encoding="utf-8-sig")
+    scripts_readme = (repo_root / "scripts" / "README.md").read_text(encoding="utf-8-sig")
+    agents = (repo_root / "AGENTS.md").read_text(encoding="utf-8-sig")
     catalog = json.loads((repo_root / "spec" / "tool_catalog.json").read_text(encoding="utf-8-sig"))
     tools = {item["name"]: item for item in catalog.get("tools") or []}
 
     assert "`rd.session.open_preview`" in readme
     assert "`rd.session.get_context.preview`" in readme
+    assert "完整 framebuffer" in readme
     assert "session preview on" in quickstart
+    assert "preview.display" in quickstart
     assert "preview" in session_model
+    assert "viewport / scissor" in session_model
     assert "`rd.session.open_preview`" in agent_model
+    assert "preview.display" in agent_model
     assert "preview 打不开或自动失效" in troubleshooting
+    assert "preview 看着不全、留黑边或像是畸形" in troubleshooting
     assert "`rd.session.open_preview`" in tools_doc
+    assert "preview.display" in tools_doc
     assert "`rd.session.open_preview`" in governance
+    assert "preview_geometry_smoke.py" in governance
     assert "preview 运行约束" in configuration
+    assert "screen_cap_ratio" in configuration
+    assert "preview_geometry_smoke.py" in docs_readme
+    assert "preview_geometry_smoke.py" in android_smoke
+    assert "preview_geometry_smoke.py" in scripts_readme
+    assert "preview / 几何观察面改动" in agents
     assert tools["rd.session.open_preview"]["group"].startswith("3.17")
     assert "preview" in tools["rd.session.get_context"]["returns_raw"]
+    assert "framebuffer_extent" in tools["rd.session.get_context"]["returns_raw"]
 
     frameworks_root = repo_root.parent / "RDC-Agent-Frameworks" / "debugger"
     if frameworks_root.is_dir():

@@ -30,6 +30,7 @@
 - remote 路径的 `remote_id` 是 context-local live handle；不能跨 context 复用，也不能把它当作可无限复用的长期句柄。
 - 长链任务如果没有 context snapshot，模型很容易忘记上一轮 focus 与 artifact 路径。
 - `rd.session.get_context.preview` 只是人类同步观察状态；它不是新的 runtime truth，不得替代 canonical `rd.*` 证据。
+- `rd.session.get_context.preview.display` 只用于向人类解释当前观察窗口显示了哪张 RT、什么 framebuffer 几何、是否存在 viewport / scissor 标识；它同样不是结构化验证输入。
 - 一个 context 现在可以持有多条本地 session 记录；如果 Agent 只记住单个 `session_id`，很容易把“当前选中 session”和“context 持有的全部 session”混为一谈。
 - 不是所有底层 RenderDoc `eventId` 都能回灌到 `rd.event.*`；上层必须区分 canonical `event_id` 与 `raw_event_id`。
 - 不要在 replay 仍存活时提前调用 `rd.capture.close_file`；推荐清理顺序是先 `rd.capture.close_replay`，再关闭对应 capture handle。
@@ -79,6 +80,8 @@
 - 如果用户要求同步观察当前 active event，可额外使用 `rd.session.open_preview` / `rd.session.close_preview`。
   - preview 只给人类看，不作为 fix verification、session truth 或 gate 输入。
   - preview 失败不会自动把 platform truth 降级成 local/framebuffer/export fallback。
+  - 对 preview 的理解应固定为“完整 framebuffer + 区域标识”的观察面，而不是“只显示 viewport 裁切结果”的证据面。
+  - 当 preview 已 enabled 时，`rd.event.set_active`、`rd.replay.set_frame`、`rd.session.select_session` 与 `rd.session.resume` 会在返回前尝试完成一次同步刷新；若刷新失败，只应把它解释为观察面失败，不应把 session/event/frame 的主真相视为回滚。
 - 多 session context 下显式选择 current session。
 - 当 `rd.session.list_sessions` 返回多条记录时，后续 inspection 前优先通过 `rd.session.select_session` 锁定当前工作面。
 - 若任务要并行拆成多条 live 链路，应显式创建和列举 context，而不是把多个 owner 塞进同一个 context。

@@ -25,6 +25,14 @@ from rdx.timeout_policy import daemon_exec_timeout_s
  
 _CATALOG_TOOLS = load_tool_catalog()
 _core_engine: Optional[CoreEngine] = None
+_PREVIEW_SELF_SYNCED_OPERATIONS = {
+    "rd.capture.open_replay",
+    "rd.event.set_active",
+    "rd.replay.set_frame",
+    "rd.session.get_context",
+    "rd.session.select_session",
+    "rd.session.resume",
+}
 
 
 def _runtime_module() -> Any:
@@ -120,7 +128,7 @@ async def dispatch_operation(
         )
         try:
             await server_runtime.ensure_context_ready(chosen_context_id)
-            if operation not in {"rd.session.open_preview", "rd.session.close_preview"}:
+            if operation not in {"rd.session.open_preview", "rd.session.close_preview"} | _PREVIEW_SELF_SYNCED_OPERATIONS:
                 await server_runtime._auto_sync_preview_if_enabled(chosen_context_id)
             payload = await _get_core_engine().execute(operation, call_args, context=ctx)
             if isinstance(payload, dict):
@@ -136,7 +144,7 @@ async def dispatch_operation(
                 trace_id=ctx.trace_id,
                 transport=ctx.transport,
             )
-        if operation not in {"rd.session.open_preview", "rd.session.close_preview"}:
+        if operation not in {"rd.session.open_preview", "rd.session.close_preview"} | _PREVIEW_SELF_SYNCED_OPERATIONS:
             await server_runtime._auto_sync_preview_if_enabled(chosen_context_id)
         server_runtime._record_operation_finish(
             chosen_context_id,

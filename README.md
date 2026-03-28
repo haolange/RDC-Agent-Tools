@@ -35,6 +35,8 @@
 - `tabular/tsv projection` 是结果展示投影，用于提升扫描效率，不是新的规范能力面，也不表示语义重要度排序。
 - `rd.session.open_preview` / `rd.session.close_preview` 只负责给人类打开或关闭 context 绑定的同步监控窗口；`rd.session.get_context.preview` 是唯一公开状态源。
 - preview 固定跟随当前 context 的 `current_session_id + active_event_id`，不是 `qrenderdoc` 替身，也不是 fix verification / evidence 输入。
+- preview 默认显示当前 event 对应的完整 framebuffer / RT，不按 viewport 裁小；若当前 event 存在 viewport / scissor，会以区域标识叠加到完整 framebuffer 上。
+- `rd.session.get_context.preview.display` 会返回人类观察面使用的几何元数据，例如 `output_slot`、`texture_id`、`texture_format`、`framebuffer_extent`、`viewport_rect`、`scissor_rect`、`effective_region_rect`、`window_rect`、`fit_mode` 与 `screen_cap_ratio`。
 - `rd.texture.get_data` 的默认语义是数值 readback 容器，不是图片导出。
 - 需要直接打开的纹理图片时，统一使用 `rd.export.texture`。
 - `runtime_mode_truth.json` 只定义 transport/runtime ceiling，不定义平台是否具备 team agents。
@@ -140,6 +142,8 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - 人类同步监控窗口固定通过 `rd.session.open_preview` 建立，并把状态写入 `rd.session.get_context.preview`。
 - preview 是 context 级 enabled intent：session 切换、resume、replay 重建后会自动重绑；`rd.session.close_preview`、`rd.core.shutdown` 与 `rdx context clear` 会关闭窗口并清掉该 intent。
 - preview 不允许 silent fallback：不能悄悄从 remote 掉回 local，也不能悄悄从 `active_event` 退回 frame-end framebuffer 或导出轮询。
+- 当 preview 已 enabled 时，`rd.event.set_active`、`rd.replay.set_frame`、`rd.session.select_session` 与 `rd.session.resume` 会在返回前至少完成一次 preview 同步刷新尝试；若刷新失败，只更新 `rd.session.get_context.preview` 的状态与错误，不回滚 canonical runtime truth。
+- preview 窗口会按当前 framebuffer 几何自动调整大小，并把默认上限限制在当前屏幕工作区的 `50%`；若用户手动拖拽过窗口，在 framebuffer 几何不变时不会被持续抢改。
 - 一个 context 现在可持有多条本地 session 记录；`rd.session.get_context` 会同时返回 `current_session_id`、`sessions`、`recovery`、`limits` 与 `recent_operations`。
 - 现已公开 `rd.session.create_context`、`rd.session.list_contexts`、`rd.session.select_context`、`rd.session.clear_context`，把 multi-context 变成正式 public surface，而不是 CLI 侧隐式约定。
 - 现已公开 `rd.session.claim_runtime_owner` / `rd.session.release_runtime_owner`；当 context 已 claim owner 时，live `rd.*` 调用必须提供匹配的 `runtime_owner` 与 `owner_lease_id`，否则返回 `runtime_owner_conflict`。
@@ -189,6 +193,7 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - 继续通过显式参数把外部 `.rdc` 样本传给 `tool_contract_check.py`
 - 若同时做 Android remote matrix，`tool_contract_check.py` 当前默认通过 `rd.remote.connect(options.transport="adb_android")` 走仓库内置 `adb` bootstrap；如需改成裸 `renderdoc` remote，可显式设置 `RDX_REMOTE_CONNECT_TRANSPORT=renderdoc`
 - 如果本轮只做 Android remote-only 全量验证，可直接运行 `python scripts/tool_contract_remote_smoke.py --rdc "<sample.rdc>" --transport <daemon|mcp|both>`
+- 如果本轮改动影响 preview 的几何适配、窗口行为、display metadata 或 event 跟随语义，可额外运行 `python scripts/preview_geometry_smoke.py --local-rdc "<local.rdc>" --remote-rdc "<remote.rdc>" --transport both`
 - 生成当前 `rdx_bat_command_smoke.*`、`tool_contract_report.*`、`rdx_smoke_issues_blockers.md`、`rdx_smoke_detailed_report.md`
 - 再执行 `python scripts/release_gate.py --require-smoke-reports`
 

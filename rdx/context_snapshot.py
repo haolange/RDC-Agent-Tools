@@ -46,6 +46,87 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _normalize_rect(value: Any) -> Dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        x = int(round(float(value.get("x", 0))))
+        y = int(round(float(value.get("y", 0))))
+        width = int(round(float(value.get("width", 0))))
+        height = int(round(float(value.get("height", 0))))
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+    }
+
+
+def _normalize_extent(value: Any) -> Dict[str, int]:
+    if not isinstance(value, dict):
+        return {"width": 0, "height": 0}
+    try:
+        width = max(0, int(round(float(value.get("width", 0)))))
+        height = max(0, int(round(float(value.get("height", 0)))))
+    except (TypeError, ValueError):
+        return {"width": 0, "height": 0}
+    return {
+        "width": width,
+        "height": height,
+    }
+
+
+def default_preview_display_state() -> Dict[str, Any]:
+    return {
+        "output_slot": None,
+        "texture_id": "",
+        "texture_format": "",
+        "framebuffer_extent": {"width": 0, "height": 0},
+        "viewport_rect": None,
+        "scissor_rect": None,
+        "effective_region_rect": None,
+        "region_marker_mode": "none",
+        "window_rect": {"width": 0, "height": 0},
+        "fit_mode": "fit_with_screen_cap",
+        "screen_cap_ratio": 0.5,
+    }
+
+
+def normalize_preview_display_state(value: Any) -> Dict[str, Any]:
+    payload = default_preview_display_state()
+    if not isinstance(value, dict):
+        return payload
+    output_slot = value.get("output_slot")
+    if output_slot is None or output_slot == "":
+        normalized_output_slot = None
+    else:
+        normalized_output_slot = _normalize_int(output_slot)
+    try:
+        screen_cap_ratio = float(value.get("screen_cap_ratio") or 0.5)
+    except (TypeError, ValueError):
+        screen_cap_ratio = 0.5
+    payload.update(
+        {
+            "output_slot": normalized_output_slot,
+            "texture_id": str(value.get("texture_id") or "").strip(),
+            "texture_format": str(value.get("texture_format") or "").strip(),
+            "framebuffer_extent": _normalize_extent(value.get("framebuffer_extent")),
+            "viewport_rect": _normalize_rect(value.get("viewport_rect")),
+            "scissor_rect": _normalize_rect(value.get("scissor_rect")),
+            "effective_region_rect": _normalize_rect(value.get("effective_region_rect")),
+            "region_marker_mode": str(value.get("region_marker_mode") or "none").strip() or "none",
+            "window_rect": _normalize_extent(value.get("window_rect")),
+            "fit_mode": str(value.get("fit_mode") or "fit_with_screen_cap").strip() or "fit_with_screen_cap",
+            "screen_cap_ratio": screen_cap_ratio,
+        }
+    )
+    return payload
+
+
 def default_preview_state(*, backend: str = "local", enabled: bool = False) -> Dict[str, Any]:
     return {
         "enabled": bool(enabled),
@@ -58,6 +139,7 @@ def default_preview_state(*, backend: str = "local", enabled: bool = False) -> D
         "recovered_from_session_id": "",
         "rebind_count": 0,
         "last_error": "",
+        "display": default_preview_display_state(),
         "updated_at_ms": _now_ms(),
     }
 
@@ -82,6 +164,7 @@ def normalize_preview_state(value: Any, *, backend: str = "local") -> Dict[str, 
             "recovered_from_session_id": str(value.get("recovered_from_session_id") or "").strip(),
             "rebind_count": max(0, _normalize_int(value.get("rebind_count"))),
             "last_error": str(value.get("last_error") or "").strip(),
+            "display": normalize_preview_display_state(value.get("display")),
             "updated_at_ms": _normalize_int(value.get("updated_at_ms"), _now_ms()),
         }
     )

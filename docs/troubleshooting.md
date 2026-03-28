@@ -39,7 +39,7 @@ rdx context clear
 
 ## `scripts/` 主链
 
-优先使用正式支持的脚本主链：`scripts/check_markdown_health.py`、`scripts/release_gate.py`、`scripts/rdx_bat_command_smoke.py`、`scripts/tool_contract_check.py`、`scripts/tool_contract_remote_smoke.py`、`scripts/smoke_report_aggregator.py`、`scripts/package_runtime.py`、`scripts/cleanup_workspace.py`。
+优先使用正式支持的脚本主链：`scripts/check_markdown_health.py`、`scripts/release_gate.py`、`scripts/rdx_bat_command_smoke.py`、`scripts/tool_contract_check.py`、`scripts/tool_contract_remote_smoke.py`、`scripts/preview_geometry_smoke.py`、`scripts/smoke_report_aggregator.py`、`scripts/package_runtime.py`、`scripts/cleanup_workspace.py`。
 不要把一次性调查脚本或个人调试脚本视为受支持的仓库接口。详见 [../scripts/README.md](../scripts/README.md)。
 
 ## `rdx.bat --non-interactive` 现在怎么走
@@ -88,16 +88,38 @@ rdx.bat --non-interactive mcp --ensure-env
 - `rd.session.get_context.preview.state`
 - `rd.session.get_context.preview.last_error`
 - `rd.session.get_context.runtime.active_event_id`
+- `rd.session.get_context.preview.display`
 
 当前固定语义：
 
 - preview 只跟随当前 context 的 `current_session_id + active_event_id`
+- preview 默认显示完整 framebuffer / RT，不按 viewport 裁小
+- 若当前 event 存在 viewport / scissor，会在完整 framebuffer 上做区域标识
 - preview 不允许 silent fallback
   - 不会悄悄从 remote 退回 local
   - 不会悄悄从 `active_event` 退回 frame-end framebuffer
   - 不会悄悄改成导出图片/轮询截图式伪预览
 
 因此，`preview.state=failed|stale` 时，应优先修 session / event / backend 条件，而不是把窗口输出当成平台主真相。
+
+## preview 看着不全、留黑边或像是畸形
+
+优先检查：
+
+- `rd.session.get_context.preview.display.framebuffer_extent`
+- `rd.session.get_context.preview.display.viewport_rect`
+- `rd.session.get_context.preview.display.scissor_rect`
+- `rd.session.get_context.preview.display.effective_region_rect`
+- `rd.session.get_context.preview.display.window_rect`
+- `rd.session.get_context.preview.display.fit_mode`
+
+当前固定语义：
+
+- preview 显示的是完整 framebuffer / RT，不是默认按 viewport 裁小后的图。
+- 若当前 event 只在 framebuffer 的部分区域写入，窗口上会显示 viewport / scissor 的区域标识；其余区域为空并不一定是 preview 出错。
+- 窗口会按 framebuffer 几何自动调整大小，并把默认上限限制在当前屏幕工作区的 `50%`。
+- 若用户手动拖拽过窗口，在 framebuffer 几何不变时，后续 event 跟随不会持续把窗口抢回默认尺寸。
+- 当 preview 已 enabled 时，`rd.event.set_active`、`rd.replay.set_frame`、`rd.session.select_session` 与 `rd.session.resume` 会在返回前至少尝试同步一次 preview；如果刷新失败，只更新 preview 状态，不回滚当前 session/event/frame 的主真相。
 
 ## replay crash 后 preview 变成 `stale` / `reconnecting`
 

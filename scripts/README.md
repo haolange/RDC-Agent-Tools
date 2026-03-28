@@ -33,6 +33,11 @@
   - Android remote-only catalog 全量 smoke 正式入口。
   - 包装 `tool_contract_check.py --remote-only`，统一 `--rdc`、`--transport`、`--daemon-context-prefix`、`--artifact-dir`、`--out-json`、`--out-md` 入参。
   - 适用于“同一份 `.rdc` 同时作为 `capture open_file` 与 remote `open_replay` 样本”的正式 remote-only 验证。
+- `preview_geometry_smoke.py`
+  - preview observer 的正式几何 smoke 入口。
+  - 只验证 context 绑定 preview 的完整 framebuffer 观察语义、viewport/scissor 标识、窗口几何自适配与 local/remote 跟随行为，不引入第二套平台接口。
+  - 支持 `--local-rdc`、`--remote-rdc`、`--transport`、`--artifact-dir`、`--out-json`、`--out-md`、`--daemon-context-prefix`、`--hop-delay-ms`、`--remote-device-serial`。
+  - 可额外抓桌面全屏截图与 preview 窗口裁切图；这些图片只属于 smoke companion 证据，不进入平台真相或 release gate 主裁决链。
 - `smoke_report_aggregator.py`
   - 聚合 blockers / detailed 汇总报告。
   - 输入 `rdx_bat_command_smoke.json` 与 `tool_contract_report.json`，输出当前 markdown 汇总报告。

@@ -27,7 +27,7 @@
 11. [compatibility-notes.md](compatibility-notes.md)
    查看当前兼容边界、分发定位与上层接线约束。
 12. [../scripts/README.md](../scripts/README.md)
-   查看正式 `scripts/` 主链与治理规则，以及 `tool_contract_check.py` / `tool_contract_remote_smoke.py` 的 remote smoke 入口、默认值 / 覆盖方式和 `release_gate.py --require-smoke-reports` 的当前真门禁口径。
+   查看正式 `scripts/` 主链与治理规则，以及 `tool_contract_check.py` / `tool_contract_remote_smoke.py` / `preview_geometry_smoke.py` 的 smoke 入口、默认值 / 覆盖方式和 `release_gate.py --require-smoke-reports` 的当前真门禁口径。
 
 ## 文档边界
 

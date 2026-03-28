@@ -163,6 +163,7 @@
 - 如需生成 blockers / detailed 汇总，可在 `tool_contract_check.py` 之后补跑 `python scripts/smoke_report_aggregator.py --command-json "<command_json>" --tool-json "<tool_json>" --out "<out_md>"`。
 - 若本轮目标包含发布门禁确认，再补跑 `python scripts/release_gate.py --require-smoke-reports`；当前该门禁会读取 smoke truth，而不只是检查报告文件是否存在。
 - 正式支持的脚本集合以 [`../scripts/README.md`](../scripts/README.md) 为准，不依赖任何专项调查脚本或历史一次性大脚本。
+- 如果本轮改动影响 preview 的几何适配、窗口行为、display metadata 或 event 跟随语义，除前述分层验证外，还应额外补跑 `python scripts/preview_geometry_smoke.py --local-rdc "<local_sample>" --remote-rdc "<remote_sample_or同一文件>" --transport both`，并把桌面全屏截图 / preview 窗口裁切图只作为本轮 smoke 的人工复核证据，不提升为平台真相。
 - 这一层的目标不是“只跑完命令”，而是必须把 catalog 当前全量 tools 的结果分清楚：
   - `pass`
   - `issue`

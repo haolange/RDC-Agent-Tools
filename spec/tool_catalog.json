@@ -4419,7 +4419,7 @@
       "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
       "description": "读取当前 context 快照与持久化状态索引，返回 runtime、remote、focus、session 表、恢复信息、最近操作与限制配置。",
       "parameter_raw": "context_id (str, optional): choose the context to use; defaults to the current daemon context",
-      "returns_raw": "ok (bool)<br>data (dict): {context_id, entry_mode, backend, runtime_parallelism_ceiling, session_locator, runtime, remote, focus, last_artifacts, preview, current_session_id, sessions, recovery, limits, active_operation, recent_operations, runtime_owner, owner_lease, active_baton, rehydrate_status, updated_at_ms, remote_capability_matrix, remote_context_locality, remote_handle_origin_context, remote_handle_reuse_policy}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)",
+      "returns_raw": "ok (bool)<br>data (dict): {context_id, entry_mode, backend, runtime_parallelism_ceiling, session_locator, runtime, remote, focus, last_artifacts, preview{enabled,state,view_mode,bound_session_id,bound_capture_file_id,bound_event_id,backend,recovered_from_session_id,rebind_count,last_error,display{output_slot,texture_id,texture_format,framebuffer_extent,viewport_rect,scissor_rect,effective_region_rect,region_marker_mode,window_rect,fit_mode,screen_cap_ratio},updated_at_ms}, current_session_id, sessions, recovery, limits, active_operation, recent_operations, runtime_owner, owner_lease, active_baton, rehydrate_status, updated_at_ms, remote_capability_matrix, remote_context_locality, remote_handle_origin_context, remote_handle_reuse_policy}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)",
       "param_names": [
         "context_id"
       ],
@@ -4441,7 +4441,7 @@
     {
       "name": "rd.session.open_preview",
       "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
-      "description": "为当前 context 的 current session 打开或重绑定一个面向人类同步监控的 active-event preview 窗口；它是纯观察面，不替代 canonical `rd.*` 调试真相。",
+      "description": "为当前 context 的 current session 打开或重绑定一个面向人类同步监控的 active-event preview 窗口；它是纯观察面，不替代 canonical `rd.*` 调试真相。preview 默认显示当前 event 的完整 framebuffer / RT，并在存在 viewport/scissor 时叠加区域标识。",
       "parameter_raw": "session_id (str, optional): must match the current context session; otherwise select it first via `rd.session.select_session`<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
       "returns_raw": "ok (bool)<br>data (dict): {context_id, current_session_id, runtime, preview, updated_at_ms}<br>artifacts (list)<br>error (dict|null): truthful-fail when current session is missing, non-live, active_event is unresolved, or the backend cannot provide strict active-event preview<br>meta (dict)<br>projections (dict, optional)",
       "param_names": [

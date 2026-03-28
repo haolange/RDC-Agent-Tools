@@ -50,6 +50,10 @@
 - preview 只服务 Windows 本地可视化监控，不额外引入跨平台 UI 抽象。
 - preview 是 worker-owned 的人类观察窗口，不是 artifact，也不是新的持久化对象类型。
 - `rd.session.get_context.preview` 只暴露状态，不额外引入 `preview_id` 或第二套资源命名空间。
+- preview 默认显示完整 framebuffer / 当前 RT，不按 viewport 裁小；若当前 event 存在 viewport / scissor，会在完整 framebuffer 上做区域标识。
+- `rd.session.get_context.preview.display.fit_mode` 固定为 `fit_with_screen_cap`，`screen_cap_ratio` 当前固定为 `0.5`。
+- preview 窗口会按 framebuffer 几何自动调整大小，但默认上限不超过当前屏幕工作区的 `50%`。
+- 若用户手动拖拽过窗口，在 framebuffer 几何不变时不会被持续抢改；只有首次打开、session 改变或 framebuffer 几何变化时才会重新套用默认窗口尺寸。
 - `rdx daemon stop` / worker 重启会关闭 live preview 窗口，但默认保留该 context 的 preview enabled intent。
 - `rd.session.close_preview`、`rd.core.shutdown` 与 `rdx context clear` 会关闭窗口并清掉该 intent。
 

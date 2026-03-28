@@ -121,6 +121,7 @@
 - 如果文档写到 remote session 恢复，必须说明“优先复用原 `session_id`”与“只有 endpoint 真断开、bootstrap 失败或恢复元数据缺失时才显式 `degraded`”。
 - 如果 catalog 已公开 `rd.session.get_context` / `rd.session.update_context`，核心文档中必须能找到它们的角色说明。
 - 如果 catalog 已公开 `rd.session.open_preview` / `rd.session.close_preview`，核心文档中必须写清 preview 是 human observer、`rd.session.get_context.preview` 是唯一公开状态源，以及它不进入 fix verification / evidence 裁决链。
+- 如果 catalog 已公开 `rd.session.get_context.preview.display`，核心文档中必须写清这些几何字段只属于 human observer surface，不升级成 gate / evidence / verification 真相。
 - 如果 catalog 已公开 `rd.session.list_sessions` / `rd.session.select_session` / `rd.session.resume`，核心文档中必须说明“一个 context 可持有多条 session 记录”和“`current_session_id` 只表示当前工作面”。
 - 如果 catalog 已公开 `rd.core.get_operation_history` / `rd.core.get_runtime_metrics` / `rd.core.list_tools` / `rd.core.search_tools` / `rd.core.get_tool_graph`，核心文档中必须说明它们的 discovery / observability 职责边界。
 - 如果文档写到 `event_id`，必须区分 canonical action event 与底层 `raw_event_id`；不得暗示任意 RenderDoc 原始 `eventId` 都能直接喂回 `rd.event.set_active`。
@@ -164,17 +165,19 @@ python mcp/run_mcp.py --help
 
 4. 若改动影响 `.rdc` 会话链路，再顺序验证一次最小链路。
 5. 若改动影响 remote / bootstrap / transport，再按需要参考 `docs/android-remote-cli-smoke-prompt.md` 组织更完整的 smoke / contract 流程。
-6. 若改动影响本地 smoke / release gate，再补一轮真实 local-only smoke：
+6. 若改动影响 preview 的几何适配、窗口行为、display metadata 或 event 跟随语义，再补一轮真实 local/remote preview companion smoke。
+7. 若改动影响本地 smoke / release gate，再补一轮真实 local-only smoke：
 
 ```bat
 python scripts/rdx_bat_command_smoke.py
 python scripts/tool_contract_check.py --local-rdc <external-rdc> --skip-remote --transport both
 python scripts/tool_contract_remote_smoke.py --rdc <external-rdc> --transport both
+python scripts/preview_geometry_smoke.py --local-rdc <local-rdc> --remote-rdc <remote-rdc> --transport both
 python scripts/smoke_report_aggregator.py --command-json intermediate/logs/rdx_bat_command_smoke.json --tool-json intermediate/logs/tool_contract_report.json --out intermediate/logs/rdx_smoke_issues_blockers.md
 python scripts/release_gate.py --require-smoke-reports
 ```
 
-7. 最后在交付说明中说明更新范围、无需更新项、验证范围与清理结果。
+8. 最后在交付说明中说明更新范围、无需更新项、验证范围与清理结果。
 
 ## 7. 自动检查与人工审阅的分工
 
