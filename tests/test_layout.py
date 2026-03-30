@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -83,6 +83,7 @@ def test_required_directories_exist() -> None:
         ROOT / "policy",
         ROOT / "docs",
         ROOT / "tests",
+        ROOT / "binaries" / "windows" / "x64" / "python",
         ROOT / "binaries" / "windows" / "x64" / "pymodules",
         ROOT / "intermediate" / "runtime" / "rdx_cli",
         ROOT / "intermediate" / "runtime" / "worker-cache",
@@ -93,3 +94,31 @@ def test_required_directories_exist() -> None:
     ]
     for p in required:
         assert p.is_dir(), str(p)
+
+
+def test_runtime_manifest_declares_bundled_python_and_worker_materialize_flags() -> None:
+    manifest = ROOT / "binaries" / "windows" / "x64" / "manifest.runtime.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    files = payload.get("files")
+    assert isinstance(files, list) and files
+
+    bundled_python = payload.get("bundled_python")
+    assert isinstance(bundled_python, dict)
+    for key in (
+        "python_version",
+        "python_entry",
+        "pythonw_entry",
+        "python3_dll",
+        "python_dll",
+        "stdlib_layout",
+        "site_packages",
+        "dll_dir",
+        "pth_file",
+    ):
+        assert str(bundled_python.get(key) or "").strip(), key
+
+    indexed = {str(item.get("path") or ""): item for item in files if isinstance(item, dict)}
+    assert indexed[str(bundled_python["python_entry"])] ["worker_materialize"] is False
+    assert indexed[str(bundled_python["python_dll"])] ["worker_materialize"] is False
+    assert indexed["renderdoc.dll"]["worker_materialize"] is True
+    assert indexed["pymodules/renderdoc.pyd"]["worker_materialize"] is True

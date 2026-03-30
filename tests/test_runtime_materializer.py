@@ -19,14 +19,19 @@ def _sha256(path: Path) -> str:
 def _prepare_source(tmp_path: Path) -> Path:
     bin_root = tmp_path / "tools" / "binaries" / "windows" / "x64"
     pymod_root = bin_root / "pymodules"
+    python_root = bin_root / "python"
     pymod_root.mkdir(parents=True, exist_ok=True)
+    python_root.mkdir(parents=True, exist_ok=True)
     files = {
-        "renderdoc.dll": b"renderdoc-dll",
-        "renderdoc.json": b"{}",
-        "pymodules/renderdoc.pyd": b"renderdoc-pyd",
+        "renderdoc.dll": (b"renderdoc-dll", True),
+        "renderdoc.json": (b"{}", True),
+        "pymodules/renderdoc.pyd": (b"renderdoc-pyd", True),
+        "python/python.exe": (b"python-exe", False),
+        "python/python314.dll": (b"python-dll", False),
     }
     entries = []
-    for rel, content in files.items():
+    for rel, payload in files.items():
+        content, worker_materialize = payload
         path = bin_root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
@@ -35,10 +40,29 @@ def _prepare_source(tmp_path: Path) -> Path:
                 "path": rel.replace("\\", "/"),
                 "size": len(content),
                 "sha256": _sha256(path),
+                "worker_materialize": worker_materialize,
             }
         )
     (bin_root / "manifest.runtime.json").write_text(
-        json.dumps({"file_count": len(entries), "files": entries}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {
+                "file_count": len(entries),
+                "files": entries,
+                "bundled_python": {
+                    "python_version": "3.14.3",
+                    "python_entry": "python/python.exe",
+                    "pythonw_entry": "python/pythonw.exe",
+                    "python3_dll": "python/python3.dll",
+                    "python_dll": "python/python314.dll",
+                    "stdlib_layout": "python/Lib",
+                    "site_packages": "python/Lib/site-packages",
+                    "dll_dir": "python/DLLs",
+                    "pth_file": "python/python314._pth",
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
     return bin_root
@@ -59,6 +83,7 @@ def test_materialize_runtime_is_stable_and_copies_files(tmp_path: Path, monkeypa
     assert first.cache_root == second.cache_root
     assert (first.binaries_dir / "renderdoc.dll").read_bytes() == b"renderdoc-dll"
     assert (first.pymodules_dir / "renderdoc.pyd").read_bytes() == b"renderdoc-pyd"
+    assert not (first.cache_root / "python" / "python.exe").exists()
     assert (first.cache_root / ".materialized.json").is_file()
 
 

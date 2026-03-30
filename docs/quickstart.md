@@ -9,11 +9,12 @@
 在仓库根目录执行：
 
 ```bat
-python cli/run_cli.py --help
-python mcp/run_mcp.py --help
-python spec/validate_catalog.py
 rdx.bat --non-interactive cli --help
+rdx.bat --non-interactive mcp --ensure-env
+python spec/validate_catalog.py
 ```
+
+默认用户路径只验证 `rdx.bat`。直接 `python ...` 入口仅保留给维护者回归与排障。
 
 如果以上命令都可运行，再继续下面的 `CLI` 或 `MCP` 路径。
 
@@ -125,7 +126,7 @@ rdx context clear
 
 ## 3. 对接 `MCP` client
 
-`MCP` 入口适合无法直接进入本地环境的外部 `MCP` client / Agent，或用户明确要求按 `MCP` 接入的场景。你可以通过 launcher 启动，也可以直接用脚本启动。
+`MCP` 入口适合无法直接进入本地环境的外部 `MCP` client / Agent，或用户明确要求按 `MCP` 接入的场景。你可以通过 launcher 启动；终端用户默认不需要先安装系统 `Python`。
 
 在进入任一路径前，建议先明确两件事：
 
@@ -135,7 +136,7 @@ rdx context clear
 ### 先做环境检查
 
 ```bat
-python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
+rdx.bat --non-interactive mcp --ensure-env --daemon-context smoke-test
 ```
 
 ### 通过 launcher 启动
@@ -153,11 +154,13 @@ rdx.bat
   - 会显示 `http://<host>:<port>`。
   - 适合通过 HTTP 访问。
 
-### 直接启动脚本
+### 直接走正式非交互入口
 
 ```bat
-python mcp/run_mcp.py --transport streamable-http --host 127.0.0.1 --port 8765 --daemon-context smoke-test
+rdx.bat --non-interactive mcp --transport streamable-http --host 127.0.0.1 --port 8765 --daemon-context smoke-test
 ```
+
+如需源码维护排障，才继续直接调用 `python mcp/run_mcp.py ...`。
 
 如需通过 launcher 直接走当前正式非交互 `CLI` passthrough，也可以执行：
 

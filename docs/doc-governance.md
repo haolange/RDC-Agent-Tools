@@ -141,9 +141,10 @@
 - 结构校验通过率
   - `python scripts/check_markdown_health.py` 必须 100% 通过。
 - 入口一致性校验
+  - `rdx.bat --non-interactive cli --help`
+  - `rdx.bat --non-interactive mcp --ensure-env`
   - `python spec/validate_catalog.py`
-  - `python cli/run_cli.py --help`
-  - `python mcp/run_mcp.py --help`
+  - 维护态可额外回归 `python cli/run_cli.py --help` 与 `python mcp/run_mcp.py --help`
   - 以上命令在相关改动下必须通过。
 - 会话链路验证
   - 涉及 session、daemon、context 的改动，必须至少有 1 条顺序链路验证记录。
@@ -155,13 +156,14 @@
 1. 先判断这次功能改动触发了哪类文档责任。
 2. 再更新相关文档，而不是只改单一主文档。
 3. 然后运行文档检查与入口检查：
-
 ```bat
 python scripts/check_markdown_health.py
 python spec/validate_catalog.py
-python cli/run_cli.py --help
-python mcp/run_mcp.py --help
+rdx.bat --non-interactive cli --help
+rdx.bat --non-interactive mcp --ensure-env
 ```
+
+若本轮还需要做源码维护回归，再额外执行 `python cli/run_cli.py --help` 与 `python mcp/run_mcp.py --help`。
 
 4. 若改动影响 `.rdc` 会话链路，再顺序验证一次最小链路。
 5. 若改动影响 remote / bootstrap / transport，再按需要参考 `docs/android-remote-cli-smoke-prompt.md` 组织更完整的 smoke / contract 流程。

@@ -7,8 +7,8 @@
 - 当前主支持运行时：`Windows`
 - 当前主入口：
   - `rdx.bat`
-  - `cli/run_cli.py`
-  - `mcp/run_mcp.py`
+  - `rdx.bat --non-interactive ...`
+- `cli/run_cli.py` 与 `mcp/run_mcp.py` 继续保留给源码维护与调试，不再是终端用户主入口。
 - `CLI` 与 `MCP` 都是 daemon-backed adapter；当前不再公开 direct runtime 执行模式。
 - `spec/tool_catalog.json` 当前公开的规范 `rd.*` tools 数量以 `tool_count` 字段为准。
 - `rd.vfs.*` 当前属于 read-only、JSON-first 导航层；它适合探索与浏览结构，不保证覆盖全部精细控制语义；需要精确分析时应回到 canonical `rd.*`。

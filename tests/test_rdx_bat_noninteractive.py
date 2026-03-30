@@ -19,16 +19,21 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
+def _cmd_exe() -> str:
+    system_root = str(os.environ.get("SystemRoot") or r"C:\Windows")
+    return str(Path(system_root) / "System32" / "cmd.exe")
+
+
 def _launcher_env() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("RDX_TOOLS_ROOT", str(ROOT))
-    env["RDX_PYTHON"] = sys.executable
+    env.pop("RDX_PYTHON", None)
     return env
 
 
 def _run_bat(*args: str) -> tuple[int, dict, str]:
     proc = subprocess.run(
-        ["cmd", "/c", "rdx.bat", *args],
+        [_cmd_exe(), "/c", "rdx.bat", *args],
         cwd=str(ROOT),
         capture_output=True,
         text=True,
@@ -86,6 +91,19 @@ def test_noninteractive_capture_status_returns_full_payload() -> None:
     assert isinstance(payload.get("data"), dict)
     assert payload["data"]["context_id"] == context_id
     assert isinstance(payload["data"].get("context"), dict)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="rdx.bat launcher tests are windows-specific")
+def test_noninteractive_mcp_ensure_env_reports_bundled_python() -> None:
+    code, payload, _ = _run_bat("--non-interactive", "mcp", "--ensure-env")
+
+    assert code == 0
+    assert payload["ok"] is True
+    details = payload["details"]
+    python_details = details["python"]
+    bundled = python_details["bundled_python"]
+    assert bundled["python_entry"].endswith("python.exe")
+    assert bundled["python_version"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="rdx.bat launcher tests are windows-specific")

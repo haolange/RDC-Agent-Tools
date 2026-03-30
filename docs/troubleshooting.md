@@ -52,7 +52,7 @@ rdx.bat --non-interactive cli --daemon-context smoke daemon status
 rdx.bat --non-interactive mcp --ensure-env
 ```
 
-旧的 `cli-shell` / `daemon-shell` alias 已移除；如需直接执行本地命令，请走 `cli` passthrough，或直接调用 `python cli/run_cli.py ...`。
+旧的 `cli-shell` / `daemon-shell` alias 已移除；终端用户如需直接执行本地命令，优先继续走 `rdx.bat --non-interactive cli ...`。`python cli/run_cli.py ...` 仅保留给维护者排障。
 
 补充说明：
 
@@ -266,14 +266,16 @@ daemon-backed `CLI` / `MCP` 超时不再只返回裸字符串。
 `--daemon-context` 是顶层参数，必须放在子命令前：
 
 ```bat
-python cli/run_cli.py --daemon-context smoke daemon status
+rdx.bat --non-interactive cli --daemon-context smoke daemon status
 ```
 
 而不是：
 
 ```bat
-python cli/run_cli.py daemon status --daemon-context smoke
+rdx.bat --non-interactive cli daemon status --daemon-context smoke
 ```
+
+这条错误示例仍然成立：`--daemon-context` 必须放在 `cli` 子命令参数前。
 
 后者会被 argparse 识别为非法参数位置。
 
@@ -303,7 +305,7 @@ python cli/run_cli.py daemon status --daemon-context smoke
 rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --json --connect
 ```
 
-如果你在 PowerShell 里直接调用 `python cli/run_cli.py ...`，需要根据 PowerShell 的转义规则重新组织 JSON 字符串。当前更稳定的跨 shell 入口是 `--args-file`。优先建议：
+如果你在 PowerShell 里通过 `rdx.bat --non-interactive cli ...` 执行，优先继续使用 `--args-file`，避免 shell quoting 差异。只有在源码维护排障时，才继续直接调用 `python cli/run_cli.py ...`。优先建议：
 
 - 先使用 `rdx.bat` 的 `Start CLI`
 - 或把 JSON 写入 UTF-8 文件后，通过 `--args-file <path>` 传参
@@ -314,7 +316,7 @@ rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --
 ```powershell
 $argsFile = Join-Path $PWD "args.json"
 Set-Content -LiteralPath $argsFile -Encoding utf8 -Value '{"session_id":"<session_id>"}'
-python cli/run_cli.py call rd.session.get_context --args-file $argsFile --format json
+rdx.bat --non-interactive cli call rd.session.get_context --args-file $argsFile --format json
 ```
 
 ## `remote_handle_consumed` 是什么

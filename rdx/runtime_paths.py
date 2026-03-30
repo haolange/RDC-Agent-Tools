@@ -62,6 +62,14 @@ def binaries_root() -> Path:
     return tools_root() / "binaries" / "windows" / "x64"
 
 
+def bundled_python_root() -> Path:
+    """Directory containing the bundled CPython runtime for Windows users."""
+    return binaries_root() / "python"
+
+
+def bundled_python_executable() -> Path:
+    return bundled_python_root() / "python.exe"
+
 
 def android_binaries_root() -> Path:
     """Directory containing packaged Android `RenderDocCmd` APKs."""

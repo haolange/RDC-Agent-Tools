@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -16,6 +17,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parents[1]
 if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
+from rdx.python_runtime import validate_bundled_python_layout
 from scripts._shared import load_json, run_subprocess, tools_root, write_text
 
 
@@ -27,6 +29,7 @@ REQUIRED_DIRS = [
     "policy",
     "docs",
     "tests",
+    "binaries/windows/x64/python",
     "binaries/windows/x64/pymodules",
     "intermediate/runtime/rdx_cli",
     "intermediate/runtime/worker-cache",
@@ -71,9 +74,24 @@ TEXT_SCAN_SUFFIXES = {
 }
 SCAN_SKIP_PREFIXES = {
     ".git/",
+    ".venv/",
+    "binaries/windows/x64/manifest.runtime.json",
+    "binaries/windows/x64/python/",
     "intermediate/",
     "tests/",
 }
+USER_DOCS = [
+    "README.md",
+    "docs/quickstart.md",
+    "docs/configuration.md",
+    "docs/troubleshooting.md",
+    "docs/compatibility-notes.md",
+]
+USER_PATH_FORBIDDEN_RULES = (
+    re.compile(r"\buv\s+sync\b", re.IGNORECASE),
+    re.compile(r"python\s+-m\s+venv", re.IGNORECASE),
+    re.compile(r"pip\s+install", re.IGNORECASE),
+)
 
 
 @dataclass(frozen=True)
@@ -84,6 +102,17 @@ class ScanRule:
 
 def _tools_root() -> Path:
     return tools_root(__file__)
+
+
+def _cmd_exe() -> str:
+    system_root = str(os.environ.get("SystemRoot") or r"C:\Windows")
+    return str(Path(system_root) / "System32" / "cmd.exe")
+
+
+def _launcher_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("RDX_PYTHON", None)
+    return env
 
 
 def _sha256(path: Path) -> str:
@@ -97,11 +126,15 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _run(cmd: list[str], cwd: Path) -> tuple[bool, str]:
-    code, out, err = run_subprocess(cmd, cwd=cwd)
+def _run(cmd: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> tuple[bool, str]:
+    code, out, err = run_subprocess(cmd, cwd=cwd, env=env)
     ok = code == 0
     detail = (out or "") + (err or "")
     return ok, detail.strip()
+
+
+def _run_launcher(args: list[str], cwd: Path) -> tuple[bool, str]:
+    return _run([_cmd_exe(), "/c", "rdx.bat", *args], cwd, env=_launcher_env())
 
 
 def _match_line(text: str, rule: ScanRule, *, compiled: re.Pattern[str] | None = None) -> bool:
@@ -139,6 +172,12 @@ def _rg_no_match(rule: ScanRule, cwd: Path) -> tuple[bool, str]:
         "-n",
         "--glob",
         "!.git/**",
+        "--glob",
+        "!.venv/**",
+        "--glob",
+        "!binaries/windows/x64/manifest.runtime.json",
+        "--glob",
+        "!binaries/windows/x64/python/**",
         "--glob",
         "!intermediate/**",
     ]
@@ -204,6 +243,28 @@ def _check_manifest(root: Path) -> tuple[bool, str]:
     return True, f"validated {len(files)} runtime files"
 
 
+def _check_bundled_python() -> tuple[bool, str]:
+    ok, failures, details = validate_bundled_python_layout()
+    if ok:
+        bundled = details.get("bundled_python") if isinstance(details.get("bundled_python"), dict) else {}
+        return True, f"bundled python ready: {bundled.get('python_version', '')}"
+    return False, "; ".join(failures)
+
+
+def _check_user_docs_no_python_bootstrap(root: Path) -> tuple[bool, str]:
+    for rel in USER_DOCS:
+        path = root / rel
+        if not path.is_file():
+            return False, f"missing user doc: {path}"
+        text = path.read_text(encoding="utf-8")
+        for rule in USER_PATH_FORBIDDEN_RULES:
+            match = rule.search(text)
+            if match:
+                line_no = text[: match.start()].count("\n") + 1
+                return False, f"{rel}:{line_no}: matched forbidden user-path text: {match.group(0)}"
+    return True, "user docs do not require venv or package-manager bootstrap"
+
+
 def _has_bundled_fixture(root: Path) -> bool:
     fixture_root = root / FIXTURE_DIR
     if not fixture_root.is_dir():
@@ -256,7 +317,9 @@ def _check_reports(root: Path, *, require_smoke_reports: bool) -> tuple[bool, st
 
     present = [rel for rel in required_artifacts if rel not in missing]
     if present:
-        return False, f"incomplete smoke reports: missing {', '.join(missing)}"
+        if require_smoke_reports or _has_bundled_fixture(root):
+            return False, f"incomplete smoke reports: missing {', '.join(missing)}"
+        return True, "partial smoke reports ignored in clean checkout: full smoke is optional without bundled fixtures"
 
     if require_smoke_reports or _has_bundled_fixture(root):
         return False, f"missing current reports: {', '.join(missing)}"
@@ -294,15 +357,25 @@ def main(argv: list[str] | None = None) -> int:
     ok_fw, out_fw = _rg_no_match(dbg_rule, cwd=root)
     results.append(("refs:no_debug_fw_terms", ok_fw, out_fw))
 
+    ok_user_docs, user_docs_detail = _check_user_docs_no_python_bootstrap(root)
+    results.append(("docs:no_user_python_bootstrap", ok_user_docs, user_docs_detail))
+
     ok_manifest, msg_manifest = _check_manifest(root)
     results.append(("manifest:integrity", ok_manifest, msg_manifest))
+    ok_bundled_python, bundled_python_detail = _check_bundled_python()
+    results.append(("manifest:bundled-python", ok_bundled_python, bundled_python_detail))
+
+    ok_bat_help, bat_help = _run_launcher(["--help"], cwd=root)
+    results.append(("entry:rdx.bat --help", ok_bat_help, bat_help))
+    ok_bat_cli_help, bat_cli_help = _run_launcher(["--non-interactive", "cli", "--help"], cwd=root)
+    results.append(("entry:rdx.bat --non-interactive cli --help", ok_bat_cli_help, bat_cli_help))
+    ok_bat_mcp_env, bat_mcp_env = _run_launcher(["--non-interactive", "mcp", "--ensure-env"], cwd=root)
+    results.append(("entry:rdx.bat --non-interactive mcp --ensure-env", ok_bat_mcp_env, bat_mcp_env))
 
     ok_mcp_help, mcp_help = _run([sys.executable, "mcp/run_mcp.py", "--help"], cwd=root)
-    results.append(("entry:python mcp/run_mcp.py --help", ok_mcp_help, mcp_help))
+    results.append(("entry:dev-python mcp/run_mcp.py --help", ok_mcp_help, mcp_help))
     ok_cli_help, cli_help = _run([sys.executable, "cli/run_cli.py", "--help"], cwd=root)
-    results.append(("entry:python cli/run_cli.py --help", ok_cli_help, cli_help))
-    ok_bat_help, bat_help = _run(["cmd", "/c", "rdx.bat --help"], cwd=root)
-    results.append(("entry:rdx.bat --help", ok_bat_help, bat_help))
+    results.append(("entry:dev-python cli/run_cli.py --help", ok_cli_help, cli_help))
     ok_md_health, md_health = _run([sys.executable, "scripts/check_markdown_health.py"], cwd=root)
     results.append(("docs:markdown-health", ok_md_health, md_health))
 

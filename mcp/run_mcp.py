@@ -1,16 +1,13 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Standalone MCP launcher for rdx-tools."""
 
 from __future__ import annotations
 
 import atexit
 import argparse
-import importlib.util
-import json
 import os
 import sys
 import threading
-import time
 import uuid
 from pathlib import Path
 from typing import Iterable, Any
@@ -45,18 +42,8 @@ def _bootstrap_tools_root() -> Path:
 TOOLS_ROOT = _bootstrap_tools_root()
 
 from rdx.io_utils import safe_json_text, safe_stream_write
-
-
-REQUIRED_DEPENDENCIES: list[tuple[str, str]] = [
-    ("mcp", "mcp.server.fastmcp"),
-    ("mcp", "mcp.server.transport_security"),
-    ("pydantic", "pydantic"),
-    ("numpy", "numpy"),
-    ("Pillow", "PIL"),
-    ("pyarrow", "pyarrow"),
-    ("jinja2", "jinja2"),
-    ("aiofiles", "aiofiles"),
-]
+from rdx.python_runtime import current_python_runtime_details, validate_bundled_python_layout
+from rdx.runtime_requirements import missing_dependencies
 
 RETURN_OK = 0
 RETURN_ARGS_ERROR = 1
@@ -72,8 +59,15 @@ def _normalize_context(value: str | None) -> str:
     return raw if raw else "default"
 
 
+def _launcher_prog(default: str) -> str:
+    return str(os.environ.get("RDX_LAUNCHER_PROG") or default).strip() or default
+
+
 def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="rdx-tools MCP launcher")
+    parser = argparse.ArgumentParser(
+        prog=_launcher_prog("python mcp/run_mcp.py"),
+        description="rdx-tools MCP launcher",
+    )
     parser.add_argument("--ensure-env", action="store_true", help="Validate Python/runtime prerequisites and exit.")
     parser.add_argument("--transport", choices=["stdio", "sse", "streamable-http", "http"], default="stdio")
     parser.add_argument("--mode", choices=["lan", "internet"], default="lan")
@@ -94,19 +88,8 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
     return parser.parse_args(list(argv))
 
 
-def _module_available(import_name: str) -> bool:
-    try:
-        return importlib.util.find_spec(import_name) is not None
-    except ModuleNotFoundError:
-        return False
-
-
 def _check_deps() -> list[str]:
-    missing: list[str] = []
-    for dist_name, import_name in REQUIRED_DEPENDENCIES:
-        if (not _module_available(import_name)) and dist_name not in missing:
-            missing.append(dist_name)
-    return missing
+    return missing_dependencies()
 
 
 def _emit_payload(payload: dict[str, Any]) -> None:
@@ -121,7 +104,7 @@ def _normalize_transport(value: str) -> str:
     return "streamable-http" if value == "http" else value
 
 
-def _check_runtime_layout(binaries: Path, pymod: Path) -> tuple[bool, list[str]]:
+def _check_renderdoc_runtime_layout(binaries: Path, pymod: Path) -> tuple[bool, list[str]]:
     failures: list[str] = []
     if not binaries.is_dir():
         failures.append(f"missing runtime directory: {binaries}")
@@ -134,15 +117,31 @@ def _check_runtime_layout(binaries: Path, pymod: Path) -> tuple[bool, list[str]]
     return (len(failures) == 0), failures
 
 
-def _emit_runtime_env_error(code: str, message: str, *, context_id: str) -> None:
+def _emit_runtime_env_error(
+    code: str,
+    message: str,
+    *,
+    context_id: str,
+    details: dict[str, Any] | None = None,
+) -> None:
     _emit_payload(
         {
             "ok": False,
             "error_code": code,
             "error_message": message,
             "context_id": context_id,
+            "details": details or {},
         }
     )
+
+
+def _python_env_diagnostics() -> tuple[bool, list[str], dict[str, Any]]:
+    ok, failures, details = validate_bundled_python_layout()
+    payload = dict(details)
+    payload.setdefault("current_python", current_python_runtime_details())
+    if failures:
+        payload["failures"] = list(failures)
+    return ok, failures, payload
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -177,21 +176,41 @@ def main(argv: Iterable[str] | None = None) -> int:
         sys.path.insert(0, str(root))
 
     ensure_runtime_dirs()
+
+    python_ok, python_errors, python_details = _python_env_diagnostics()
+    if not python_ok:
+        _emit_runtime_env_error(
+            "python_runtime_incomplete",
+            "; ".join(python_errors),
+            context_id=context_id,
+            details=python_details,
+        )
+        return RETURN_ENV_ERROR
+
     try:
         runtime_source = load_runtime_source()
     except Exception as exc:  # noqa: BLE001
-        _emit_runtime_env_error("runtime_layout_missing", str(exc), context_id=context_id)
+        _emit_runtime_env_error(
+            "runtime_layout_missing",
+            str(exc),
+            context_id=context_id,
+            details={"python": python_details},
+        )
         return RETURN_ENV_ERROR
 
-    if parsed.ensure_env:
-        missing = _check_deps()
-        ok_layout, layout_errors = _check_runtime_layout(runtime_source.binaries_dir, runtime_source.pymodules_dir)
+    missing = _check_deps()
+    ok_layout, layout_errors = _check_renderdoc_runtime_layout(runtime_source.binaries_dir, runtime_source.pymodules_dir)
 
+    if parsed.ensure_env:
         if missing:
             _emit_runtime_env_error(
                 "dependencies_missing",
                 "missing python dependencies: " + ", ".join(sorted(missing)),
                 context_id=context_id,
+                details={
+                    "python": python_details,
+                    "missing_dependencies": sorted(missing),
+                },
             )
             return RETURN_ENV_ERROR
 
@@ -200,6 +219,10 @@ def main(argv: Iterable[str] | None = None) -> int:
                 "runtime_layout_missing",
                 "; ".join(layout_errors),
                 context_id=context_id,
+                details={
+                    "python": python_details,
+                    "renderdoc_failures": layout_errors,
+                },
             )
             return RETURN_ENV_ERROR
 
@@ -212,25 +235,36 @@ def main(argv: Iterable[str] | None = None) -> int:
                 "details": {
                     "layout_ok": True,
                     "tools_root": str(root),
-                    "source_manifest": str(runtime_source.manifest_path),
-                    "renderdoc_dll": str(runtime_source.binaries_dir / "renderdoc.dll"),
-                    "renderdoc_pyd": str(runtime_source.pymodules_dir / "renderdoc.pyd"),
+                    "python": python_details,
+                    "renderdoc": {
+                        "source_manifest": str(runtime_source.manifest_path),
+                        "renderdoc_dll": str(runtime_source.binaries_dir / "renderdoc.dll"),
+                        "renderdoc_pyd": str(runtime_source.pymodules_dir / "renderdoc.pyd"),
+                    },
                 },
             }
         )
         return RETURN_OK
 
-    missing = _check_deps()
     if missing:
         _write_err(f"[RDX] missing dependencies: {', '.join(sorted(missing))}")
-        _emit_runtime_env_error("dependencies_missing", "missing python dependencies", context_id=context_id)
+        _emit_runtime_env_error(
+            "dependencies_missing",
+            "missing python dependencies",
+            context_id=context_id,
+            details={"python": python_details, "missing_dependencies": sorted(missing)},
+        )
         return RETURN_ARGS_ERROR
 
-    ok_layout, layout_errors = _check_runtime_layout(runtime_source.binaries_dir, runtime_source.pymodules_dir)
     if not ok_layout:
         for item in layout_errors:
             _write_err(f"[RDX] {item}")
-        _emit_runtime_env_error("runtime_layout_missing", "; ".join(layout_errors), context_id=context_id)
+        _emit_runtime_env_error(
+            "runtime_layout_missing",
+            "; ".join(layout_errors),
+            context_id=context_id,
+            details={"python": python_details, "renderdoc_failures": layout_errors},
+        )
         return RETURN_ENV_ERROR
 
     cleanup_stale_daemon_states(context=context_id)

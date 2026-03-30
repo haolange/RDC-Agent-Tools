@@ -105,8 +105,10 @@
   - `python scripts/check_markdown_health.py`
 - 若改动涉及入口或契约，必须重新跑：
   - `python spec/validate_catalog.py`
-  - `python cli/run_cli.py --help`
-  - `python mcp/run_mcp.py --help`
+  - `rdx.bat --non-interactive cli --help`
+  - `rdx.bat --non-interactive mcp --ensure-env`
+  - 维护态可额外执行 `python cli/run_cli.py --help`
+  - 维护态可额外执行 `python mcp/run_mcp.py --help`
 - 若改动涉及 `.rdc` 会话链路，必须至少顺序验证一次：
   - `capture open`
   - `capture status` 或等价状态读取链路
@@ -143,12 +145,13 @@
 - `Conflict policy:` 如果实现与这些第一性文档冲突，开发 Agent 必须在本次交付中同步协调代码与文档。
 
 开发 Agent 完成开发后，至少应按改动面自检：
-
 - 入口 / help / catalog 改动
   - 必须跑：
     - `python spec/validate_catalog.py`
-    - `python cli/run_cli.py --help`
-    - `python mcp/run_mcp.py --help`
+    - `rdx.bat --non-interactive cli --help`
+    - `rdx.bat --non-interactive mcp --ensure-env`
+    - 维护态可额外执行 `python cli/run_cli.py --help`
+    - 维护态可额外执行 `python mcp/run_mcp.py --help`
 - session / context / daemon 改动
   - 必须至少顺序验证一次：
     - `capture open`
@@ -208,6 +211,14 @@
 - `renderdoc.dll`
 - `renderdoc.json`
 - `pymodules/renderdoc.pyd`
+- `python/python.exe`
+- `python/pythonw.exe`
+- `python/python3.dll`
+- `python/python314.dll`
+- `python/python314._pth`
+- `python/Lib/`
+- `python/Lib/site-packages/`
+- `python/DLLs/`
 
 `intermediate/` 内容为运行时产物，应视为非源码材料。
 
@@ -218,15 +229,15 @@
 - `RDX_ARTIFACT_DIR`
 - `RDX_LOG_LEVEL`
 - `RDX_DATA_DIR`
-
 ## 贡献流程
 
 1. 只修改完成任务所必需的内容。
 2. 每次开发完成后，针对本次改动范围执行本地运行与校验，并结合 terminal 输出观测结果：
    - `python spec/validate_catalog.py`
-   - `python cli/run_cli.py --help`
-   - `python mcp/run_mcp.py --help`
+   - `rdx.bat --non-interactive cli --help`
+   - `rdx.bat --non-interactive mcp --ensure-env`
    - `python scripts/check_markdown_health.py`
+   - 若需要维护态回归，再补 `python cli/run_cli.py --help` 与 `python mcp/run_mcp.py --help`
 3. 只提交有意图且可解释的变更。
 
 ## 版本控制约定

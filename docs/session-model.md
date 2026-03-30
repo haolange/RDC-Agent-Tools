@@ -253,7 +253,7 @@ artifact 不是 session 本身，但经常与 session 联动：
 - `capture open -> capture status` 表示顺序调用的推荐链路。
 - `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay` 表示 remote 入口的推荐顺序。
 - 除非显式声明支持并发，否则不应把并发观测结果视为平台定义。
-- “已验证”必须绑定具体入口和执行方式，例如 `python cli/run_cli.py ...` 的顺序调用，或 `rdx.bat` 交互 shell 中的顺序调用。
+- “已验证”必须绑定具体入口和执行方式，例如 `rdx.bat --non-interactive cli ...` 的顺序调用，或 `rdx.bat` 交互 shell 中的顺序调用。
 - `rdx.bat --non-interactive` 在子命令返回 canonical JSON 时会直接透传完整 payload；自动化脚本应按完整 payload 读取，而不是依赖旧的短状态壳。
 
 ## 9. 平台职责与上层职责

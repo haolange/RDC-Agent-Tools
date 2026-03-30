@@ -64,11 +64,6 @@ function Test-PythonCandidate {
         return $false
     }
 
-    $exeLower = $exe.ToLowerInvariant()
-    if ($exeLower.Contains('\windowsapps\')) {
-        return $false
-    }
-
     $probeArgs = @()
     if ($candidate.Count -gt 1) {
         $probeArgs += @($candidate[1..($candidate.Count - 1)])
@@ -88,49 +83,71 @@ function Test-PythonCandidate {
     }
 
     $joined = (($probeOutput | ForEach-Object { [string]$_ }) -join "`n").Trim()
-    if ([string]::IsNullOrWhiteSpace($joined)) {
-        return $false
-    }
+    return (-not [string]::IsNullOrWhiteSpace($joined))
+}
 
-    $joinedLower = $joined.ToLowerInvariant()
-    if ($joinedLower.Contains('microsoft store') -or $joinedLower.Contains('app execution aliases')) {
-        return $false
-    }
+function Get-BundledPythonLayout {
+    param([string]$ToolsRoot)
 
-    return $true
+    $pythonRoot = Join-Path $ToolsRoot 'binaries\windows\x64\python'
+    $pythonExe = Join-Path $pythonRoot 'python.exe'
+    $pythonwExe = Join-Path $pythonRoot 'pythonw.exe'
+    $python3Dll = Join-Path $pythonRoot 'python3.dll'
+    $stdlibDir = Join-Path $pythonRoot 'Lib'
+    $sitePackagesDir = Join-Path $stdlibDir 'site-packages'
+    $dllDir = Join-Path $pythonRoot 'DLLs'
+    $versionDll = @(Get-ChildItem -LiteralPath $pythonRoot -Filter 'python*.dll' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^python\d+\.dll$' } | Sort-Object Name | Select-Object -First 1)
+    $pthFile = @(Get-ChildItem -LiteralPath $pythonRoot -Filter 'python*._pth' -File -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First 1)
+
+    return [pscustomobject]@{
+        Root = $pythonRoot
+        Executable = $pythonExe
+        Pythonw = $pythonwExe
+        Python3Dll = $python3Dll
+        VersionDll = if ($versionDll.Count -gt 0) { $versionDll[0].FullName } else { '' }
+        StdlibDir = $stdlibDir
+        SitePackagesDir = $sitePackagesDir
+        DllDir = $dllDir
+        PthFile = if ($pthFile.Count -gt 0) { $pthFile[0].FullName } else { '' }
+    }
 }
 
 function Resolve-Python {
     $envPython = [string]$env:RDX_PYTHON
-    if ($envPython -and (Test-Path -LiteralPath $envPython) -and (Test-PythonCandidate -PythonSpec @([string]$envPython))) {
-        return @([string]$envPython)
-    }
-
-    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
-    if ($pyLauncher -and (Test-PythonCandidate -PythonSpec @([string]$pyLauncher.Source, '-3'))) {
-        return @([string]$pyLauncher.Source, '-3')
-    }
-
-    $commonCandidates = @(
-        (Join-Path ([string]$env:LOCALAPPDATA) 'Python\bin\python.exe'),
-        (Join-Path ([string]$env:LOCALAPPDATA) 'Programs\Python\Python314\python.exe'),
-        (Join-Path ([string]$env:LOCALAPPDATA) 'Programs\Python\Python313\python.exe'),
-        (Join-Path ([string]$env:LOCALAPPDATA) 'Programs\Python\Python312\python.exe'),
-        (Join-Path ([string]$env:LOCALAPPDATA) 'Programs\Python\Python311\python.exe')
-    )
-    foreach ($candidate in $commonCandidates) {
-        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-        if ((Test-Path -LiteralPath $candidate) -and (Test-PythonCandidate -PythonSpec @([string]$candidate))) {
-            return @([string]$candidate)
+    if ($envPython) {
+        if ((Test-Path -LiteralPath $envPython) -and (Test-PythonCandidate -PythonSpec @([string]$envPython))) {
+            return @([string]$envPython)
         }
+        throw "RDX_PYTHON is set but invalid: $envPython"
     }
 
-    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($pythonCmd -and (Test-PythonCandidate -PythonSpec @([string]$pythonCmd.Source))) {
-        return @([string]$pythonCmd.Source)
+    $toolsRoot = [string]$env:RDX_TOOLS_ROOT
+    if ([string]::IsNullOrWhiteSpace($toolsRoot)) {
+        $toolsRoot = Resolve-ToolsRoot
     }
 
-    throw 'python 3.x not found; set RDX_PYTHON or ensure python is installed.'
+    $layout = Get-BundledPythonLayout -ToolsRoot $toolsRoot
+    $failures = [System.Collections.Generic.List[string]]::new()
+    if (-not (Test-Path -LiteralPath $layout.Root -PathType Container)) { $failures.Add("missing directory: $($layout.Root)") }
+    if (-not (Test-Path -LiteralPath $layout.Executable -PathType Leaf)) { $failures.Add("missing file: $($layout.Executable)") }
+    if (-not (Test-Path -LiteralPath $layout.Pythonw -PathType Leaf)) { $failures.Add("missing file: $($layout.Pythonw)") }
+    if (-not (Test-Path -LiteralPath $layout.Python3Dll -PathType Leaf)) { $failures.Add("missing file: $($layout.Python3Dll)") }
+    if ([string]::IsNullOrWhiteSpace([string]$layout.VersionDll) -or -not (Test-Path -LiteralPath $layout.VersionDll -PathType Leaf)) { $failures.Add('missing versioned python dll') }
+    if (-not (Test-Path -LiteralPath $layout.StdlibDir -PathType Container)) { $failures.Add("missing directory: $($layout.StdlibDir)") }
+    if (-not (Test-Path -LiteralPath $layout.SitePackagesDir -PathType Container)) { $failures.Add("missing directory: $($layout.SitePackagesDir)") }
+    if (-not (Test-Path -LiteralPath $layout.DllDir -PathType Container)) { $failures.Add("missing directory: $($layout.DllDir)") }
+    if ([string]::IsNullOrWhiteSpace([string]$layout.PthFile) -or -not (Test-Path -LiteralPath $layout.PthFile -PathType Leaf)) { $failures.Add('missing python _pth file') }
+    if (-not (Test-Path -LiteralPath (Join-Path $layout.StdlibDir 'os.py') -PathType Leaf)) { $failures.Add('missing stdlib marker: Lib\os.py') }
+    if (-not (Test-Path -LiteralPath (Join-Path $layout.StdlibDir 'site.py') -PathType Leaf)) { $failures.Add('missing stdlib marker: Lib\site.py') }
+    if (-not (Test-Path -LiteralPath (Join-Path $layout.StdlibDir 'encodings\__init__.py') -PathType Leaf)) { $failures.Add('missing stdlib marker: Lib\encodings\__init__.py') }
+
+    if ($failures.Count -gt 0) {
+        throw ('bundled python runtime incomplete: ' + ($failures -join '; '))
+    }
+    if (-not (Test-PythonCandidate -PythonSpec @([string]$layout.Executable))) {
+        throw "bundled python executable is not runnable: $($layout.Executable)"
+    }
+    return @([string]$layout.Executable)
 }
 
 function Normalize-PythonCommand {
@@ -171,7 +188,6 @@ function Get-PythonInvocation {
         CommandText = ($parts -join ' ')
     }
 }
-
 function Invoke-Subprocess {
     param(
         [string]$FilePath,
@@ -282,9 +298,15 @@ function Map-ExitCode {
     if ($TimedOut) { return $script:RETURN_TIMEOUT }
     if ($Payload -and $Payload.PSObject.Properties.Name -contains 'ok') {
         if ([bool]$Payload.ok) { return $script:RETURN_OK }
-        $code = [string]$Payload.error_code
+        $code = ''
+        if ($Payload.PSObject.Properties.Name -contains 'error_code') {
+            $code = [string]$Payload.error_code
+        }
+        elseif (($Payload.PSObject.Properties.Name -contains 'error') -and $Payload.error) {
+            $code = Get-JsonStringProperty -Object $Payload.error -PropertyName 'code'
+        }
         $codeLower = $code.ToLowerInvariant()
-        if ($codeLower -in @('dependencies_missing', 'runtime_layout_missing', 'renderdoc_import_failed', 'runtime_root_invalid')) { return $script:RETURN_ENV_ERROR }
+        if ($codeLower -in @('dependencies_missing', 'runtime_layout_missing', 'renderdoc_import_failed', 'runtime_root_invalid', 'python_runtime_incomplete')) { return $script:RETURN_ENV_ERROR }
         if ($codeLower -in @('startup_failed', 'daemon_not_ready', 'no_python_found')) { return $script:RETURN_STARTUP_ERROR }
         if ($codeLower -eq 'timeout') { return $script:RETURN_TIMEOUT }
         return $script:RETURN_TOOL_ERROR
@@ -395,13 +417,32 @@ function Invoke-PythonTool {
         [string]$ToolsRoot,
         [string]$ScriptRelativePath,
         [string[]]$ArgumentList,
-        [int]$TimeoutMs = 30000
+        [int]$TimeoutMs = 30000,
+        [string]$LauncherProg = ''
     )
 
     $python = Get-PythonInvocation
     $scriptPath = Join-Path $ToolsRoot $ScriptRelativePath
     $finalArgs = @($python.ExtraArgs) + @($scriptPath) + @($ArgumentList)
-    return Invoke-Subprocess -FilePath $python.Executable -ArgumentList $finalArgs -WorkingDirectory $ToolsRoot -TimeoutMs $TimeoutMs
+    $hadLauncherProg = Test-Path Env:\RDX_LAUNCHER_PROG
+    $savedLauncherProg = [string]$env:RDX_LAUNCHER_PROG
+    try {
+        if ($LauncherProg) {
+            $env:RDX_LAUNCHER_PROG = $LauncherProg
+        }
+        elseif ($hadLauncherProg) {
+            Remove-Item Env:\RDX_LAUNCHER_PROG -ErrorAction SilentlyContinue
+        }
+        return Invoke-Subprocess -FilePath $python.Executable -ArgumentList $finalArgs -WorkingDirectory $ToolsRoot -TimeoutMs $TimeoutMs
+    }
+    finally {
+        if ($hadLauncherProg) {
+            $env:RDX_LAUNCHER_PROG = $savedLauncherProg
+        }
+        else {
+            Remove-Item Env:\RDX_LAUNCHER_PROG -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Invoke-CliCommand {
@@ -413,7 +454,7 @@ function Invoke-CliCommand {
     )
 
     $normalizedArgs = Normalize-CommandContextArgs -CommandArgs $CommandArgs -ContextId $ContextId
-    return Invoke-PythonTool -ToolsRoot $ToolsRoot -ScriptRelativePath 'cli\run_cli.py' -ArgumentList $normalizedArgs -TimeoutMs $TimeoutMs
+    return Invoke-PythonTool -ToolsRoot $ToolsRoot -ScriptRelativePath 'cli\run_cli.py' -ArgumentList $normalizedArgs -TimeoutMs $TimeoutMs -LauncherProg 'rdx.bat --non-interactive cli'
 }
 
 function Invoke-McpCommand {
@@ -425,9 +466,8 @@ function Invoke-McpCommand {
     )
 
     $normalizedArgs = Normalize-CommandContextArgs -CommandArgs $CommandArgs -ContextId $ContextId
-    return Invoke-PythonTool -ToolsRoot $ToolsRoot -ScriptRelativePath 'mcp\run_mcp.py' -ArgumentList $normalizedArgs -TimeoutMs $TimeoutMs
+    return Invoke-PythonTool -ToolsRoot $ToolsRoot -ScriptRelativePath 'mcp\run_mcp.py' -ArgumentList $normalizedArgs -TimeoutMs $TimeoutMs -LauncherProg 'rdx.bat --non-interactive mcp'
 }
-
 function Invoke-CliJson {
     param(
         [string]$ToolsRoot,
@@ -613,6 +653,7 @@ function New-CliShellCommandFile {
         '@echo off',
         ('set "RDX_TOOLS_ROOT={0}"' -f $ToolsRoot),
         ('set "RDX_CONTEXT_ID={0}"' -f $ContextId),
+        'set "RDX_LAUNCHER_PROG=rdx"',
         ('title RDX CLI [{0}]' -f $ContextId),
         ('prompt [rdx:{0}] $P$G' -f $ContextId),
         ('doskey rdx={0} "{1}" --daemon-context "{2}" $*' -f $pythonText, $cliPath, $ContextId),
@@ -644,6 +685,7 @@ function New-McpCommandFile {
         '@echo off',
         ('set "RDX_TOOLS_ROOT={0}"' -f $ToolsRoot),
         ('set "RDX_CONTEXT_ID={0}"' -f $ContextId),
+        'set "RDX_LAUNCHER_PROG=rdx.bat --non-interactive mcp"',
         ('title RDX MCP [{0}]' -f $ContextId),
         'echo.',
         ('echo [RDX] Start MCP. context={0}' -f $ContextId),

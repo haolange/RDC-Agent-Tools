@@ -26,6 +26,38 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _cmd_exe() -> str:
+    system_root = str(os.environ.get("SystemRoot") or r"C:\Windows")
+    return str(Path(system_root) / "System32" / "cmd.exe")
+
+
+def _bat_env(*, test_mode: bool) -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("RDX_PYTHON", None)
+    if test_mode:
+        env["RDX_BAT_TEST_MODE"] = "1"
+    else:
+        env.pop("RDX_BAT_TEST_MODE", None)
+    return env
+
+
+def _run_bat(
+    root: Path,
+    args: list[str],
+    *,
+    timeout_s: float,
+    stdin_text: str | None = None,
+    test_mode: bool = False,
+) -> ReturnCode:
+    return _run_command(
+        [_cmd_exe(), "/c", "rdx.bat", *args],
+        cwd=root,
+        timeout_s=timeout_s,
+        stdin_text=stdin_text,
+        env=_bat_env(test_mode=test_mode),
+    )
+
+
 def _kill_process_tree(pid: int) -> None:
     if pid <= 0:
         return
@@ -107,33 +139,34 @@ def _check_contains(text: str, markers: list[str]) -> tuple[bool, str]:
 
 
 def _cleanup_context(root: Path, context_id: str) -> tuple[bool, str]:
-    proc = subprocess.run(
-        [sys.executable, "cli/run_cli.py", "--daemon-context", context_id, "daemon", "stop"],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=45,
-        check=False,
-    )
-    detail = (proc.stdout or "") + (proc.stderr or "")
-    ok = proc.returncode == 0 or "no active daemon" in detail.lower()
-    return ok, trim_text(detail)
+    details: list[str] = []
+    ok = True
+    for command in (("daemon", "stop"), ("context", "clear")):
+        code, out, err, timed_out = _run_bat(
+            root,
+            ["--non-interactive", "cli", "--daemon-context", context_id, *command],
+            timeout_s=45.0,
+            test_mode=False,
+        )
+        combined = (out or "") + (err or "")
+        details.append(combined.strip())
+        if timed_out:
+            ok = False
+            continue
+        payload = extract_json_payload(combined)
+        if code != 0 and not (payload and not payload.get("ok") and "no active daemon" in str(payload.get("error_message") or "").lower()):
+            ok = False
+    return ok, trim_text("\n".join(item for item in details if item))
 
 
 def _status_command(root: Path, context_id: str) -> tuple[int, str]:
-    proc = subprocess.run(
-        [sys.executable, "cli/run_cli.py", "--daemon-context", context_id, "daemon", "status"],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=45,
-        check=False,
+    code, out, err, _ = _run_bat(
+        root,
+        ["--non-interactive", "cli", "--daemon-context", context_id, "daemon", "status"],
+        timeout_s=45.0,
+        test_mode=False,
     )
-    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    return code, (out or "") + (err or "")
 
 
 def _check_timed_start(
@@ -145,14 +178,12 @@ def _check_timed_start(
     context_id: str,
     markers: list[str],
 ) -> None:
-    env = os.environ.copy()
-    env["RDX_BAT_TEST_MODE"] = "1"
-    code, out, err, timed_out = _run_command(
-        ["cmd", "/c", "rdx.bat"],
-        cwd=root,
+    code, out, err, timed_out = _run_bat(
+        root,
+        [],
         timeout_s=8.0,
         stdin_text=stdin_text,
-        env=env,
+        test_mode=True,
     )
     combined = out + "\n" + err
     ok, missing = _check_contains(combined, markers)
@@ -228,16 +259,12 @@ def main() -> int:
     cleanup_daemons: dict[str, bool] = {}
     cleanup_notes: dict[str, str] = {}
 
-    env = os.environ.copy()
-    env["RDX_BAT_TEST_MODE"] = "1"
-
-    # interactive: help then exit
-    code, out, err, timed_out = _run_command(
-        ["cmd", "/c", "rdx.bat"],
-        cwd=root,
+    code, out, err, timed_out = _run_bat(
+        root,
+        [],
         timeout_s=20.0,
         stdin_text="3\n\n0\n",
-        env=env,
+        test_mode=True,
     )
     combined = out + "\n" + err
     ok, missing = _check_contains(combined, ["=== rdx.bat Launcher ===", "=== rdx-tools Launcher Help ==="])
@@ -250,17 +277,16 @@ def main() -> int:
         evidence=combined,
     )
 
-    # interactive: start CLI default
-    code, out, err, timed_out = _run_command(
-        ["cmd", "/c", "rdx.bat"],
-        cwd=root,
+    code, out, err, timed_out = _run_bat(
+        root,
+        [],
         timeout_s=45.0,
         stdin_text="1\n1\nstatus\nexit\n0\n",
-        env=env,
+        test_mode=True,
     )
     combined = out + "\n" + err
     status_code, status_text = _status_command(root, "default")
-    ok, missing = _check_contains(combined, ["CLI shell ready. context=default", "result_kind\": \"rdx.daemon.status\""])
+    ok, missing = _check_contains(combined, ["CLI shell ready. context=default", 'result_kind": "rdx.daemon.status"'])
     _append_result(
         results,
         test_id="interactive-cli-default",
@@ -271,14 +297,13 @@ def main() -> int:
         context_id="default",
     )
 
-    # interactive: start CLI custom
     custom_ctx = "smoke-cli-custom"
-    code, out, err, timed_out = _run_command(
-        ["cmd", "/c", "rdx.bat"],
-        cwd=root,
+    code, out, err, timed_out = _run_bat(
+        root,
+        [],
         timeout_s=45.0,
         stdin_text=f"1\n2\n{custom_ctx}\nstatus\nclear\nstop\nexit\n0\n",
-        env=env,
+        test_mode=True,
     )
     combined = out + "\n" + err
     status_code, status_text = _status_command(root, custom_ctx)
@@ -290,7 +315,7 @@ def main() -> int:
         and isinstance(status_payload.get("data"), dict)
         and status_payload["data"].get("running") is False
     )
-    ok, missing = _check_contains(combined, ["CLI shell ready. context=smoke-cli-custom", "result_kind\": \"rdx.context.clear\"", "daemon stopped"])
+    ok, missing = _check_contains(combined, ["CLI shell ready. context=smoke-cli-custom", 'result_kind": "rdx.context.clear"', "daemon stopped"])
     _append_result(
         results,
         test_id="interactive-cli-custom",
@@ -301,7 +326,6 @@ def main() -> int:
         context_id=custom_ctx,
     )
 
-    # interactive: start MCP stdio / http
     _check_timed_start(
         results,
         root=root,
@@ -319,32 +343,36 @@ def main() -> int:
         markers=["Start MCP. context=smoke-mcp-http", "URL: http://127.0.0.1:8765"],
     )
 
-    # non-interactive launcher entrypoints
-    for test_id, command, expect_json in [
-        ("help", ["cmd", "/c", "rdx.bat", "--help"], False),
-        ("mcp-ensure-env", ["cmd", "/c", "rdx.bat", "--non-interactive", "mcp", "--ensure-env"], True),
-        ("cli-help", ["cmd", "/c", "rdx.bat", "--non-interactive", "cli", "--help"], True),
-        ("cli-daemon-start", ["cmd", "/c", "rdx.bat", "--non-interactive", "cli", "--daemon-context", "smoke-test", "daemon", "start"], True),
-        ("cli-daemon-status", ["cmd", "/c", "rdx.bat", "--non-interactive", "cli", "--daemon-context", "smoke-test", "daemon", "status"], True),
-        ("cli-daemon-stop", ["cmd", "/c", "rdx.bat", "--non-interactive", "cli", "--daemon-context", "smoke-test", "daemon", "stop"], True),
-    ]:
-        code, out, err, timed_out = _run_command(command, cwd=root, timeout_s=60.0)
+    checks = [
+        ("help", ["--help"], False),
+        ("mcp-ensure-env", ["--non-interactive", "mcp", "--ensure-env"], True),
+        ("cli-help", ["--non-interactive", "cli", "--help"], True),
+        ("cli-daemon-start", ["--non-interactive", "cli", "--daemon-context", "smoke-test", "daemon", "start"], True),
+        ("cli-daemon-status", ["--non-interactive", "cli", "--daemon-context", "smoke-test", "daemon", "status"], True),
+        ("cli-daemon-stop", ["--non-interactive", "cli", "--daemon-context", "smoke-test", "daemon", "stop"], True),
+    ]
+    for test_id, args_list, expect_json in checks:
+        code, out, err, timed_out = _run_bat(root, args_list, timeout_s=60.0, test_mode=False)
         combined = out + "\n" + err
         payload = extract_json_payload(combined)
         if expect_json:
             passed = (not timed_out) and code == 0 and isinstance(payload, dict) and bool(payload.get("ok"))
+            if passed and test_id == "mcp-ensure-env":
+                details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+                python_details = details.get("python") if isinstance(details.get("python"), dict) else {}
+                bundled_python = python_details.get("bundled_python") if isinstance(python_details.get("bundled_python"), dict) else {}
+                passed = bool(bundled_python.get("python_entry")) and bool(bundled_python.get("python_version"))
         else:
             passed = (not timed_out) and code == 0 and "rdx.bat usage:" in combined
         _append_result(
             results,
             test_id=test_id,
-            command=" ".join(command[2:]),
+            command="rdx.bat " + " ".join(args_list) if args_list else "rdx.bat",
             status="pass" if passed else "blocker",
             reason="" if passed else f"code={code}, timed_out={timed_out}",
             evidence=combined,
         )
 
-    # cleanup
     for ctx in ["default", custom_ctx, "smoke-mcp-stdio", "smoke-mcp-http", "smoke-test"]:
         ok, detail = _cleanup_context(root, ctx)
         cleanup_daemons[ctx] = ok

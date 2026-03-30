@@ -1,9 +1,8 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Standalone CLI launcher for rdx-tools."""
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -43,17 +42,7 @@ def _bootstrap_tools_root() -> Path:
 TOOLS_ROOT = _bootstrap_tools_root()
 
 from rdx.io_utils import safe_json_text, safe_stream_write
-
-REQUIRED_DEPENDENCIES: list[tuple[str, str]] = [
-    ("mcp", "mcp.server.fastmcp"),
-    ("mcp", "mcp.server.transport_security"),
-    ("pydantic", "pydantic"),
-    ("numpy", "numpy"),
-    ("Pillow", "PIL"),
-    ("pyarrow", "pyarrow"),
-    ("jinja2", "jinja2"),
-    ("aiofiles", "aiofiles"),
-]
+from rdx.runtime_requirements import missing_dependencies
 
 
 def _normalize_context(value: str | None) -> str:
@@ -73,19 +62,8 @@ def _init_pythonpath() -> Path:
     return root
 
 
-def _module_available(import_name: str) -> bool:
-    try:
-        return importlib.util.find_spec(import_name) is not None
-    except ModuleNotFoundError:
-        return False
-
-
 def _check_deps() -> list[str]:
-    missing: list[str] = []
-    for dist_name, import_name in REQUIRED_DEPENDENCIES:
-        if (not _module_available(import_name)) and dist_name not in missing:
-            missing.append(dist_name)
-    return missing
+    return missing_dependencies()
 
 
 def _emit_result(payload: dict[str, object]) -> None:
@@ -100,9 +78,14 @@ def _write_err(text: str) -> None:
     safe_stream_write(text + "\n", sys.stderr)
 
 
+def _launcher_prog(default: str) -> str:
+    return str(os.environ.get("RDX_LAUNCHER_PROG") or default).strip() or default
+
+
 def _print_launcher_help() -> None:
+    prog = _launcher_prog("python cli/run_cli.py")
     for line in (
-        "usage: python cli/run_cli.py <command> [--daemon-context <id>] ...",
+        f"usage: {prog} <command> [--daemon-context <id>] ...",
         "commands:",
         "  daemon start|stop|status",
         "  context clear",
@@ -114,12 +97,12 @@ def _print_launcher_help() -> None:
         "  assert pipeline|image",
         "",
         "examples:",
-        "  python cli/run_cli.py daemon start --daemon-context local",
-        "  python cli/run_cli.py context clear --daemon-context local",
-        "  python cli/run_cli.py capture open --file D:\\path\\capture.rdc --frame-index 0 --preview",
-        "  python cli/run_cli.py session preview on",
-        "  python cli/run_cli.py call rd.session.get_context --args-file .\\args.json --format json",
-        "  python cli/run_cli.py vfs ls --path / --format tsv",
+        f"  {prog} daemon start --daemon-context local",
+        f"  {prog} context clear --daemon-context local",
+        f"  {prog} capture open --file D:\\path\\capture.rdc --frame-index 0 --preview",
+        f"  {prog} session preview on",
+        f"  {prog} call rd.session.get_context --args-file .\\args.json --format json",
+        f"  {prog} vfs ls --path / --format tsv",
     ):
         _write_out(line)
 
@@ -138,7 +121,14 @@ def main(argv: list[str] | None = None) -> int:
     missing = _check_deps()
     if missing:
         _write_err(f"[RDX] missing dependencies: {', '.join(sorted(missing))}")
-        _emit_result({"ok": False, "error_code": "dependencies_missing", "error_message": ", ".join(sorted(missing)), "context_id": os.environ.get("RDX_CONTEXT_ID", "default")})
+        _emit_result(
+            {
+                "ok": False,
+                "error_code": "dependencies_missing",
+                "error_message": ", ".join(sorted(missing)),
+                "context_id": os.environ.get("RDX_CONTEXT_ID", "default"),
+            }
+        )
         return 1
 
     from rdx.runtime_bootstrap import bootstrap_renderdoc_runtime

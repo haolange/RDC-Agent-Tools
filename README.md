@@ -75,9 +75,13 @@ rdx.bat --non-interactive cli --help
 rdx.bat --non-interactive mcp --ensure-env
 ```
 
+终端用户默认只需要这三条 `rdx.bat` 入口，不需要额外安装系统 `Python`、`pip` 或创建 `.venv`。
+
 `--non-interactive` 下如果子命令返回 canonical JSON，launcher 会直接透传完整 payload；只有 launcher 自身失败或子命令没有 JSON 时，才回退到短状态 JSON。
 
-### `cli/run_cli.py`
+### cli/run_cli.py 
+
+该入口继续保留给源码维护、CI 与排障使用；终端用户默认不需要直接调用 python cli/run_cli.py ...。
 
 daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问本地环境的 Agent。
 
@@ -86,7 +90,9 @@ daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问
 - 不拥有独立 runtime；所有业务命令都经当前 context 的 daemon 执行。
 - `call` 同时支持 `--args-json` 与 `--args-file`；跨 shell 自动化优先使用 `--args-file`。
 
-### `mcp/run_mcp.py`
+### mcp/run_mcp.py 
+
+该入口继续保留给源码维护与调试；终端用户默认通过 `rdx.bat` 启动 `MCP`，而不是先安装系统 `Python` 再手工执行脚本。
 
 `MCP` server 入口，适合无法直接进入本地环境的外部宿主，或用户明确要求按 `MCP` 接入的场景。
 
@@ -114,13 +120,14 @@ daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问
 
 ## 最小示例
 
-下面的示例只演示平台级最小入口：
+下面的示例按顺序执行：先启动 `rdx.bat` 进入交互 shell，后续 `rdx ...` 命令在该 shell 内继续执行。
 
 ```bat
-python cli/run_cli.py capture open --file "C:\path\capture.rdc" --frame-index 0 --preview
-python cli/run_cli.py session preview status
-python cli/run_cli.py call rd.session.get_context --args-file ".\args.json" --format json
-python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
+rdx.bat
+rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --preview
+rdx session preview status
+rdx call rd.session.get_context --args-file ".\args.json" --format json
+rdx.bat --non-interactive mcp --ensure-env --daemon-context smoke-test
 ```
 
 文档示例默认按顺序执行语义编写。除非显式声明支持并发，否则不应把并发观测结果视为平台定义。
@@ -209,12 +216,13 @@ python mcp/run_mcp.py --ensure-env --daemon-context smoke-test
 - `rd.capture.close_file` 若目标 `capture_file_id` 仍被 live replay 持有，必须失败；推荐顺序是 `rd.capture.close_replay -> rd.capture.close_file`。
 - `rd.vfs.*` 是只读探索层，不替代结构化 `rd.*` canonical tools；所有修改、切换、导出与 context 更新仍继续通过原有 `rd.*` API 完成。
 - `rdx daemon stop` 只停止 daemon，不会清空本地 `.rdc` 的持久化恢复索引；如需显式销毁 context 状态，应执行 `rdx context clear`。
-
 ## 验证
 
 ```bat
+rdx.bat --non-interactive cli --help
+rdx.bat --non-interactive mcp --ensure-env
 python spec/validate_catalog.py
-python cli/run_cli.py --help
-python mcp/run_mcp.py --help
 python scripts/check_markdown_health.py
 ```
+
+若需要做源码维护回归，可额外执行 `python cli/run_cli.py --help` 与 `python mcp/run_mcp.py --help`，但它们不再是终端用户上手前置条件。
