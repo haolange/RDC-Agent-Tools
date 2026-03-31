@@ -305,6 +305,23 @@ def test_get_action_tree_paginates_and_bounds_nodes(monkeypatch: pytest.MonkeyPa
     assert payload["root"]["children"][0]["children"][0]["event_id"] == 211
 
 
+def test_get_actions_reports_root_browse_lookup_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[
+            _FakeAction(101, name="root_a", children=[_FakeAction(111, name="child_a")]),
+        ]
+    )
+    _install_common_env(monkeypatch, controller)
+    _seed_capture()
+    _seed_session(101)
+
+    payload = json.loads(asyncio.run(server._dispatch_event("get_actions", {"session_id": "sess_demo"})))
+
+    assert payload["success"] is True
+    assert payload["lookup_scope"] == "root_browse"
+    assert payload["recommended_followup_tool"] == "rd.event.get_action_tree"
+
+
 def test_ensure_event_repairs_polluted_active_event(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = _FakeController(
         roots=[
@@ -370,6 +387,86 @@ def test_pipeline_dispatch_uses_one_resolved_event_context(monkeypatch: pytest.M
     assert bindings["bindings"][0]["resource_id"] == "srv@101"
     assert pipeline_service.snapshot_calls == [101, 101, 101, 101, 101]
     assert pipeline_service.binding_calls == [101]
+
+
+def test_pipeline_summary_and_outputs_include_selected_visual_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[
+            _FakeAction(101, flags=_FakeActionFlags.Drawcall, outputs=[]),
+        ]
+    )
+    pipeline_service = _FakePipelineService()
+    _install_common_env(monkeypatch, controller)
+    server.server_runtime._pipeline_service = pipeline_service
+    server.server_runtime._session_manager = SimpleNamespace()
+    _seed_capture()
+    _seed_session(101)
+
+    async def _fake_resolve_visual_target_for_event(session_id: str, event_id: int, *, target=None, allow_framebuffer_fallback=True):  # type: ignore[no-untyped-def]
+        return (
+            "ResourceId::777",
+            SimpleNamespace(name="SceneColor"),
+            {
+                "texture_id": "ResourceId::777",
+                "output_slot": None,
+                "target_source": "event_binding_uav_3",
+                "texture_format": "R8G8B8A8_UNORM",
+            },
+            {
+                "summary_status": "degraded",
+                "summary_degraded_reasons": ["visual_target_binding_fallback"],
+                "binding_truth_level": "binding_degraded",
+                "evidence_truth_level": "visual_evidence_only",
+            },
+        )
+
+    monkeypatch.setattr(server.server_runtime, "_resolve_visual_target_for_event", _fake_resolve_visual_target_for_event)
+
+    summary = json.loads(asyncio.run(server._dispatch_pipeline("get_state_summary", {"session_id": "sess_demo"})))
+    outputs = json.loads(asyncio.run(server._dispatch_pipeline("get_output_targets", {"session_id": "sess_demo"})))
+
+    assert summary["success"] is True
+    assert summary["summary"]["selected_visual_target"]["target_source"] == "event_binding_uav_3"
+    assert summary["summary"]["export_target_available"] is True
+    assert outputs["success"] is True
+    assert outputs["framebuffer"]["selected_visual_target"]["texture_id"] == "ResourceId::777"
+    assert outputs["framebuffer"]["export_target_available"] is True
+
+
+def test_pipeline_get_constant_buffers_uses_collected_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[
+            _FakeAction(101, flags=_FakeActionFlags.Drawcall),
+        ]
+    )
+    pipeline_service = _FakePipelineService()
+    _install_common_env(monkeypatch, controller)
+    server.server_runtime._pipeline_service = pipeline_service
+    server.server_runtime._session_manager = SimpleNamespace()
+    _seed_capture()
+    _seed_session(101)
+
+    async def _fake_collect_constant_buffers(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return [
+            {
+                "stage": "PS",
+                "slot": 2,
+                "resource_id": "ResourceId::cb0",
+                "offset": 16,
+                "size": 64,
+                "block_name": "Globals",
+                "vars": [{"name": "Tint", "type": "float4"}],
+                "contents": [{"name": "Tint", "value": {"f32v": [1.0, 0.0, 0.0, 1.0]}}],
+            }
+        ]
+
+    monkeypatch.setattr(server.server_runtime, "_collect_constant_buffers", _fake_collect_constant_buffers)
+
+    payload = json.loads(asyncio.run(server._dispatch_pipeline("get_constant_buffers", {"session_id": "sess_demo", "stage": "ps", "include_contents": True})))
+
+    assert payload["success"] is True
+    assert payload["constant_buffers"][0]["slot"] == 2
+    assert payload["constant_buffers"][0]["contents"][0]["name"] == "Tint"
 
 
 def test_pipeline_get_shader_returns_runtime_error_when_stage_is_unbound(monkeypatch: pytest.MonkeyPatch) -> None:

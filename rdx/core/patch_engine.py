@@ -524,6 +524,52 @@ class PatchEngine:
                     compile_flags=compile_flag_payload,
                 )
 
+            try:
+                controller.SetFrameEvent(event_id, True)
+            except Exception as exc:
+                try:
+                    controller.RemoveReplacement(shader_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to remove replacement after rebind failure",
+                        exc_info=True,
+                    )
+                try:
+                    controller.FreeTargetResource(new_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to free replacement resource after rebind failure",
+                        exc_info=True,
+                    )
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    original_shader_hash=original_hash,
+                    success=False,
+                    error_message=f"Replacement applied but rebind failed: {exc}",
+                    error_code="shader_replace_rebind_failed",
+                    error_category="runtime",
+                    error_details={
+                        "event_id": int(event_id),
+                        "stage": stage.value.upper(),
+                        "session_id": str(session_id),
+                        "shader_id": _shader_id_str(shader_id),
+                        "replacement_shader_id": _shader_id_str(new_id),
+                        "entry_point": str(entry_point),
+                        "encoding": encoding_name,
+                        "compile_flags": compile_flag_payload,
+                        "exception_type": type(exc).__name__,
+                        "failure_stage": "rebind_event",
+                        "failure_reason": "set_frame_event_failed",
+                    },
+                    messages=messages,
+                    source_before_text=source,
+                    source_after_text=modified,
+                    disassembly_target=str(disasm_target),
+                    encoding=encoding_name,
+                    entry_point=str(entry_point),
+                    compile_flags=compile_flag_payload,
+                )
+
             applied_hash = hashlib.sha256(
                 modified.encode("utf-8"),
             ).hexdigest()

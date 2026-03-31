@@ -606,6 +606,69 @@ class _PatchEngineSessionManager:
         return self.controller
 
 
+def test_list_replacements_filters_stale_metadata_when_patch_engine_has_no_live_patch(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _ListingPatchEngine:
+        def list_patches(self, session_id: str):  # type: ignore[no-untyped-def]
+            return []
+
+    _install_shader_replace_env(monkeypatch, _SupportedController())
+    server.server_runtime._patch_engine = _ListingPatchEngine()
+    server.server_runtime._session_manager = _FakeSessionManager()
+    server._runtime.shader_replacements["sess_demo"] = [
+        {
+            "replacement_id": "repl_stale",
+            "stage": "PS",
+            "resolved_event_id": 314,
+            "original_shader_id": "ResourceId::77",
+            "status": "applied",
+        }
+    ]
+
+    payload = json.loads(asyncio.run(server._dispatch_shader("list_replacements", {"session_id": "sess_demo"})))
+
+    assert payload["success"] is True
+    assert payload["replacements"] == []
+    assert server._runtime.shader_replacements["sess_demo"] == []
+
+
+def test_patch_engine_rebinds_target_event_after_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderCompileFlags=_FakeShaderCompileFlags,
+        ShaderCompileFlag=_FakeShaderCompileFlag,
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(patch_engine_mod, "_to_rd_stage", lambda stage: "ps")
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_get_best_encoding",
+        staticmethod(lambda controller, session_id: ("SPIRVAsm", "SPIR-V (RenderDoc)")),
+    )
+
+    controller = _PatchEngineController()
+    session_manager = _PatchEngineSessionManager(controller)
+    engine = patch_engine_mod.PatchEngine()
+
+    result = asyncio.run(
+        engine.apply_patch(
+            session_id="sess_demo",
+            event_id=314,
+            stage=ShaderStage.PS,
+            session_manager=session_manager,
+            patch_spec=PatchSpec(
+                patch_id="repl_demo",
+                target_event_id=314,
+                target_stage=ShaderStage.PS,
+                target_shader_id="ResourceId::77",
+                ops=[PatchOp(op="replace_expr", expr_from="main", expr_to="main_changed")],
+            ),
+        )
+    )
+
+    assert result.success is True
+    assert controller.set_frame_event_calls == [(314, True), (314, True)]
+
+
 def test_patch_engine_build_target_shader_uses_shader_compile_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_rd = SimpleNamespace(
         ResourceId=lambda: "ResourceId::0",

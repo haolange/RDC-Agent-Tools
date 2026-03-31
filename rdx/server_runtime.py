@@ -1693,6 +1693,41 @@ async def _choose_visual_output_target(
     return target_texture_id, texture_desc, chosen_output_slot, best_target_source
 
 
+async def _resolve_visual_target_for_event(
+    session_id: str,
+    event_id: int,
+    *,
+    target: Optional[Dict[str, Any]] = None,
+    allow_framebuffer_fallback: bool = True,
+) -> Tuple[Any, Optional[Any], Dict[str, Any], Dict[str, Any]]:
+    texture_id, texture_desc, chosen_output_slot, target_source = await _choose_visual_output_target(
+        session_id,
+        event_id,
+        target=target,
+        allow_framebuffer_fallback=allow_framebuffer_fallback,
+    )
+    truth_meta = dict(await _event_truth_metadata(session_id, int(event_id)))
+    reasons = list(truth_meta.get("summary_degraded_reasons") or [])
+    if str(target_source or "").startswith("event_binding_"):
+        if "visual_target_binding_fallback" not in reasons:
+            reasons.append("visual_target_binding_fallback")
+        truth_meta["binding_truth_level"] = "binding_degraded"
+        truth_meta["evidence_truth_level"] = "visual_evidence_only"
+    elif str(target_source or "") == "framebuffer_fallback":
+        if "visual_target_framebuffer_fallback" not in reasons:
+            reasons.append("visual_target_framebuffer_fallback")
+        truth_meta["binding_truth_level"] = "binding_degraded"
+        truth_meta["evidence_truth_level"] = "visual_evidence_only"
+    truth_meta["summary_degraded_reasons"] = reasons
+    target_payload = {
+        "texture_id": str(texture_id),
+        "output_slot": int(chosen_output_slot) if chosen_output_slot is not None else None,
+        "target_source": str(target_source or ""),
+        "texture_format": _texture_format_name(texture_desc),
+    }
+    return texture_id, texture_desc, target_payload, truth_meta
+
+
 def _preview_overlay_for_marker(rd: Any, region_marker_mode: str) -> Any:
     if str(region_marker_mode or "none") == _PREVIEW_REGION_MARKER_MODE:
         return getattr(rd.DebugOverlay, "ViewportScissor", rd.DebugOverlay.NoOverlay)
@@ -1838,19 +1873,21 @@ async def _sync_context_preview(
     state = _select_session_from_state(state)
     _store_context_state(state, ctx)
     preview = _preview_state_value(ctx)
+    requested_enable = bool(preview.get("enabled"))
     if enable_intent is not None:
+        requested_enable = bool(enable_intent)
         preview = _preview_update_payload(
             ctx,
             preview,
-            enabled=bool(enable_intent),
-            state_name="disabled" if not enable_intent else ("starting" if not preview.get("enabled") else str(preview.get("state") or "starting")),
+            enabled=bool(preview.get("enabled")) if requested_enable else False,
+            state_name="disabled" if not requested_enable else ("starting" if not preview.get("enabled") else str(preview.get("state") or "starting")),
             last_error="",
-            display=default_preview_display_state() if not enable_intent else preview.get("display"),
+            display=default_preview_display_state() if not requested_enable else preview.get("display"),
         )
         _store_preview_state(ctx, preview)
         preview = _preview_state_value(ctx)
 
-    if not preview.get("enabled"):
+    if not requested_enable:
         await _close_preview_binding(ctx)
         preview = _preview_update_payload(
             ctx,
@@ -1866,6 +1903,7 @@ async def _sync_context_preview(
         )
         return _store_preview_state(ctx, preview)
 
+    retain_enabled = bool(preview.get("enabled"))
     current_session_id = str(state.get("current_session_id") or "").strip()
     current_capture_file_id = str(state.get("current_capture_file_id") or "").strip()
     current_session_record = (
@@ -1893,7 +1931,7 @@ async def _sync_context_preview(
         preview = _preview_update_payload(
             ctx,
             preview,
-            enabled=True,
+            enabled=retain_enabled,
             state_name="failed" if strict else "stale",
             bound_session_id="",
             bound_capture_file_id=current_capture_file_id,
@@ -1914,7 +1952,7 @@ async def _sync_context_preview(
         preview = _preview_update_payload(
             ctx,
             preview,
-            enabled=True,
+            enabled=retain_enabled,
             state_name="failed" if strict else "stale",
             bound_session_id=current_session_id,
             bound_capture_file_id=current_capture_file_id,
@@ -1940,7 +1978,7 @@ async def _sync_context_preview(
         preview = _preview_update_payload(
             ctx,
             preview,
-            enabled=True,
+            enabled=retain_enabled,
             state_name="failed" if strict else "stale",
             bound_session_id=current_session_id,
             bound_capture_file_id=current_capture_file_id,
@@ -1969,7 +2007,7 @@ async def _sync_context_preview(
         preview = _preview_update_payload(
             ctx,
             preview,
-            enabled=True,
+            enabled=retain_enabled,
             state_name="failed" if strict else "stale",
             bound_session_id=current_session_id,
             bound_capture_file_id=current_capture_file_id,
@@ -1992,7 +2030,7 @@ async def _sync_context_preview(
         preview = _preview_update_payload(
             ctx,
             preview,
-            enabled=True,
+            enabled=retain_enabled,
             state_name="reconnecting" if preview.get("bound_session_id") else "starting",
             backend=current_backend,
             bound_session_id=current_session_id,
@@ -2002,16 +2040,35 @@ async def _sync_context_preview(
             display=default_preview_state(backend=current_backend, enabled=True).get("display"),
         )
         _store_preview_state(ctx, preview)
-        binding = await _create_preview_binding(
-            ctx,
-            title=_preview_title(
+        try:
+            binding = await _create_preview_binding(
                 ctx,
+                title=_preview_title(
+                    ctx,
+                    backend=current_backend,
+                    session_id=current_session_id,
+                    event_id=active_event_id,
+                    display=preview.get("display"),
+                ),
+            )
+        except CoreError as exc:
+            await _close_preview_binding(ctx)
+            preview = _preview_update_payload(
+                ctx,
+                preview,
+                enabled=retain_enabled,
+                state_name="failed" if strict else "stale",
+                bound_session_id=current_session_id if retain_enabled else "",
+                bound_capture_file_id=current_capture_file_id if retain_enabled else "",
+                bound_event_id=active_event_id if retain_enabled else 0,
                 backend=current_backend,
-                session_id=current_session_id,
-                event_id=active_event_id,
-                display=preview.get("display"),
-            ),
-        )
+                last_error=exc.message,
+                display=default_preview_display_state(),
+            )
+            snapshot = _store_preview_state(ctx, preview)
+            if strict:
+                raise
+            return snapshot
     elif session_changed:
         await _close_preview_output(binding)
         preview = _preview_update_payload(
@@ -2040,7 +2097,7 @@ async def _sync_context_preview(
         preview = _preview_update_payload(
             ctx,
             preview,
-            enabled=True,
+            enabled=retain_enabled,
             state_name="failed",
             bound_session_id=current_session_id,
             bound_capture_file_id=current_capture_file_id,
@@ -7085,7 +7142,12 @@ async def _dispatch_event(action: str, args: Dict[str, Any]) -> str:
             item = bounded_action(root, 0)
             if item is not None:
                 out.append(item)
-        return _ok(actions=out, pagination={"max_nodes": max_nodes, "emitted_nodes": emitted, "truncated": emitted >= max_nodes})
+        return _ok(
+            actions=out,
+            pagination={"max_nodes": max_nodes, "emitted_nodes": emitted, "truncated": emitted >= max_nodes},
+            lookup_scope="root_browse",
+            recommended_followup_tool="rd.event.get_action_tree",
+        )
 
     if action == "get_action_tree":
         max_depth = args.get("max_depth")
@@ -7306,6 +7368,15 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
     )
     snapshot_dict = snapshot.model_dump(mode="json")
     truth_meta = _pipeline_truth_metadata(session_id, snapshot_dict)
+    visual_target_payload: Dict[str, Any] = {}
+    try:
+        _, _, visual_target_payload, truth_meta = await _resolve_visual_target_for_event(
+            session_id,
+            resolved_event_id,
+            allow_framebuffer_fallback=True,
+        )
+    except Exception:
+        visual_target_payload = {}
     snapshot_dict.update(truth_meta)
     controller = await _get_controller(session_id)
     if resolved_event_id > 0:
@@ -7328,6 +7399,8 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
             "summary_degraded_reasons": list(truth_meta.get("summary_degraded_reasons") or []),
             "binding_truth_level": truth_meta.get("binding_truth_level"),
             "evidence_truth_level": truth_meta.get("evidence_truth_level"),
+            "selected_visual_target": dict(visual_target_payload or {}),
+            "export_target_available": bool(visual_target_payload.get("texture_id")) if isinstance(visual_target_payload, dict) else False,
         }
         return _pipeline_ok(summary=summary)
     if action == "get_stage_state":
@@ -7393,6 +7466,8 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
                 "summary_status": truth_meta.get("summary_status"),
                 "summary_degraded_reasons": list(truth_meta.get("summary_degraded_reasons") or []),
                 "binding_truth_level": truth_meta.get("binding_truth_level"),
+                "selected_visual_target": dict(visual_target_payload or {}),
+                "export_target_available": bool(visual_target_payload.get("texture_id")) if isinstance(visual_target_payload, dict) else False,
             }
         )
     if action == "get_render_targets":
@@ -7413,7 +7488,22 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
     if action == "get_sampler_bindings":
         return _pipeline_ok(samplers=[])
     if action == "get_constant_buffers":
-        return _pipeline_ok(constant_buffers=[])
+        rd_stage = _rd_stage(stage)
+        shader_id = await _offload(pipe.GetShader, rd_stage)
+        reflection = await _offload(pipe.GetShaderReflection, rd_stage)
+        constant_buffers = await _collect_constant_buffers(
+            controller,
+            pipe,
+            reflection,
+            stage,
+            shader_id,
+            slot=_as_int(args.get("slot"), 0) if args.get("slot") is not None else None,
+            array_index=_as_int(args.get("array_index"), 0),
+            include_contents=_as_bool(args.get("include_contents"), False),
+            max_bytes=_as_int(args.get("max_bytes"), 1048576),
+            flatten=_as_bool(args.get("flatten"), True),
+        )
+        return _pipeline_ok(constant_buffers=constant_buffers)
     if action == "get_push_constants":
         return _pipeline_ok(push_constants=[])
     if action == "get_dynamic_state":
@@ -8714,6 +8804,307 @@ def _shader_raw_bytes(reflection: Any) -> bytes:
         return b""
 
 
+def _replacement_metadata_entries(session_id: str) -> List[Dict[str, Any]]:
+    entries = _runtime.shader_replacements.get(session_id, [])
+    if not isinstance(entries, list):
+        return []
+    return [dict(item) for item in entries if isinstance(item, dict)]
+
+
+def _replacement_from_spec(spec: Any) -> Dict[str, Any]:
+    stage = getattr(getattr(spec, "target_stage", None), "value", getattr(spec, "target_stage", ""))
+    return {
+        "replacement_id": str(getattr(spec, "patch_id", "") or ""),
+        "stage": str(stage or "").upper(),
+        "resolved_event_id": int(getattr(spec, "target_event_id", 0) or 0),
+        "original_shader_id": str(getattr(spec, "target_shader_id", "") or ""),
+        "status": "applied",
+        "messages": [],
+    }
+
+
+def _active_replacement_specs(session_id: str) -> Optional[List[Any]]:
+    if _patch_engine is None or not hasattr(_patch_engine, "list_patches"):
+        return None
+    try:
+        specs = list(_patch_engine.list_patches(session_id))
+    except Exception:
+        return None
+    return specs
+
+
+def _list_replacement_payloads(session_id: str) -> List[Dict[str, Any]]:
+    metadata_entries = _replacement_metadata_entries(session_id)
+    specs = _active_replacement_specs(session_id)
+    if specs is None:
+        return metadata_entries
+
+    metadata_by_id = {str(item.get("replacement_id") or ""): item for item in metadata_entries}
+    ordered: List[Dict[str, Any]] = []
+    for spec in specs:
+        replacement_id = str(getattr(spec, "patch_id", "") or "")
+        if not replacement_id:
+            continue
+        ordered.append(dict(metadata_by_id.get(replacement_id) or _replacement_from_spec(spec)))
+    _runtime.shader_replacements[session_id] = [dict(item) for item in ordered]
+    return ordered
+
+
+def _store_replacement_payload(session_id: str, replacement: Dict[str, Any]) -> None:
+    replacement_id = str(replacement.get("replacement_id") or "")
+    entries = [
+        dict(item)
+        for item in _replacement_metadata_entries(session_id)
+        if str(item.get("replacement_id") or "") != replacement_id
+    ]
+    entries.append(dict(replacement))
+    _runtime.shader_replacements[session_id] = entries
+
+
+def _shader_value_payload(value: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    if value is None:
+        return payload
+    for field_name in ("f16v", "f32v", "f64v", "s8v", "s16v", "s32v", "s64v", "u8v", "u16v", "u32v", "u64v"):
+        if not hasattr(value, field_name):
+            continue
+        try:
+            items = [item for item in list(getattr(value, field_name) or [])]
+        except Exception:
+            continue
+        if items:
+            payload[field_name] = items
+    return payload
+
+
+def _shader_variable_type_name(variable: Any) -> str:
+    type_obj = getattr(variable, "type", None)
+    descriptor = getattr(type_obj, "descriptor", None)
+    for attr_name in ("name", "type", "baseType"):
+        candidate = getattr(descriptor, attr_name, None) if descriptor is not None else getattr(type_obj, attr_name, None)
+        if candidate is not None and str(candidate):
+            return str(candidate)
+    if descriptor is not None:
+        return str(descriptor)
+    if type_obj is not None:
+        return str(type_obj)
+    return ""
+
+
+def _shader_variable_layout_payload(variable: Any) -> Dict[str, Any]:
+    return {
+        "name": str(getattr(variable, "name", "") or ""),
+        "type": _shader_variable_type_name(variable),
+        "rows": int(getattr(variable, "rows", 0) or 0),
+        "columns": int(getattr(variable, "columns", 0) or 0),
+        "members": [
+            _shader_variable_layout_payload(member)
+            for member in (getattr(variable, "members", None) or [])
+        ],
+    }
+
+
+def _simplify_shader_value(payload: Dict[str, Any]) -> Any:
+    for field_name in ("f32v", "f64v", "s32v", "u32v", "s16v", "u16v", "s8v", "u8v", "s64v", "u64v", "f16v"):
+        values = payload.get(field_name)
+        if isinstance(values, list) and values:
+            return values[0] if len(values) == 1 else values
+    return payload
+
+
+def _shader_variable_payload(variable: Any) -> Dict[str, Any]:
+    payload = _shader_variable_layout_payload(variable)
+    value_payload = _shader_value_payload(getattr(variable, "value", None))
+    if value_payload:
+        payload["value"] = value_payload
+    if payload.get("members"):
+        payload["members"] = [
+            _shader_variable_payload(member)
+            for member in (getattr(variable, "members", None) or [])
+        ]
+    return payload
+
+
+def _flatten_shader_variable_values(variable: Any, prefix: str, output: Dict[str, Any]) -> None:
+    current_name = str(getattr(variable, "name", "") or "")
+    current_path = current_name if not prefix else (f"{prefix}.{current_name}" if current_name else prefix)
+    members = list(getattr(variable, "members", None) or [])
+    if members:
+        for member in members:
+            _flatten_shader_variable_values(member, current_path, output)
+        return
+    value_payload = _shader_value_payload(getattr(variable, "value", None))
+    if current_path and value_payload:
+        output[current_path] = _simplify_shader_value(value_payload)
+
+
+def _pipeline_object_for_cbuffer(pipe: Any, stage_name: str) -> Any:
+    rd = _get_rd()
+    if str(stage_name or "").lower() == "cs" and hasattr(pipe, "GetComputePipelineObject"):
+        try:
+            return pipe.GetComputePipelineObject()
+        except Exception:
+            pass
+    if hasattr(pipe, "GetGraphicsPipelineObject"):
+        try:
+            return pipe.GetGraphicsPipelineObject()
+        except Exception:
+            pass
+    if hasattr(pipe, "GetComputePipelineObject"):
+        try:
+            return pipe.GetComputePipelineObject()
+        except Exception:
+            pass
+    return rd.ResourceId()
+
+
+def _constant_buffer_binding_info(bound_block: Any, block: Any, array_index: int) -> Dict[str, Any]:
+    resource = None
+    resource_id = ""
+    offset = 0
+    size = 0
+    set_or_space = 0
+    slot_value = int(getattr(block, "bindPoint", 0) or 0)
+
+    descriptor = getattr(bound_block, "descriptor", None) if bound_block is not None else None
+    access = getattr(bound_block, "access", None) if bound_block is not None else None
+    if descriptor is not None:
+        resource = getattr(descriptor, "resource", None)
+        if resource is not None and not _is_null_resource_id(resource):
+            resource_id = str(resource)
+        offset = _as_int(getattr(descriptor, "byteOffset", getattr(descriptor, "offset", 0)), 0)
+        size = _as_int(getattr(descriptor, "byteSize", getattr(descriptor, "size", 0)), 0)
+        slot_value = _as_int(getattr(access, "index", slot_value), slot_value)
+        set_or_space = _as_int(getattr(access, "type", getattr(access, "bindset", 0)), 0)
+        return {
+            "resource": resource,
+            "resource_id": resource_id,
+            "offset": offset,
+            "size": size,
+            "slot": slot_value,
+            "set_or_space": set_or_space,
+        }
+
+    bind_point = getattr(bound_block, "bindPoint", None) if bound_block is not None else None
+    if bind_point is not None:
+        slot_value = _as_int(getattr(bind_point, "bind", slot_value), slot_value)
+        set_or_space = _as_int(getattr(bind_point, "bindset", 0), 0)
+    buffers = list(getattr(bound_block, "buffers", None) or []) if bound_block is not None else []
+    if 0 <= int(array_index) < len(buffers):
+        buffer = buffers[int(array_index)]
+        resource = getattr(buffer, "resourceId", None)
+        if resource is not None and not _is_null_resource_id(resource):
+            resource_id = str(resource)
+        offset = _as_int(getattr(buffer, "byteOffset", 0), 0)
+        size = _as_int(getattr(buffer, "byteSize", 0), 0)
+    return {
+        "resource": resource,
+        "resource_id": resource_id,
+        "offset": offset,
+        "size": size,
+        "slot": slot_value,
+        "set_or_space": set_or_space,
+    }
+
+
+async def _collect_constant_buffers(
+    controller: Any,
+    pipe: Any,
+    reflection: Any,
+    stage_name: str,
+    shader_id: Any,
+    *,
+    slot: Optional[int] = None,
+    array_index: int = 0,
+    include_contents: bool = False,
+    max_bytes: int = 1048576,
+    flatten: bool = True,
+) -> List[Dict[str, Any]]:
+    if reflection is None:
+        return []
+    block_defs = list(getattr(reflection, "constantBlocks", None) or [])
+    if not block_defs:
+        return []
+
+    rd = _get_rd()
+    rd_stage = _rd_stage(stage_name)
+    entry_point = str(getattr(reflection, "entryPoint", "") or "main")
+    pipeline_obj = _pipeline_object_for_cbuffer(pipe, stage_name)
+    requested_slot = None if slot is None else int(slot)
+    results: List[Dict[str, Any]] = []
+
+    for block_index, block in enumerate(block_defs):
+        block_slot = _as_int(getattr(block, "bindPoint", 0), 0)
+        if requested_slot is not None and int(block_slot) != requested_slot:
+            continue
+
+        bound_block = None
+        if hasattr(pipe, "GetConstantBlock"):
+            try:
+                bound_block = await _offload(pipe.GetConstantBlock, rd_stage, int(block_index), int(array_index))
+            except Exception:
+                bound_block = None
+
+        binding = _constant_buffer_binding_info(bound_block, block, int(array_index))
+        vars_layout = [
+            _shader_variable_layout_payload(variable)
+            for variable in (getattr(block, "variables", None) or [])
+        ]
+        entry: Dict[str, Any] = {
+            "stage": str(stage_name or "").upper(),
+            "slot": int(binding.get("slot", block_slot) or 0),
+            "array_index": int(array_index),
+            "set_or_space": int(binding.get("set_or_space", 0) or 0),
+            "resource_id": str(binding.get("resource_id") or ""),
+            "offset": int(binding.get("offset", 0) or 0),
+            "size": int(binding.get("size", 0) or 0),
+            "block_index": int(block_index),
+            "block_name": str(getattr(block, "name", "") or ""),
+            "byte_size": int(getattr(block, "byteSize", 0) or 0),
+            "vars": vars_layout,
+        }
+
+        if include_contents and hasattr(controller, "GetCBufferVariableContents"):
+            resource = binding.get("resource")
+            if resource is None:
+                resource = rd.ResourceId()
+            requested_length = int(binding.get("size", 0) or 0)
+            if requested_length <= 0:
+                requested_length = int(getattr(block, "byteSize", 0) or 0)
+            if requested_length > 0 and max_bytes > 0:
+                requested_length = min(requested_length, int(max_bytes))
+            try:
+                raw_contents = await _offload(
+                    controller.GetCBufferVariableContents,
+                    pipeline_obj,
+                    shader_id,
+                    rd_stage,
+                    entry_point,
+                    int(block_index),
+                    resource,
+                    int(binding.get("offset", 0) or 0),
+                    int(requested_length),
+                )
+                serialized_contents = [
+                    _shader_variable_payload(variable)
+                    for variable in list(raw_contents or [])
+                ]
+                entry["contents"] = serialized_contents
+                if flatten:
+                    flattened: Dict[str, Any] = {}
+                    for variable in list(raw_contents or []):
+                        _flatten_shader_variable_values(variable, "", flattened)
+                    entry["flattened_contents"] = flattened
+            except Exception as exc:
+                entry["contents"] = []
+                entry["flattened_contents"] = {} if flatten else None
+                entry["decode_error"] = str(exc)
+
+        results.append(entry)
+
+    return results
+
+
 async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
     if action == "compile":
         session_id = str(args.get("session_id") or _context_snapshot().get("runtime", {}).get("session_id") or "").strip()
@@ -9391,13 +9782,13 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         )
 
     if action == "list_replacements":
-        replacements = _runtime.shader_replacements.get(session_id, [])
+        replacements = _list_replacement_payloads(session_id)
         return _ok(replacements=replacements)
 
     if action == "revert_replacement":
         _require(args, "replacement_id")
         replacement_id = str(args["replacement_id"])
-        repl = _runtime.shader_replacements.get(session_id, [])
+        repl = _list_replacement_payloads(session_id)
         if _patch_engine is None:
             return _err("Shader patch engine is not initialized", code="shader_replace_unavailable", category="runtime")
         reverted = await _patch_engine.revert_patch(session_id, replacement_id, _session_manager)
@@ -9595,7 +9986,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             }
             artifacts = [value for value in patch_artifacts.values() if value]
         if not no_source_change:
-            _runtime.shader_replacements.setdefault(session_id, []).append(replacement)
+            _store_replacement_payload(session_id, replacement)
         return _ok(
             replacement_id=replacement["replacement_id"],
             status=replacement["status"],
@@ -9670,22 +10061,30 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         return _ok(source=None, files=[])
 
     if action == "get_constant_buffer_contents":
-        stage_name = _parse_stage(args.get("stage"))
-        rd_stage_cb = _rd_stage(stage_name)
-        constant_blocks = await _offload(pipe.GetConstantBlocks, rd_stage_cb)
-        out = []
-        for cb in constant_blocks or []:
-            bind = getattr(cb, "bindPoint", None)
-            for buf in (getattr(cb, "buffers", None) or []):
-                out.append(
-                    {
-                        "slot": int(getattr(bind, "bind", 0)) if bind is not None else 0,
-                        "resource_id": str(getattr(buf, "resourceId", "")),
-                        "offset": int(getattr(buf, "byteOffset", 0)),
-                        "size": int(getattr(buf, "byteSize", 0)),
-                    },
-                )
-        return _ok(cbuffer={"vars": out})
+        requested_shader_id = str(args.get("shader_id", "")).strip()
+        try:
+            stage_name, resolved_shader_id, reflection = await _resolve_shader_binding(
+                shader_id=requested_shader_id,
+                stage_name=args.get("stage"),
+                require_reflection=True,
+            )
+        except CoreError as exc:
+            return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
+        slot_value = _as_int(args.get("slot"), 0) if args.get("slot") is not None else None
+        cbuffer_entries = await _collect_constant_buffers(
+            controller,
+            pipe,
+            reflection,
+            stage_name,
+            resolved_shader_id,
+            slot=slot_value,
+            array_index=_as_int(args.get("array_index"), 0),
+            include_contents=True,
+            max_bytes=_as_int(args.get("max_bytes"), 1048576),
+            flatten=_as_bool(args.get("flatten"), True),
+        )
+        cbuffer_payload = dict(cbuffer_entries[0]) if cbuffer_entries else {}
+        return _ok(cbuffer=cbuffer_payload, shader_id=resolved_shader_id, resolved_event_id=int(event_id))
 
     if action in {"list_entry_points", "get_bindpoint_mapping", "get_constant_block_layout", "get_reflection", "get_disassembly"}:
         shader_id = str(args.get("shader_id", "")).strip()
@@ -10032,12 +10431,14 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
         if event_id <= 0:
             event_id = await _ensure_event(session_id, None)
         explicit_target = target.get("texture_id") or target.get("textureId")
-        target_texture_id, texture_desc, chosen_output_slot, target_source = await _choose_visual_output_target(
+        target_texture_id, texture_desc, visual_target_payload, truth_meta = await _resolve_visual_target_for_event(
             session_id,
             event_id,
             target=target,
             allow_framebuffer_fallback=True,
         )
+        chosen_output_slot = visual_target_payload.get("output_slot") if isinstance(visual_target_payload, dict) else None
+        target_source = str(visual_target_payload.get("target_source") or "") if isinstance(visual_target_payload, dict) else ""
         binding_index = await _binding_name_index_for_event(session_id, event_id)
         name_info = _compose_texture_name_info(
             target_texture_id,
@@ -10123,10 +10524,10 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
                 chosen_output_slot=chosen_output_slot,
                 texture_id=str(target_texture_id),
                 target_source=target_source,
-                binding_truth_level=payload.get("binding_truth_level"),
-                visual_truth_level=payload.get("visual_truth_level"),
-                evidence_truth_level=payload.get("evidence_truth_level"),
-                summary_degraded_reasons=list(payload.get("summary_degraded_reasons") or []),
+                binding_truth_level=truth_meta.get("binding_truth_level"),
+                visual_truth_level=single.get("visual_truth_level") or truth_meta.get("visual_truth_level"),
+                evidence_truth_level=single.get("evidence_truth_level") or truth_meta.get("evidence_truth_level"),
+                summary_degraded_reasons=list(truth_meta.get("summary_degraded_reasons") or []),
             )
         return _ok(
             exports=exports,
@@ -10141,10 +10542,10 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
             chosen_output_slot=chosen_output_slot,
             texture_id=str(target_texture_id),
             target_source=target_source,
-            binding_truth_level=exports[0].get("binding_truth_level") if exports else "binding_degraded",
-            visual_truth_level=exports[0].get("visual_truth_level") if exports else "visual_valid",
-            evidence_truth_level=exports[0].get("evidence_truth_level") if exports else "visual_evidence_only",
-            summary_degraded_reasons=list(exports[0].get("summary_degraded_reasons") or []) if exports else [],
+            binding_truth_level=truth_meta.get("binding_truth_level"),
+            visual_truth_level=exports[0].get("visual_truth_level") if exports else truth_meta.get("visual_truth_level"),
+            evidence_truth_level=exports[0].get("evidence_truth_level") if exports else truth_meta.get("evidence_truth_level"),
+            summary_degraded_reasons=list(truth_meta.get("summary_degraded_reasons") or []),
         )
     if action == "texture":
         return await _export_texture_file({"session_id": session_id, **dict(args or {})})
@@ -10251,16 +10652,22 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
         stages = _as_list(args.get("stages"), default=["vs", "ps", "cs"])
         dumped = []
         for stage in stages:
-            resp = await _dispatch_shader(
-                "get_constant_buffer_contents",
-                {"session_id": session_id, "shader_id": args.get("shader_id"), "stage": stage},
+            resp = await _dispatch_pipeline(
+                "get_constant_buffers",
+                {
+                    "session_id": session_id,
+                    "stage": stage,
+                    "include_contents": _as_bool(args.get("include_decoded"), True),
+                    "max_bytes": _as_int(args.get("max_bytes"), 1048576),
+                    "flatten": True,
+                },
             )
             payload = json.loads(resp)
             if payload.get("success"):
                 file_path = output_dir / f"cbuffer_{stage}.json"
-                file_path.write_text(json.dumps(payload.get("cbuffer", {}), ensure_ascii=False, indent=2), encoding="utf-8")
+                file_path.write_text(json.dumps(payload.get("constant_buffers", []), ensure_ascii=False, indent=2), encoding="utf-8")
                 dumped.append(str(file_path))
-        return _ok(dumped_paths=dumped)
+        return _ok(dumped_paths=dumped, saved_files=dumped)
     if action == "repro_bundle_zip":
         _require(args, "output_path")
         output_path = Path(str(args["output_path"]))
@@ -10340,7 +10747,7 @@ async def _dispatch_diag(action: str, args: Dict[str, Any]) -> str:
         payload = json.loads(bind_resp)
         return _ok(report={"binding_count": len(payload.get("bindings", [])), "issues": issues})
     if action == "check_constant_buffers":
-        cb_resp = await _dispatch_pipeline("get_constant_buffers", {"session_id": session_id})
+        cb_resp = await _dispatch_pipeline("get_constant_buffers", {"session_id": session_id, "include_contents": _as_bool(args.get("decode_values"), True)})
         payload = json.loads(cb_resp)
         return _ok(report={"constant_buffers": payload.get("constant_buffers", []), "issues": issues})
     if action == "check_d3d12_resource_states":

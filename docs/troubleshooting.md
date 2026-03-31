@@ -99,6 +99,7 @@ rdx.bat --non-interactive mcp --ensure-env
   - 不会悄悄从 remote 退回 local
   - 不会悄悄从 `active_event` 退回 frame-end framebuffer
   - 不会悄悄改成导出图片/轮询截图式伪预览
+- 如果第一次打开 preview 就失败，`preview.enabled` 会保持 `false`，并把错误写入 `preview.last_error`；不要把这类失败误判成“enabled intent 已经建立，只是窗口暂时没画出来”。
 
 因此，`preview.state=failed|stale` 时，应优先修 session / event / backend 条件，而不是把窗口输出当成平台主真相。
 
@@ -310,6 +311,7 @@ rdx call rd.event.get_actions --args-json "{\"session_id\":\"<session_id>\"}" --
 - 先使用 `rdx.bat` 的 `Start CLI`
 - 或把 JSON 写入 UTF-8 文件后，通过 `--args-file <path>` 传参
 - 只有在 shell quoting 明确可控时，才继续使用 `--args-json`
+- 若这里写的是相对 `--args-file`，路径同样按启动 `rdx.bat` 时的当前工作目录解析。
 
 例如：
 
@@ -438,6 +440,7 @@ daemon 退出后，本地与可恢复 remote session 默认都会保留在持久
 现在只看 canonical 结果：
 
 - 成功时，`ok=true`，并返回 `status="applied"`、`replacement_id` 与 `resolved_event_id`。
+- 成功返回还应包含 `original_shader_id`、`applied_to_shader_hash` 与 `original_shader_hash`，并且 runtime 已经重新绑定回目标 event；如果 replacement 应用后重绑失败，结果必须直接落入错误面，而不是保留半成功状态。
 - backend 不支持 runtime 替换时，会返回显式 capability 错误，例如 `shader_replace_backend_unsupported`。
 - 编译、绑定校验或 replay runtime 失败时，会返回显式 runtime/validation 错误。
 - `error.code/details` 现在会尽量区分：
@@ -475,6 +478,7 @@ daemon 退出后，本地与可恢复 remote session 默认都会保留在持久
 - 对 Android remote Vulkan 样本，raw asm 精确 patch 成功并不等价于“这组 decoration 就是正确修复”。删除单个 `OpDecorate ... RelaxedPrecision` 也可能让多个不相关区域一起掉成 `0`；因此 raw asm bisect 必须配套多点采样与稳定 revert，而不是只看单个像素。
 
 这条 raw asm 编辑链解决的是“精确 IR patch / apply / revert”问题；它不等价于 `qrenderdoc` 主视窗的最终 framebuffer 观察链。若当前 `rd.export.screenshot` 的 frame-end auto target 与 UI 主视图不一致，应单独把它当成 framebuffer 观察问题排查，不要和 raw asm 编辑能力混为一谈。
+当前 `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` 提供的 `selected_visual_target` 与 `export_target_available`，就是排查这类“replacement 已 applied 但 screenshot/readback 没变化”问题的第一入口。
 - 如果多个不相关采样点一起掉成 `0,0,0,0`，应把它判断为“当前 patch 把整个输出面打坏了”，而不是“已经得到正确黑发效果”。
 
 泛化判断规则如下：

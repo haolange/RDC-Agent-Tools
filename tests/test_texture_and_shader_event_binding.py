@@ -192,6 +192,62 @@ def test_shader_reflection_and_disassembly_support_stage_only_queries(monkeypatc
     assert disassembly_payload["disassembly"] == "disassembly:mock-target"
 
 
+def test_shader_get_constant_buffer_contents_returns_decoded_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return fn(*args, **kwargs)
+
+    async def _fake_get_controller(session_id: str):  # type: ignore[no-untyped-def]
+        return _FakeShaderController()
+
+    async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
+        return int(event_id or 314)
+
+    async def _fake_resolve_shader_binding(*, shader_id: str = "", stage_name=None, require_reflection=False):  # type: ignore[no-untyped-def]
+        return "ps", "ResourceId::77", SimpleNamespace(entryPoint="main", constantBlocks=[SimpleNamespace(name="Globals", bindPoint=2, byteSize=64, variables=[])])
+
+    async def _fake_collect_constant_buffers(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return [
+            {
+                "stage": "PS",
+                "slot": 2,
+                "resource_id": "ResourceId::cb0",
+                "offset": 16,
+                "size": 64,
+                "block_name": "Globals",
+                "vars": [{"name": "Tint", "type": "float4"}],
+                "contents": [{"name": "Tint", "value": {"f32v": [1.0, 0.0, 0.0, 1.0]}}],
+                "flattened_contents": {"Tint": [1.0, 0.0, 0.0, 1.0]},
+            }
+        ]
+
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
+    monkeypatch.setattr(server.server_runtime, "_rd_stage", lambda stage: stage)
+    monkeypatch.setattr(server.server_runtime, "_resolve_shader_binding", _fake_resolve_shader_binding)
+    monkeypatch.setattr(server.server_runtime, "_collect_constant_buffers", _fake_collect_constant_buffers)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "get_constant_buffer_contents",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 314,
+                    "stage": "ps",
+                    "slot": 2,
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["resolved_event_id"] == 314
+    assert payload["shader_id"] == "ResourceId::77"
+    assert payload["cbuffer"]["slot"] == 2
+    assert payload["cbuffer"]["contents"][0]["name"] == "Tint"
+
+
 def test_texture_get_data_defaults_to_npz_container(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
         return int(event_id or 314)

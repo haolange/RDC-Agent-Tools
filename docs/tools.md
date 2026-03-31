@@ -111,9 +111,11 @@
 
 - `rd.event.set_active` 只接受可被 action tree 解析的 canonical `event_id`；失败不会污染 runtime / context 中现有的 `active_event_id`。
 - `rd.event.get_actions` 与 `rd.event.get_action_tree` 现在默认走有界返回，并通过 `pagination` 暴露是否截断；大 capture 下不再默认一次性物化整棵事件树。
+- `rd.event.get_actions` 的定位是 root/pass 级浏览入口；返回里会显式带 `lookup_scope="root_browse"` 与 `recommended_followup_tool="rd.event.get_action_tree"`，用于提醒上层把 deep event lookup 继续交给 tree 接口。
 - `rd.pipeline.*` 的同次调用内，snapshot 与 live pipeline 读取共享同一个已解析 event 上下文，不允许前后错位。
 - event-bound `rd.pipeline.*`、`rd.shader.*`、`rd.texture.get_pixel_value`、`rd.export.shader_bundle` 与 `rd.shader.debug_start` 会返回 `resolved_event_id`；如果 backend 不能精确绑定请求 event，必须显式失败，不允许 silent fallback。
 - `rd.pipeline.get_state` / `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` 会返回 truth/degrade 元数据，至少区分 `summary_status`、`summary_degraded_reasons`、`binding_truth_level` 与 `evidence_truth_level`。
+- `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` 还会返回 `selected_visual_target` 与 `export_target_available`；`rd.export.screenshot`、`rd.texture.get_data` 与 `rd.texture.get_pixel_value` 会和它们共享同一套 event output 解析。
 - `rd.texture.get_data` / `rd.texture.get_pixel_value` / `rd.export.screenshot` 也会带 `resolved_event_id`、target metadata 与 truth/degrade 标记；readback 或 screenshot 看起来“有结果”不等于绑定真相已验证。
 - `rd.resource.get_usage` / `rd.resource.get_history` 会同时暴露：
   - canonical `event_id`
@@ -124,6 +126,7 @@
 ## Shader 替换与调试口径
 
 - `rd.shader.edit_and_replace` 现在要么执行真实 runtime shader replacement，要么返回明确的 capability/runtime 失败；不再允许 `mock_applied` 一类伪成功。
+- `status="applied"` 只在 replacement 成功应用且 runtime 已重新绑定回目标 `event_id` 后出现；返回会保留 `replacement_id`、`resolved_event_id`、`original_shader_id`、`applied_to_shader_hash` 与 `original_shader_hash`，便于后续 screenshot/readback/revert 交叉核对。
 - `rd.shader.edit_and_replace` 在编译阶段会传入真实 `ShaderCompileFlags` 对象；错误会显式区分 `shader_binding_lookup_failed`、`shader_stage_mismatch`、`shader_source_mismatch`、`shader_patch_diff_failed`、`shader_build_failed`、`shader_replace_backend_unsupported` 与 `shader_replace_failed`，并在 `error.details` 中带 `failure_stage` / `failure_reason`。
 - `rd.shader.edit_and_replace` 现在支持 `emit_patch_artifacts` 与 `output_dir`，可直接导出改前 IR、改后 IR 与 unified diff，便于对照手工 `qrenderdoc` patch 流程。
 - `rd.shader.get_disassembly` 现在把 raw `SPIR-V Asm` 当成一等能力：当 `target="SPIR-V ASM"` 时，会优先返回 raw asm；返回中会显式包含 `source_encoding`、`is_raw_spirv_asm` 与 `source_hash`，便于后续做 optimistic guard。
@@ -133,10 +136,12 @@
 - `force_full_precision` 在 `SPIR-V (RenderDoc)` 目标下会把“本次到底命中了哪些 `RelaxedPrecision` 行”写进 `messages`；若变量没有直接命中任何 `RelaxedPrecision` 行，则会返回 `status="noop"` 并明确说明“matched no RelaxedPrecision lines for variables: ...”。
 - 对 Android remote Vulkan 的手动 IR 调试，不要只看单个采样点。高影响补丁即使只命中极少数 `RelaxedPrecision` 行，也可能把整个输出面一起打成 `0`。应同时用 `rd.texture.get_pixel_value`、`rd.export.screenshot` 与 `rd.shader.revert_replacement` 交叉验证。
 - 当 `rd.shader.edit_and_replace` 返回 `status="noop"` 时，表示当前 session 中没有创建 live replacement；这时不应再把该 `replacement_id` 当成需要回滚的 active replacement。
+- `rd.shader.list_replacements` / `rd.shader.revert_replacement` 现在都以 patch engine 的 live patch 集为准；陈旧 metadata 会被过滤并清理，避免 `list` 与 `revert` 出现双份真相。
 - `rd.shader.debug_start` 只在请求 event 的真实 debug 上下文可用时成功；如果只能跨 event 或 synthetic 回退，运行时会显式失败。
 - `rd.shader.debug_start` 在 remote replay 下会先读取 `remote_capability_matrix`；如果当前 backend/session 明确不支持 shader debug，会在创建 trace 前直接 truthful-fail。
 - `rd.shader.debug_start` 失败时会保留 `failure_stage` / `failure_reason`、`attempts`、`pixel_history_summary` 与 `resolved_context`，用于区分 target 配置失败、cross-event only、invalid trace 或 debugger handle 缺失。
 - `rd.export.shader_bundle` 会按请求 `event_id` 导出，并把 `requested_event_id` / `resolved_event_id` 一起写入 bundle。
+- `rd.pipeline.get_constant_buffers`、`rd.shader.get_constant_buffer_contents`、`rd.export.cbuffer_dump` 与 `rd.diag.check_constant_buffers` 现在共享同一套 constant buffer 解析与 decode 逻辑，不再一个返回结构化内容、另一个只剩空壳。
 
 ## Remote 说明
 

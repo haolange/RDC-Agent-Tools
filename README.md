@@ -78,6 +78,7 @@ rdx.bat --non-interactive mcp --ensure-env
 终端用户默认只需要这三条 `rdx.bat` 入口，不需要额外安装系统 `Python`、`pip` 或创建 `.venv`。
 
 `--non-interactive` 下如果子命令返回 canonical JSON，launcher 会直接透传完整 payload；只有 launcher 自身失败或子命令没有 JSON 时，才回退到短状态 JSON。
+对 `rdx.bat --non-interactive cli|mcp ... --args-file <path>`，相对路径按用户调用 `rdx.bat` 时的当前工作目录解析，而不是按 tools root 重写。
 
 ### cli/run_cli.py 
 
@@ -148,6 +149,7 @@ rdx.bat --non-interactive mcp --ensure-env --daemon-context smoke-test
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
 - 人类同步监控窗口固定通过 `rd.session.open_preview` 建立，并把状态写入 `rd.session.get_context.preview`。
 - preview 是 context 级 enabled intent：session 切换、resume、replay 重建后会自动重绑；`rd.session.close_preview`、`rd.core.shutdown` 与 `rdx context clear` 会关闭窗口并清掉该 intent。
+- 如果第一次 `rd.session.open_preview` 建窗或绑定失败，`rd.session.get_context.preview` 会保留 `enabled=false`，清空绑定字段，并把错误写入 `last_error`；不会残留“已启用但不可用”的 intent。
 - preview 不允许 silent fallback：不能悄悄从 remote 掉回 local，也不能悄悄从 `active_event` 退回 frame-end framebuffer 或导出轮询。
 - 当 preview 已 enabled 时，`rd.event.set_active`、`rd.replay.set_frame`、`rd.session.select_session` 与 `rd.session.resume` 会在返回前至少完成一次 preview 同步刷新尝试；若刷新失败，只更新 `rd.session.get_context.preview` 的状态与错误，不回滚 canonical runtime truth。
 - preview 窗口会按当前 framebuffer 几何自动调整大小，并把默认上限限制在当前屏幕工作区的 `50%`；若用户手动拖拽过窗口，在 framebuffer 几何不变时不会被持续抢改。
@@ -162,7 +164,9 @@ rdx.bat --non-interactive mcp --ensure-env --daemon-context smoke-test
 - `active_event_id` 与对外暴露的 canonical `event_id` 只表示可被 `rd.event.get_action_details` round-trip 的 action event；对 `rd.resource.get_usage` / `rd.resource.get_history` 中不可 round-trip 的底层记录，应查看 `raw_event_id` 与 `event_resolvable`。
 - event-bound `rd.pipeline.*`、`rd.shader.*`、`rd.texture.get_pixel_value`、`rd.export.shader_bundle` 与 `rd.shader.debug_start` 会返回 `resolved_event_id`；若 backend 不能精确绑定请求 event，运行时会显式失败，不做 silent fallback。
 - `rd.pipeline.get_state` / `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` / `rd.export.screenshot` / `rd.texture.get_data` 会返回 truth/degrade 元数据，用于区分 `visual_evidence_only`、`binding degraded`、`summary partial` 与 `api_summary_untrusted`。
+- `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` 现在会额外返回 `selected_visual_target` 与 `export_target_available`；`rd.export.screenshot` 与 event-bound texture readback 会共享同一套 event target 解析链，避免“pipeline 说无输出但 screenshot 又静默导出 RT0”的分叉。
 - `rd.shader.edit_and_replace` 现在要么执行真实 runtime shader replacement，要么返回明确的 capability/runtime 失败；不会再返回 `mock_applied` 一类伪成功状态。
+- `rd.shader.edit_and_replace` 只有在 replacement 应用后重新绑定目标 `event_id` 成功时，才会返回 `status="applied"`；返回中会保留 `replacement_id`、`resolved_event_id`、`original_shader_id`、`applied_to_shader_hash` 与 `original_shader_hash`，供后续 screenshot / readback / revert 做同链路核对。
 - `rd.shader.edit_and_replace` / patch engine 的错误面现在会显式区分绑定失败、stage mismatch、build failed、apply failed、backend unsupported 与 source hash mismatch，而不再把多阶段失败全部折叠成 `shader_not_bound`。
 - `rd.shader.debug_start` 会先读取 remote capability matrix；若当前 remote replay backend 明确不支持 shader debug，会在创建 trace 前直接 truthful-fail，并保留 `failure_stage` / `failure_reason` / `attempts`。
 - `rd.texture.get_data` 默认返回 `.npz` 容器，并显式带上 `content_kind="texture_readback_container"`、`container_format="npz"`、`artifact_path`、`saved_path` 与 `stats`。

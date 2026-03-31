@@ -126,6 +126,77 @@ def test_open_preview_rejects_non_current_session(monkeypatch: pytest.MonkeyPatc
     assert payload["error"]["code"] == "preview_session_mismatch"
 
 
+def test_open_preview_failure_does_not_leave_enabled_intent(monkeypatch: pytest.MonkeyPatch) -> None:
+    save_context_state(
+        {
+            "context_id": "ctx-preview",
+            "current_capture_file_id": "capf_preview",
+            "current_session_id": "sess_current",
+            "captures": {
+                "capf_preview": {
+                    "capture_file_id": "capf_preview",
+                    "file_path": "C:/captures/preview.rdc",
+                    "read_only": True,
+                }
+            },
+            "sessions": {
+                "sess_current": {
+                    "session_id": "sess_current",
+                    "capture_file_id": "capf_preview",
+                    "rdc_path": "C:/captures/preview.rdc",
+                    "frame_index": 0,
+                    "active_event_id": 23,
+                    "backend_type": "local",
+                    "state": "active",
+                    "is_live": True,
+                }
+            },
+        },
+        "ctx-preview",
+    )
+
+    async def _fake_ready(context_id: str):  # type: ignore[no-untyped-def]
+        return server.server_runtime._context_state(context_id)
+
+    async def _fake_ensure_live_session(session_id: str):  # type: ignore[no-untyped-def]
+        return server.ReplayHandle(session_id=str(session_id), capture_file_id="capf_preview", frame_index=0, active_event_id=23)
+
+    async def _fake_get_controller(session_id: str):  # type: ignore[no-untyped-def]
+        return SimpleNamespace()
+
+    async def _fake_load_action_index(session_id: str, *, controller=None):  # type: ignore[no-untyped-def]
+        action = SimpleNamespace(eventId=23, flags=0, children=[], customName="draw", name="draw")
+        return [action], [action], {23: action}
+
+    async def _fake_create_preview_binding(context_id: str, *, title: str):  # type: ignore[no-untyped-def]
+        raise server.server_runtime._preview_error(
+            "preview_window_create_failed",
+            "Failed to create preview window: test",
+            context_id=context_id,
+        )
+
+    monkeypatch.setattr(server.server_runtime, "ensure_context_ready", _fake_ready)
+    monkeypatch.setattr(server.server_runtime, "_ensure_live_session", _fake_ensure_live_session)
+    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(server.server_runtime, "_load_action_index", _fake_load_action_index)
+    monkeypatch.setattr(server.server_runtime, "_create_preview_binding", _fake_create_preview_binding)
+
+    payload = asyncio.run(
+        server.dispatch_operation(
+            "rd.session.open_preview",
+            {"context_id": "ctx-preview"},
+            transport="test",
+        )
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "preview_window_create_failed"
+    state = load_context_state("ctx-preview")
+    assert state["preview"]["enabled"] is False
+    assert state["preview"]["state"] == "disabled"
+    assert state["preview"]["last_error"]
+
+
 def test_close_preview_clears_enabled_intent(monkeypatch: pytest.MonkeyPatch) -> None:
     save_context_state(
         {

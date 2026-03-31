@@ -211,8 +211,8 @@ function Invoke-Subprocess {
             }
         }
 
-        $outText = if (Test-Path -LiteralPath $stdoutFile.FullName) { Get-Content -Raw -Path $stdoutFile.FullName } else { '' }
-        $errText = if (Test-Path -LiteralPath $stderrFile.FullName) { Get-Content -Raw -Path $stderrFile.FullName } else { '' }
+        $outText = if (Test-Path -LiteralPath $stdoutFile.FullName) { Get-Content -Raw -Encoding UTF8 -Path $stdoutFile.FullName } else { '' }
+        $errText = if (Test-Path -LiteralPath $stderrFile.FullName) { Get-Content -Raw -Encoding UTF8 -Path $stderrFile.FullName } else { '' }
         return [pscustomobject]@{
             ExitCode = [int]$proc.ExitCode
             TimedOut = $false
@@ -247,6 +247,13 @@ function Extract-JsonPayload {
     catch {
         return $null
     }
+}
+
+function Test-LooksLikeCanonicalJson {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    return $Text -match '"schema_version"\s*:' -and $Text -match '"ok"\s*:'
 }
 
 function Get-JsonStringProperty {
@@ -338,6 +345,11 @@ function Emit-ChildResult {
         if ($jsonText) { Write-Output $jsonText.Trim() }
         return Map-ExitCode -ChildExitCode $ExitCode -TimedOut $TimedOut -Payload $payload
     }
+    if (Test-LooksLikeCanonicalJson -Text $jsonText) {
+        Write-Output $jsonText.Trim()
+        if ($ExitCode -in @(0, 1, 2, 3, 4, 5)) { return $ExitCode }
+        return $script:RETURN_TOOL_ERROR
+    }
 
     if ($TimedOut) {
         Write-JsonStatus -Ok $false -ErrorCode $script:RETURN_TIMEOUT -ErrorMessage 'command timeout' -ContextId $ContextId
@@ -378,6 +390,35 @@ function Invoke-CommandWithOutput {
         if ($item -is [string]) { $textOutput += $item } else { $textOutput += [string]$item }
     }
     return [pscustomobject]@{ ExitCode = $exit; Output = $textOutput }
+}
+
+function Resolve-ArgsFilePaths {
+    param(
+        [string[]]$CommandArgs,
+        [string]$BaseDirectory
+    )
+
+    $resolved = [System.Collections.Generic.List[string]]::new()
+    $i = 0
+    while ($i -lt $CommandArgs.Count) {
+        $arg = [string]$CommandArgs[$i]
+        $resolved.Add($arg)
+        if ($arg -eq '--args-file') {
+            if ($i + 1 -ge $CommandArgs.Count) {
+                throw 'missing value for --args-file'
+            }
+            $rawPath = [string]$CommandArgs[$i + 1]
+            $resolvedPath = $rawPath
+            if (-not [string]::IsNullOrWhiteSpace($rawPath) -and -not [System.IO.Path]::IsPathRooted($rawPath)) {
+                $resolvedPath = [System.IO.Path]::GetFullPath((Join-Path $BaseDirectory $rawPath))
+            }
+            $resolved.Add($resolvedPath)
+            $i += 2
+            continue
+        }
+        $i += 1
+    }
+    return $resolved
 }
 
 function Normalize-CommandContextArgs {
@@ -453,7 +494,8 @@ function Invoke-CliCommand {
         [int]$TimeoutMs = 30000
     )
 
-    $normalizedArgs = Normalize-CommandContextArgs -CommandArgs $CommandArgs -ContextId $ContextId
+    $pathResolvedArgs = Resolve-ArgsFilePaths -CommandArgs $CommandArgs -BaseDirectory ([System.IO.Directory]::GetCurrentDirectory())
+    $normalizedArgs = Normalize-CommandContextArgs -CommandArgs $pathResolvedArgs -ContextId $ContextId
     return Invoke-PythonTool -ToolsRoot $ToolsRoot -ScriptRelativePath 'cli\run_cli.py' -ArgumentList $normalizedArgs -TimeoutMs $TimeoutMs -LauncherProg 'rdx.bat --non-interactive cli'
 }
 
@@ -465,7 +507,8 @@ function Invoke-McpCommand {
         [int]$TimeoutMs = 30000
     )
 
-    $normalizedArgs = Normalize-CommandContextArgs -CommandArgs $CommandArgs -ContextId $ContextId
+    $pathResolvedArgs = Resolve-ArgsFilePaths -CommandArgs $CommandArgs -BaseDirectory ([System.IO.Directory]::GetCurrentDirectory())
+    $normalizedArgs = Normalize-CommandContextArgs -CommandArgs $pathResolvedArgs -ContextId $ContextId
     return Invoke-PythonTool -ToolsRoot $ToolsRoot -ScriptRelativePath 'mcp\run_mcp.py' -ArgumentList $normalizedArgs -TimeoutMs $TimeoutMs -LauncherProg 'rdx.bat --non-interactive mcp'
 }
 function Invoke-CliJson {

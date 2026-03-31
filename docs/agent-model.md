@@ -99,6 +99,7 @@
   - `rd.core.list_tools` 适合按 `namespace`、`group`、`capability`、`role` 做结构化枚举。
   - `rd.core.search_tools` 适合按当前任务关键词做轻量筛选。
   - `rd.core.get_tool_graph` 适合查看 prerequisite 与 macro-to-canonical 依赖图，而不是让模型自己猜工具调用链。
+  - `rd.event.get_actions` 适合做 root/pass 级浏览；如果目标是 deep event lookup，优先继续使用 `rd.event.get_action_tree`，并参考返回里的 `lookup_scope` / `recommended_followup_tool`。
   - 默认推荐顺序应理解为：canonical `rd.*` 主接口 -> `rd.macro.*` -> `rd.session.*` / `rd.core.*` 元信息层 -> `rd.vfs.*` 导航层。
   - 只有当任务明确在问“怎么浏览”“有哪些路径可看”“怎么快速看结构”时，才应把 `rd.vfs.*` 提前。
   - `tabular/tsv projection` 只是结构化结果的表格化摘要，用于更快扫描与复制，不表示语义重要度排序。
@@ -107,6 +108,7 @@
 - 对 event-bound pipeline / shader / texture / export / debug 调用，显式传入 `event_id` 并检查返回中的 `resolved_event_id`。
   - 如果 backend 不支持精确 event-bound debug 或 shader 绑定，运行时现在会显式失败，而不是静默回退到别的 event。
   - `rd.pipeline.get_state` / `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` / `rd.texture.get_data` / `rd.export.screenshot` 会返回 truth/degrade 元数据；上层应把这些字段当作证据可信度的一部分，而不是只看主 payload 非空。
+  - `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` 还会返回 `selected_visual_target` 与 `export_target_available`；若 replacement 后 screenshot/readback 没变化，应先用这些字段判断是 replacement 未生效、event 绑定错位，还是该 event 本就不会影响目标像素。
 - 把 handle 当作短生命周期引用。
   - 上层如需缓存，必须准备重建 session 的恢复路径，而不是把 handle 当成永久主键。
 - 先读 catalog 的 `prerequisites`，再决定 tool 序列。
@@ -118,6 +120,7 @@
   - 明确的 capability/runtime 失败。
   - 不应再把任何“逻辑记录已保存但未替换”的状态当成成功。
 - `rd.shader.edit_and_replace` 的失败面现在是分阶段的；应读取 `error.code` 与 `error.details.failure_stage` / `failure_reason`，区分绑定失败、stage mismatch、build failed、apply failed、backend unsupported 与 source hash mismatch。
+- `rd.shader.edit_and_replace` 的失败面现在是分阶段的；其中 replacement 后 event 重绑失败会明确落到 `shader_replace_rebind_failed`，不再保留“已 applied 但未回到 live replay”的半成功状态。
 - `rd.shader.debug_start` 在 remote replay 下会先检查 capability matrix；若当前 backend/session 明确不支持 shader debug，应该把它当作 truthful fail，而不是继续猜测 trace 创建异常。
 - 对 raw `SPIR-V Asm` 调试，优先走显式工作流。
   - `rd.shader.get_disassembly(target="SPIR-V ASM")`

@@ -47,6 +47,22 @@ def _run_bat(*args: str) -> tuple[int, dict, str]:
     return proc.returncode, _extract_json(combined), combined
 
 
+def _run_bat_from_cwd(cwd: Path, *args: str) -> tuple[int, dict, str]:
+    proc = subprocess.run(
+        [_cmd_exe(), "/c", str(ROOT / "rdx.bat"), *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=90,
+        env=_launcher_env(),
+        check=False,
+    )
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode, _extract_json(combined), combined
+
+
 def _cleanup_context(context_id: str) -> None:
     for command in (("daemon", "stop"), ("context", "clear")):
         subprocess.run(
@@ -115,3 +131,47 @@ def test_noninteractive_launcher_errors_keep_short_status_payload() -> None:
     assert payload["error_code"] == 1
     assert "result_kind" not in payload
     assert "unknown command" in output
+
+@pytest.mark.skipif(os.name != "nt", reason="rdx.bat launcher tests are windows-specific")
+def test_noninteractive_cli_call_passthroughs_canonical_payload(tmp_path: Path) -> None:
+    args_file = tmp_path / "args.json"
+    args_file.write_text('{"namespace":"rd.core","detail_level":"summary"}', encoding="utf-8")
+
+    code, payload, _ = _run_bat(
+        "--non-interactive",
+        "cli",
+        "call",
+        "rd.core.list_tools",
+        "--args-file",
+        str(args_file),
+        "--format",
+        "json",
+    )
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["result_kind"] == "rd.core.list_tools"
+    assert payload["data"]["tool_count"] >= 1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="rdx.bat launcher tests are windows-specific")
+def test_noninteractive_cli_resolves_relative_args_file_from_caller_cwd(tmp_path: Path) -> None:
+    args_file = tmp_path / "args.json"
+    args_file.write_text('{"namespace":"rd.core","detail_level":"summary"}', encoding="utf-8")
+
+    code, payload, _ = _run_bat_from_cwd(
+        tmp_path,
+        "--non-interactive",
+        "cli",
+        "call",
+        "rd.core.list_tools",
+        "--args-file",
+        ".\args.json",
+        "--format",
+        "json",
+    )
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["result_kind"] == "rd.core.list_tools"
+    assert payload["data"]["tool_count"] >= 1

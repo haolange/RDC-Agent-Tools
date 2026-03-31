@@ -50,6 +50,7 @@ rdx daemon status
 ```
 
 其中 `args.json` 应是 UTF-8 JSON object，例如：
+- 通过 `rdx.bat --non-interactive cli|mcp ... --args-file .\\args.json` 调用时，相对路径会按你启动 `rdx.bat` 的当前工作目录解析，不会因为 wrapper 切到 tools root 而改指向。
 
 ```json
 {"session_id":"<session_id>"}
@@ -81,6 +82,7 @@ rdx session preview off
 - preview 默认显示完整 framebuffer / 当前 RT，不按 viewport 裁小；若当前 event 存在 viewport / scissor，会在完整 framebuffer 上做区域标识。
 - `rd.session.get_context.preview.display` 会返回 `output_slot`、`texture_id`、`framebuffer_extent`、`viewport_rect`、`scissor_rect`、`effective_region_rect`、`window_rect`、`fit_mode` 与 `screen_cap_ratio`。
 - 当 preview 已开启时，`rd.event.set_active`、`rd.replay.set_frame`、`rd.session.select_session` 与 `rd.session.resume` 会在返回前至少尝试同步一次 preview；即便预览刷新失败，也不会回滚当前 session/event/frame 的 canonical runtime truth。
+- 如果第一次打开 preview 就失败，context 中会保留 `enabled=false` 并写入 `last_error`，而不是留下“enabled 但 failed/stale”的假状态。
 
 如果后续要把同一条链路交给上层 Agent 继续使用，建议额外查看：
 
@@ -179,8 +181,9 @@ rdx.bat --non-interactive cli --daemon-context smoke daemon status
 3. `rd.capture.open_replay`
 4. `rd.replay.set_frame`
 5. `rd.event.get_actions`
-6. 需要确认当前 context 状态时，调用 `rd.session.get_context`
-7. 一个 context 同时持有多条 session 时，使用 `rd.session.list_sessions` / `rd.session.select_session`
+6. 需要做 deep event / drawcall 定位时，优先继续使用 `rd.event.get_action_tree`
+7. 需要确认当前 context 状态时，调用 `rd.session.get_context`
+8. 一个 context 同时持有多条 session 时，使用 `rd.session.list_sessions` / `rd.session.select_session`
 
 这条链路只负责建立可操作 session，不代表任何上层 debug 或 analysis workflow。
 
@@ -204,6 +207,7 @@ rdx.bat --non-interactive cli --daemon-context smoke daemon status
 - 当 live remote handle 仍被 replay lease 时，`rd.remote.disconnect` 预期返回 `remote_handle_in_use`；应先关闭相关 replay session。
 - daemon / worker 重启后，平台会优先使用持久化 remote 元数据恢复同一个 `session_id`；只有 endpoint 真断开、bootstrap 失败或恢复元数据不足时，才需要重新执行 `rd.remote.connect -> rd.remote.ping -> rd.capture.open_replay`。
 - 对 event-bound 链路，优先显式传入 `event_id`，并检查返回里的 `resolved_event_id`；`rd.shader.debug_start`、`rd.export.shader_bundle`、`rd.pipeline.get_shader`、`rd.shader.get_reflection`、`rd.shader.get_disassembly`、`rd.texture.get_pixel_value` 都不应再静默回退到别的 event。
+- `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` 会返回 `selected_visual_target` 与 `export_target_available`；`rd.export.screenshot`、`rd.texture.get_data`、`rd.texture.get_pixel_value` 与 shader replacement 后的观察链现在共用同一套 event target 解析。
 - `rd.shader.compile` 需要基于当前 replay backend 选择真实可接受的 `source_encoding`；不要假设 Android remote Vulkan session 仍接受 `hlsl`，应检查 `supported_source_encodings`。
 - 若当前任务改动了 preview 的几何适配、跟随语义或窗口行为，除分层命令验证外，建议补跑 `python scripts/preview_geometry_smoke.py --local-rdc "<local.rdc>" --remote-rdc "<remote.rdc>" --transport both`。
 

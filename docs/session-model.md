@@ -170,6 +170,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 - `rd.resource.get_usage` / `rd.resource.get_history` 里的 `raw_event_id` 只是底层记录值，不保证能被 `rd.event.*` 直接 round-trip。
 - event-bound `rd.pipeline.*`、`rd.shader.*`、`rd.texture.get_pixel_value`、`rd.export.shader_bundle` 与 `rd.shader.debug_start` 现在都应把最终使用的 event 通过 `resolved_event_id` 回传给上层；如果 backend 不能精确绑定请求 event，应显式返回 capability/runtime 失败。
 - `rd.shader.edit_and_replace` 的成功不再是“逻辑记录”，而是绑定到真实 runtime replacement；若替换链路在 `BuildTargetShader`、编译诊断或 `ReplaceResource` 任一步失败，session/context 应保留结构化失败细节，而不是写入伪成功 replacement。
+- replacement 成功后，后续 `rd.export.screenshot`、`rd.texture.get_data`、`rd.texture.get_pixel_value` 都必须重新回到同一个 live replay event 读取；它们与 replacement 共享 `resolved_event_id` 与同一套 visual target 解析链。
 - `rd.shader.debug_start` 若失败，也应把 `failure_stage` / `failure_reason`、`attempts`、`pixel_history_summary` 与 `resolved_context` 作为本次 event-bound debug 的真实诊断面保留下来，供同一 `session_id` 后续排查复用。
 - cleanup 顺序按 `rd.capture.close_replay -> rd.capture.close_file` 理解；若 replay 仍活着，`rd.capture.close_file` 会拒绝关闭对应 `capture_file_id`。
 
@@ -207,6 +208,7 @@ rdx capture open --file "C:\path\capture.rdc" --frame-index 0
 - 上层 Agent 如果要跨多轮任务持续工作，优先复用同一 context，而不是把 handle 当作永久主键缓存。
 - `rdx daemon stop` 只停止 daemon，不会清空该 context 的本地恢复索引；真正销毁状态要执行 `rdx context clear` 或 `rd.core.shutdown`。
 - preview 是 context 级 enabled intent：`rdx daemon stop` / worker 重启会关闭 live 窗口，但保留 enabled intent；后续同一 context 恢复 live session 时会自动重绑。
+- 但如果第一次 `rd.session.open_preview` 就失败，context 会保留 `enabled=false`、清空 `bound_*` 字段并写入 `last_error`；只有真实建窗成功后才会写入 enabled intent。
 - `rd.session.close_preview`、`rdx context clear` 与 `rd.core.shutdown` 会关闭窗口并清掉该 intent。
 - 当 preview 已 enabled 时，`rd.event.set_active`、`rd.replay.set_frame`、`rd.session.select_session` 与 `rd.session.resume` 会在返回前先完成一次 preview 同步刷新尝试；刷新失败只更新 preview 状态，不回滚 runtime 主真相。
 - preview 窗口会按 framebuffer 几何自动调整大小，并把默认上限限制在当前屏幕工作区的 `50%`；若用户手动拖拽过窗口，在 framebuffer 几何不变时不会被持续覆盖。
