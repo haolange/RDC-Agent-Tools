@@ -143,7 +143,9 @@ rdx.bat --non-interactive mcp --ensure-env --daemon-context smoke-test
 - 当 live remote handle 仍被 session lease 时，`rd.remote.disconnect` 预期返回 `remote_handle_in_use`；应先关闭相关 replay 或等待 lease 释放。
 - `remote_handle_consumed` 仍可能出现在旧 tombstone / 恢复异常路径，但它不再是正常 remote `open_replay` 成功后的默认结果。
 - Android remote 可通过 `rd.remote.connect` 的 `options.transport="adb_android"` 触发仓库内置的 `adb` bootstrap。
+- Android `adb_android` 未显式指定 remote port 时默认走 RenderDoc remote server socket `renderdoc_39920`；`renderdoc_38920` 是 target control socket，仅作为扫描/诊断兼容信息保留。
 - `rd.remote.connect` 的 `options` 参数面在 `CLI` / daemon / `MCP` 下保持一致，至少包括 `transport`、`device_serial`、`local_port`、`install_apk`、`push_config`。
+- Android connect 阶段的 `server_info.capabilities.supported_replays` 是可选诊断字段；endpoint 成功以 bootstrap、endpoint reachable、connection ping 与 final ping 为准。
 - `rd.shader.compile` 现在是 session-aware tool：可显式传 `session_id` 与 `source_encoding`，并通过返回里的 `supported_source_encodings` 判断当前 replay backend 接受哪类源码；返回还会显式区分 `runtime_replacement_supported` 与 compile 本身是否可用。
 - `rd.remote.set_overlay_options` 在当前 `RenderDoc` Python binding 未暴露 overlay RPC 时，会返回显式 `remote_overlay_options_unavailable`，而不是静默成功。
 - 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。

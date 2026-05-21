@@ -279,7 +279,7 @@ def test_remote_connect_args_default_to_android_bootstrap(monkeypatch: pytest.Mo
     args = tool_contract_check._remote_connect_args()
 
     assert args["host"] == "127.0.0.1"
-    assert args["port"] == 38920
+    assert args["port"] == 39920
     assert args["options"]["transport"] == "adb_android"
 
 
@@ -309,7 +309,7 @@ def test_build_args_for_remote_connect_uses_android_bootstrap_defaults(monkeypat
     args = tool_contract_check._build_args("rd.remote.connect", ["host", "port", "timeout_ms"], state, files)
 
     assert args["host"] == "127.0.0.1"
-    assert args["port"] == 38920
+    assert args["port"] == 39920
     assert args["options"]["transport"] == "adb_android"
 
 

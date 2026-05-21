@@ -10,11 +10,12 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from rdx.runtime_paths import android_binaries_root, runtime_root
 
-DEFAULT_ANDROID_REMOTE_PORT = 38920
+DEFAULT_ANDROID_TARGET_CONTROL_PORT = 38920
+DEFAULT_ANDROID_REMOTE_PORT = 39920
 DEFAULT_ANDROID_TIMEOUT_MS = 120000
 _PACKAGE_MAP = {
     "arm32": "org.renderdoc.renderdoccmd.arm32",
@@ -66,6 +67,32 @@ class AndroidBootstrapOptions:
     local_port: int = 0
     install_apk: bool = True
     push_config: bool = True
+
+
+@dataclass
+class AndroidRemoteDiagnostics:
+    device_serial: str
+    package_name: str
+    endpoint: str
+    forward_spec: str
+    remote_port: int
+    adb_forwards: list[str] = field(default_factory=list)
+    matching_forwards: list[str] = field(default_factory=list)
+    package_pid: str = ""
+    socket_ports: list[int] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "device_serial": self.device_serial,
+            "package_name": self.package_name,
+            "endpoint": self.endpoint,
+            "forward_spec": self.forward_spec,
+            "remote_port": self.remote_port,
+            "adb_forwards": list(self.adb_forwards),
+            "matching_forwards": list(self.matching_forwards),
+            "package_pid": self.package_pid,
+            "socket_ports": list(self.socket_ports),
+        }
 
 
 def _candidate_adb_paths() -> list[str]:
@@ -310,6 +337,37 @@ def _is_package_running(adb_path: str, device_serial: str, package_name: str) ->
     return proc.returncode == 0 and bool(str(proc.stdout or "").strip())
 
 
+def _package_pid(adb_path: str, device_serial: str, package_name: str) -> str:
+    try:
+        proc = subprocess.run(
+            _adb_base_cmd(adb_path, device_serial) + ["shell", "pidof", package_name],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10.0,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return str(proc.stdout or "").strip()
+
+
+def _list_adb_forwards(adb_path: str, device_serial: str) -> list[str]:
+    try:
+        proc = _run_subprocess(
+            _adb_base_cmd(adb_path, device_serial) + ["forward", "--list"],
+            timeout_s=10.0,
+            error_code="adb_forward_list_failed",
+            error_message="Failed to list adb forwards",
+        )
+    except AndroidRemoteBootstrapError:
+        return []
+    return [line.strip() for line in str(proc.stdout or "").splitlines() if line.strip()]
+
+
 def _list_renderdoc_socket_ports(adb_path: str, device_serial: str) -> list[int]:
     try:
         proc = _adb_shell(
@@ -356,6 +414,28 @@ def _select_remote_socket_port(requested_port: int, before_ports: list[int], aft
         "Unable to determine Android RenderDoc remote socket port.",
         details={"discovered_ports": list(after_ports), "added_ports": added},
     )
+
+
+def collect_android_remote_diagnostics(result: AndroidBootstrapResult) -> dict[str, Any]:
+    forwards = _list_adb_forwards(result.adb_path, result.device_serial)
+    remote_socket = _REMOTE_SOCKET_TEMPLATE.format(port=int(result.remote_port or DEFAULT_ANDROID_REMOTE_PORT))
+    matching_forwards = [
+        line
+        for line in forwards
+        if str(result.forward_spec or "") in line or f"localabstract:{remote_socket}" in line
+    ]
+    diagnostics = AndroidRemoteDiagnostics(
+        device_serial=result.device_serial,
+        package_name=result.package_name,
+        endpoint=f"{result.host}:{result.port}",
+        forward_spec=result.forward_spec,
+        remote_port=int(result.remote_port or DEFAULT_ANDROID_REMOTE_PORT),
+        adb_forwards=forwards,
+        matching_forwards=matching_forwards,
+        package_pid=_package_pid(result.adb_path, result.device_serial, result.package_name),
+        socket_ports=_list_renderdoc_socket_ports(result.adb_path, result.device_serial),
+    )
+    return diagnostics.as_dict()
 
 
 def bootstrap_android_remote(

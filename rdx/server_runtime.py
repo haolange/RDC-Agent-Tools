@@ -64,14 +64,26 @@ from rdx.timeout_policy import PIXEL_HISTORY_TIMEOUT_S, remote_connect_timeout_m
 from rdx.core.event_graph import EventGraphService
 from rdx.core.patch_engine import PatchEngine
 from rdx.core.perf_service import PerfService
-from rdx.core.pipeline_service import PipelineService
+from rdx.core.pipeline_service import (
+    PipelineService,
+    resolve_shader_binding as _pipeline_resolve_shader_binding,
+    _map_graphics_api as _pipeline_graphics_api,
+    _select_api_specific_state as _pipeline_select_api_state,
+    _shader_entry_from_stage_object as _pipeline_stage_entry,
+    _shader_id_from_stage_object as _pipeline_stage_shader_id,
+    _shader_id_from_reflection as _pipeline_reflection_shader_id,
+    _shader_reflection_from_stage_object as _pipeline_stage_reflection,
+    _stage_object_from_api_state as _pipeline_stage_object,
+)
 from rdx.core.render_service import RenderService
 from rdx.core.session_manager import SessionError, SessionManager
 from rdx.models import PatchSpec, ShaderStage, _new_id
 from rdx.remote_bootstrap import (
     AndroidBootstrapOptions,
     AndroidRemoteBootstrapError,
+    DEFAULT_ANDROID_REMOTE_PORT,
     bootstrap_android_remote,
+    collect_android_remote_diagnostics,
     cleanup_android_remote,
     describe_android_remote,
 )
@@ -2894,6 +2906,38 @@ def _create_remote_server_connection(url: str) -> Any:
     return remote
 
 
+def _ping_remote_server_or_raise(
+    remote_server: Any,
+    url: str,
+    *,
+    capture_context: Optional[Dict[str, Any]] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Any:
+    status = remote_server.Ping()
+    if _status_ok(status):
+        return status
+    details = build_renderdoc_error_details(
+        status,
+        operation=f"RemoteServer.Ping({url})",
+        source_layer="renderdoc_status",
+        backend_type="remote",
+        capture_context=dict(capture_context or {"endpoint": url}),
+        classification="remote_endpoint",
+        fix_hint="Reconnect to the remote endpoint before issuing more remote tools.",
+    )
+    if diagnostics:
+        details["android_diagnostics"] = dict(diagnostics)
+    raise CoreError(
+        code="remote_ping_failed",
+        category="runtime",
+        message=(
+            f"RemoteServer.Ping({url}) failed: "
+            f"{details['renderdoc_status']['status_text']}"
+        ),
+        details=details,
+    )
+
+
 def _collect_remote_server_info(
     remote_server: Any,
     *,
@@ -2909,6 +2953,10 @@ def _collect_remote_server_info(
         "transport": str(transport),
         "endpoint": _remote_url(host, port),
     }
+    if transport == "adb_android":
+        if bootstrap:
+            info["bootstrap"] = dict(bootstrap)
+        return info
     try:
         info["driver_name"] = str(remote_server.DriverName() or "")
     except Exception:
@@ -2925,6 +2973,68 @@ def _collect_remote_server_info(
         if transport == "adb_android":
             info["platform"] = "android"
     return info
+
+
+def _collect_android_diagnostics_from_handle(handle: RemoteHandle) -> Dict[str, Any]:
+    if handle.transport != "adb_android" or handle.bootstrap_result is None:
+        return {}
+    try:
+        return collect_android_remote_diagnostics(handle.bootstrap_result)
+    except Exception as exc:  # noqa: BLE001
+        return {"diagnostics_error": str(exc)}
+
+
+def _collect_android_diagnostics_from_bootstrap(bootstrap_result: Any) -> Dict[str, Any]:
+    if bootstrap_result is None:
+        return {}
+    try:
+        return collect_android_remote_diagnostics(bootstrap_result)
+    except Exception as exc:  # noqa: BLE001
+        return {"diagnostics_error": str(exc)}
+
+
+def _reconnect_android_remote_handle_sync(handle: RemoteHandle, timeout_ms: int) -> bool:
+    if handle.transport != "adb_android" or handle.bootstrap_result is None:
+        return False
+
+    diagnostics = _collect_android_diagnostics_from_handle(handle)
+    package_pid = str(diagnostics.get("package_pid") or "").strip()
+    matching_forwards = list(diagnostics.get("matching_forwards") or [])
+    socket_ports = {int(port) for port in list(diagnostics.get("socket_ports") or []) if str(port).strip().isdigit()}
+    remote_port = int(getattr(handle.bootstrap_result, "remote_port", 0) or handle.bootstrap.get("remote_port") or DEFAULT_ANDROID_REMOTE_PORT)
+
+    if not package_pid or not matching_forwards or remote_port not in socket_ports:
+        raise RuntimeToolError(
+            "Android remote endpoint is not live enough to reconnect",
+            details={
+                "remote_id": handle.remote_id,
+                "endpoint": _remote_url(handle.host, handle.port),
+                "classification": "remote_endpoint_blocker",
+                "android_diagnostics": diagnostics,
+                "fix_hint": "Re-bootstrap the Android remote endpoint before issuing more remote tools.",
+            },
+        )
+
+    url = _remote_url(handle.host, handle.port)
+    _wait_for_remote_endpoint(url, timeout_ms)
+    remote_server = _create_remote_server_connection(url)
+    _ping_remote_server_or_raise(
+        remote_server,
+        url,
+        capture_context={"remote_id": handle.remote_id, "endpoint": url},
+        diagnostics=diagnostics,
+    )
+    handle.remote_server = remote_server
+    handle.connected = True
+    handle.detail["connected"] = True
+    handle.server_info = _collect_remote_server_info(
+        remote_server,
+        host=handle.host,
+        port=handle.port,
+        transport=handle.transport,
+        bootstrap=handle.bootstrap,
+    )
+    return True
 
 
 def _disconnect_remote_handle_sync(handle: RemoteHandle) -> List[str]:
@@ -2949,6 +3059,81 @@ def _mark_remote_handle_disconnected(handle: RemoteHandle) -> None:
     handle.connected = False
     handle.remote_server = None
     handle.detail["connected"] = False
+
+
+async def _ensure_remote_handle_ready_for_replay(handle: RemoteHandle, *, timeout_ms: int) -> bool:
+    reconnected = False
+    if not handle.connected or handle.remote_server is None:
+        if handle.transport == "adb_android":
+            reconnected = bool(await _offload(_reconnect_android_remote_handle_sync, handle, timeout_ms))
+        if not handle.connected or handle.remote_server is None:
+            raise CoreError(
+                code="remote_not_connected",
+                category="runtime",
+                message=f"Remote handle {handle.remote_id} is not connected",
+                details={
+                    "remote_id": handle.remote_id,
+                    "endpoint": _remote_url(handle.host, handle.port),
+                    "classification": "remote_endpoint",
+                    "fix_hint": "Reconnect the remote endpoint before opening a replay session.",
+                },
+            )
+
+    url = _remote_url(handle.host, handle.port)
+    try:
+        status = await _offload(handle.remote_server.Ping)
+    except Exception as exc:
+        _mark_remote_handle_disconnected(handle)
+        if handle.transport == "adb_android":
+            await _offload(_reconnect_android_remote_handle_sync, handle, timeout_ms)
+            reconnected = True
+            status = await _offload(handle.remote_server.Ping)
+        else:
+            raise CoreError(
+                code="remote_ping_failed",
+                category="runtime",
+                message=f"RemoteServer.Ping({url}) failed before replay open: {exc}",
+                details={
+                    "remote_id": handle.remote_id,
+                    "endpoint": url,
+                    "source_layer": "runtime",
+                    "operation": "rd.capture.open_replay.remote_preflight",
+                    "backend_type": "remote",
+                    "classification": "remote_endpoint",
+                    "fix_hint": "Reconnect to the remote endpoint before opening a replay session.",
+                },
+            ) from exc
+
+    if not _status_ok(status):
+        _mark_remote_handle_disconnected(handle)
+        details = build_renderdoc_error_details(
+            status,
+            operation=f"RemoteServer.Ping({url})",
+            source_layer="renderdoc_status",
+            backend_type="remote",
+            capture_context={"remote_id": handle.remote_id, "endpoint": url},
+            classification="remote_endpoint",
+            fix_hint="Reconnect to the remote endpoint before opening a replay session.",
+        )
+        if handle.transport == "adb_android":
+            try:
+                await _offload(_reconnect_android_remote_handle_sync, handle, timeout_ms)
+                reconnected = True
+                status = await _offload(handle.remote_server.Ping)
+            except CoreError as recovery_exc:
+                details["android_diagnostics"] = dict(recovery_exc.details.get("android_diagnostics") or {})
+                details["classification"] = "remote_endpoint_blocker"
+        if not _status_ok(status):
+            raise CoreError(
+                code="remote_ping_failed",
+                category="runtime",
+                message=f"RemoteServer.Ping({url}) failed before replay open: {details['renderdoc_status']['status_text']}",
+                details=details,
+            )
+
+    handle.connected = True
+    handle.detail["connected"] = True
+    return reconnected
 
 
 def _is_remote_endpoint_failure(exc: Exception) -> bool:
@@ -3439,11 +3624,16 @@ def _resource_keys(resource_id: Any) -> List[str]:
 
 
 def _is_null_resource_id(resource_id: Any) -> bool:
+    if resource_id is None:
+        return True
+    text = str(resource_id).strip().lower()
+    if text in {"", "0", "none", "resourceid::0"}:
+        return True
     rd = _get_rd()
     try:
         return resource_id == rd.ResourceId()
     except Exception:
-        return resource_id is None
+        return False
 
 
 def _parse_remote_endpoint(endpoint: str) -> Tuple[str, int]:
@@ -3753,13 +3943,24 @@ async def _event_truth_metadata(
             "visual_truth_level": "not_applicable",
             "evidence_truth_level": "partial_structured_evidence",
         }
-    snapshot = await _pipeline_service.snapshot_pipeline(
-        session_id=session_id,
-        event_id=int(event_id),
-        session_manager=_session_manager,
-    )
-    snapshot_dict = snapshot.model_dump(mode="json")
-    return _pipeline_truth_metadata(session_id, snapshot_dict, context_id=context_id)
+    try:
+        snapshot = await _pipeline_service.snapshot_pipeline(
+            session_id=session_id,
+            event_id=int(event_id),
+            session_manager=_session_manager,
+        )
+        snapshot_dict = snapshot.model_dump(mode="json")
+        return _pipeline_truth_metadata(session_id, snapshot_dict, context_id=context_id)
+    except Exception:
+        backend, _ = _session_backend_record(session_id, context_id=context_id)
+        return {
+            "backend_type": backend,
+            "summary_status": "degraded",
+            "summary_degraded_reasons": ["summary_degraded"],
+            "binding_truth_level": "binding_degraded",
+            "visual_truth_level": "not_applicable",
+            "evidence_truth_level": "partial_structured_evidence",
+        }
 
 
 _FILE_SUFFIX_MAP: Dict[str, str] = {
@@ -4211,6 +4412,153 @@ def _stage_candidates() -> List[str]:
     return ["vs", "hs", "ds", "gs", "ps", "cs", "ms", "as"]
 
 
+async def _api_specific_shader_binding(
+    controller: Any,
+    stage_name: str,
+) -> Tuple[Any, Any, str, Dict[str, Any]]:
+    rd_stage = _rd_stage(stage_name)
+    diag: Dict[str, Any] = {
+        "stage": stage_name,
+        "source": "api_specific_pipeline_state",
+    }
+    try:
+        api_props = await _offload(controller.GetAPIProperties)
+        api = _pipeline_graphics_api(getattr(api_props, "pipelineType", None))
+        diag["pipeline_type"] = str(getattr(api_props, "pipelineType", ""))
+        api, api_state = await _offload(_pipeline_select_api_state, controller, api)
+        pipe = await _offload(controller.GetPipelineState)
+        resolution = await _offload(
+            _pipeline_resolve_shader_binding,
+            controller,
+            pipe,
+            api_state,
+            api,
+            rd_stage,
+            ShaderStage(_parse_stage(stage_name)),
+        )
+        diag.update(resolution.to_diagnostics())
+        reflection_obj = resolution.reflection
+        shader_id = resolution.shader_id
+        return (
+            shader_id,
+            reflection_obj,
+            str(resolution.entry_point or "main"),
+            diag,
+        )
+    except Exception as exc:
+        diag["error"] = f"{type(exc).__name__}: {exc}"
+        return None, None, "", diag
+
+
+async def _resolve_shader_binding(
+    *,
+    session_id: str,
+    event_id: int,
+    controller: Any,
+    pipe: Any,
+    shader_id: str = "",
+    stage_name: Any = None,
+    require_reflection: bool = False,
+) -> Tuple[str, str, Any]:
+    requested_shader_id = str(shader_id or "").strip()
+    requested_stage = _parse_stage(stage_name) if stage_name is not None and str(stage_name).strip() else ""
+    if requested_shader_id:
+        matches: List[Tuple[str, str, Any]] = []
+        binding_probes: List[Dict[str, Any]] = []
+        for candidate_stage in _stage_candidates():
+            rd_stage = _rd_stage(candidate_stage)
+            bound = await _offload(pipe.GetShader, rd_stage)
+            reflection = None
+            if bound is None or _is_null_resource_id(bound):
+                reflection = await _offload(pipe.GetShaderReflection, rd_stage)
+                bound = _pipeline_reflection_shader_id(reflection)
+            if bound is None or _is_null_resource_id(bound):
+                bound, reflection, _, diag = await _api_specific_shader_binding(controller, candidate_stage)
+                binding_probes.append(diag)
+                if bound is None or _is_null_resource_id(bound):
+                    continue
+            if requested_shader_id in _resource_keys(bound):
+                if reflection is None:
+                    reflection = await _offload(pipe.GetShaderReflection, rd_stage)
+                matches.append((candidate_stage, str(bound), reflection))
+        if not matches:
+            raise CoreError(
+                code="shader_binding_lookup_failed",
+                message=f"Shader not bound at current event: {requested_shader_id}",
+                category="runtime",
+                details={
+                    "session_id": session_id,
+                    "resolved_event_id": int(event_id),
+                    "shader_id": requested_shader_id,
+                    "failure_stage": "resolve_binding",
+                    "failure_reason": "shader_id_not_bound",
+                    "api_specific_binding_probes": binding_probes,
+                },
+            )
+        resolved_stage, resolved_shader_id, reflection = matches[0]
+        if requested_stage and resolved_stage != requested_stage:
+            raise CoreError(
+                code="shader_stage_mismatch",
+                message=(
+                    f"Shader stage mismatch for {requested_shader_id}: "
+                    f"expected {requested_stage}, got {resolved_stage}"
+                ),
+                category="validation",
+                details={
+                    "session_id": session_id,
+                    "resolved_event_id": int(event_id),
+                    "shader_id": requested_shader_id,
+                    "expected_stage": requested_stage,
+                    "bound_stage": resolved_stage,
+                    "failure_stage": "resolve_binding",
+                    "failure_reason": "stage_mismatch",
+                },
+            )
+    else:
+        resolved_stage = requested_stage or "ps"
+        rd_stage_explicit = _rd_stage(resolved_stage)
+        bound_shader = await _offload(pipe.GetShader, rd_stage_explicit)
+        reflection = None
+        binding_probe: Dict[str, Any] = {}
+        if bound_shader is None or _is_null_resource_id(bound_shader):
+            reflection = await _offload(pipe.GetShaderReflection, rd_stage_explicit)
+            bound_shader = _pipeline_reflection_shader_id(reflection)
+        if bound_shader is None or _is_null_resource_id(bound_shader):
+            bound_shader, reflection, _, binding_probe = await _api_specific_shader_binding(controller, resolved_stage)
+        if bound_shader is None or _is_null_resource_id(bound_shader):
+            raise CoreError(
+                code="shader_binding_lookup_failed",
+                message=f"No shader bound at stage {resolved_stage.upper()} for event {int(event_id)}",
+                category="runtime",
+                details={
+                    "session_id": session_id,
+                    "resolved_event_id": int(event_id),
+                    "stage": resolved_stage.upper(),
+                    "failure_stage": "resolve_binding",
+                    "failure_reason": "stage_unbound",
+                    "api_specific_binding_probe": binding_probe,
+                },
+            )
+        resolved_shader_id = str(bound_shader)
+        if reflection is None:
+            reflection = await _offload(pipe.GetShaderReflection, rd_stage_explicit)
+    if require_reflection and reflection is None:
+        raise CoreError(
+            code="shader_reflection_unavailable",
+            message=f"Shader reflection unavailable at event {int(event_id)}",
+            category="runtime",
+            details={
+                "session_id": session_id,
+                "resolved_event_id": int(event_id),
+                "shader_id": resolved_shader_id,
+                "stage": resolved_stage.upper(),
+                "failure_stage": "resolve_binding",
+                "failure_reason": "reflection_unavailable",
+            },
+        )
+    return resolved_stage, resolved_shader_id, reflection
+
+
 async def _ensure_live_session(session_id: str) -> ReplayHandle:
     assert _session_manager is not None
     replay = _runtime.replays.get(str(session_id))
@@ -4348,10 +4696,14 @@ async def _resolve_texture_id(session_id: str, texture_id: Optional[Any], *, eve
         rid = getattr(out, "resourceId", null_id)
         if rid != null_id:
             return rid
-    textures = await _offload(controller.GetTextures)
-    if not textures:
-        raise ValueError("No textures available in capture")
-    return textures[0].resourceId
+    _, _, by_event = await _load_action_index(session_id, controller=controller)
+    action = by_event.get(int(target_event))
+    for rid in reversed(list(getattr(action, "outputs", None) or [])):
+        if not _is_null_resource_id(rid):
+            return await _resolve_resource_id(session_id, rid)
+    raise ValueError(
+        f"No event-bound output render target found for event {int(target_event)}"
+    )
 
 
 async def _binding_name_index_for_event(session_id: str, event_id: Optional[int]) -> Dict[str, List[str]]:
@@ -4488,6 +4840,17 @@ async def _output_target_resource_ids(session_id: str, event_id: Optional[int]) 
         if rid == null_id:
             continue
         out.append((rid, idx))
+    if out:
+        return out
+    try:
+        _, _, by_event = await _load_action_index(session_id, controller=controller)
+        action = by_event.get(int(evt))
+        for idx, rid in enumerate(list(getattr(action, "outputs", None) or [])):
+            if _is_null_resource_id(rid):
+                continue
+            out.append((rid, idx))
+    except Exception:
+        pass
     return out
 
 
@@ -6930,8 +7293,22 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
                 _assert_remote_handle_context(remote_handle)
             except CoreError as exc:
                 return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
+            try:
+                reconnected = await _ensure_remote_handle_ready_for_replay(
+                    remote_handle,
+                    timeout_ms=remote_connect_timeout_ms(options),
+                )
+            except CoreError as exc:
+                return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
             remote_handle_for_session = remote_handle
             remote_endpoint = _remote_url(remote_handle.host, remote_handle.port)
+            if reconnected:
+                _progress(
+                    "remote_reconnected",
+                    "Remote endpoint reconnected before replay open",
+                    progress_pct=0.64,
+                    details={"remote_id": remote_id, "endpoint": remote_endpoint, "transport": remote_handle.transport},
+                )
             backend_type = "remote"
             backend_config = {
                 "type": "remote",
@@ -7434,9 +7811,17 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
         }
         return _pipeline_ok(summary=summary)
     if action == "get_stage_state":
-        rd_stage = _rd_stage(stage)
-        shader_id = await _offload(pipe.GetShader, rd_stage)
-        reflection = await _offload(pipe.GetShaderReflection, rd_stage)
+        try:
+            stage, shader_id, reflection = await _resolve_shader_binding(
+                session_id=session_id,
+                event_id=int(resolved_event_id),
+                controller=controller,
+                pipe=pipe,
+                stage_name=stage,
+                require_reflection=False,
+            )
+        except CoreError as exc:
+            return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
         state = {
             "stage": stage.upper(),
             "shader_id": str(shader_id),
@@ -7518,9 +7903,17 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
     if action == "get_sampler_bindings":
         return _pipeline_ok(samplers=[])
     if action == "get_constant_buffers":
-        rd_stage = _rd_stage(stage)
-        shader_id = await _offload(pipe.GetShader, rd_stage)
-        reflection = await _offload(pipe.GetShaderReflection, rd_stage)
+        try:
+            stage, shader_id, reflection = await _resolve_shader_binding(
+                session_id=session_id,
+                event_id=int(resolved_event_id),
+                controller=controller,
+                pipe=pipe,
+                stage_name=stage,
+                require_reflection=True,
+            )
+        except CoreError as exc:
+            return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
         constant_buffers = await _collect_constant_buffers(
             controller,
             pipe,
@@ -7545,23 +7938,32 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
     if action == "get_resource_states":
         return _pipeline_ok(resource_states=[])
     if action == "get_shader":
-        rd_stage = _rd_stage(stage)
-        shader_id = await _offload(pipe.GetShader, rd_stage)
-        if _is_null_resource_id(shader_id):
-            return _err(
-                f"No shader bound at stage {stage.upper()} for event {int(resolved_event_id)}",
-                code="shader_not_bound",
-                category="runtime",
-                details={"session_id": session_id, "resolved_event_id": int(resolved_event_id), "stage": stage.upper()},
+        try:
+            stage, shader_id, reflection = await _resolve_shader_binding(
+                session_id=session_id,
+                event_id=int(resolved_event_id),
+                controller=controller,
+                pipe=pipe,
+                stage_name=stage,
+                require_reflection=False,
             )
-        reflection = await _offload(pipe.GetShaderReflection, rd_stage)
+        except CoreError as exc:
+            details = dict(exc.details)
+            return _err(
+                exc.message,
+                code="shader_not_bound",
+                category=exc.category,
+                details=details,
+            )
+        _bound, _refl, _entry, binding_resolution = await _api_specific_shader_binding(controller, stage)
         shader = {
             "stage": stage.upper(),
             "shader_id": str(shader_id),
+            "resource_id": str(shader_id),
             "entry": str(getattr(reflection, "entryPoint", "")) if reflection else "",
             "encoding": str(getattr(reflection, "encoding", "")) if reflection else "",
         }
-        return _pipeline_ok(shader=shader)
+        return _pipeline_ok(shader=shader, binding_resolution=binding_resolution)
     return _err(f"Unsupported pipeline action: {action}")
 
 
@@ -7904,6 +8306,113 @@ async def _save_texture_export(
         "saved_path": saved_path or str(output_path),
         "meta": meta,
     }
+
+
+def _exported_image_truth_stats(path: Any) -> Dict[str, Any]:
+    image_path = Path(str(path or ""))
+    if not image_path.is_file():
+        return {"inspectable": False, "reason": "image_missing"}
+    try:
+        from PIL import Image, ImageStat
+    except Exception as exc:
+        return {"inspectable": False, "reason": f"image_dependency_unavailable: {exc}"}
+    try:
+        with Image.open(image_path) as image:
+            rgba = image.convert("RGBA")
+            extrema = rgba.getextrema()
+            stat = ImageStat.Stat(rgba)
+            all_zero = all(int(channel_max) == 0 for _channel_min, channel_max in extrema)
+            return {
+                "inspectable": True,
+                "size": [int(rgba.width), int(rgba.height)],
+                "extrema": [[int(lo), int(hi)] for lo, hi in extrema],
+                "mean": [float(v) for v in stat.mean],
+                "all_zero": all_zero,
+            }
+    except Exception as exc:
+        return {"inspectable": False, "reason": f"image_inspection_failed: {exc}"}
+
+
+def _compare_exported_images_for_shader_replace(
+    before_path: Any,
+    after_path: Any,
+    thresholds: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    limits = dict(thresholds or {})
+    mean_abs_rgb_max = float(limits.get("mean_abs_rgb_max", 1.0))
+    max_channel_delta_max = int(limits.get("max_channel_delta_max", 64))
+    alpha_ratio_factor = float(limits.get("after_nontransparent_ratio_min_factor", 0.98))
+    payload: Dict[str, Any] = {
+        "success": False,
+        "failure_reason": "",
+        "thresholds": {
+            "mean_abs_rgb_max": mean_abs_rgb_max,
+            "max_channel_delta_max": max_channel_delta_max,
+            "after_nontransparent_ratio_min_factor": alpha_ratio_factor,
+        },
+    }
+    before = Path(str(before_path or ""))
+    after = Path(str(after_path or ""))
+    if not before.is_file() or not after.is_file():
+        payload["failure_reason"] = "image_missing"
+        payload["before_path"] = str(before)
+        payload["after_path"] = str(after)
+        return payload
+    try:
+        from PIL import Image, ImageChops, ImageStat
+    except Exception as exc:
+        payload["failure_reason"] = f"image_dependency_unavailable: {exc}"
+        return payload
+    try:
+        with Image.open(before) as before_img, Image.open(after) as after_img:
+            a = before_img.convert("RGBA")
+            b = after_img.convert("RGBA")
+            payload["before"] = _exported_image_truth_stats(str(before))
+            payload["after"] = _exported_image_truth_stats(str(after))
+            if a.size != b.size:
+                payload["failure_reason"] = "size_mismatch"
+                payload["before_size"] = [int(a.width), int(a.height)]
+                payload["after_size"] = [int(b.width), int(b.height)]
+                return payload
+            before_alpha_hist = a.getchannel("A").histogram()
+            after_alpha_hist = b.getchannel("A").histogram()
+            total = max(1, int(a.width) * int(a.height))
+            before_nontransparent = float(sum(before_alpha_hist[1:]) / total)
+            after_nontransparent = float(sum(after_alpha_hist[1:]) / total)
+            diff = ImageChops.difference(a, b)
+            extrema = diff.getextrema()
+            stat = ImageStat.Stat(diff)
+            mean_abs_rgba = [float(v) for v in stat.mean]
+            mean_abs_rgb = float(sum(mean_abs_rgba[:3]) / 3.0)
+            max_channel_delta = int(max(int(hi) for _lo, hi in extrema))
+            payload.update(
+                {
+                    "mean_abs_rgba": mean_abs_rgba,
+                    "mean_abs_rgb": mean_abs_rgb,
+                    "max_channel_delta": max_channel_delta,
+                    "before_nontransparent_ratio": before_nontransparent,
+                    "after_nontransparent_ratio": after_nontransparent,
+                }
+            )
+            before_visual_nonzero = not bool((payload.get("before") or {}).get("all_zero"))
+            after_visual_nonzero = not bool((payload.get("after") or {}).get("all_zero"))
+            if not before_visual_nonzero:
+                payload["failure_reason"] = "before_visual_all_zero"
+            elif not after_visual_nonzero:
+                payload["failure_reason"] = "after_visual_all_zero"
+            elif after_nontransparent < before_nontransparent * alpha_ratio_factor:
+                payload["failure_reason"] = "after_nontransparent_ratio_dropped"
+            elif mean_abs_rgb > mean_abs_rgb_max:
+                payload["failure_reason"] = "mean_abs_rgb_exceeded"
+            elif max_channel_delta > max_channel_delta_max:
+                payload["failure_reason"] = "max_channel_delta_exceeded"
+            else:
+                payload["success"] = True
+                payload["failure_reason"] = ""
+            return payload
+    except Exception as exc:
+        payload["failure_reason"] = f"image_compare_failed: {exc}"
+        return payload
 
 
 async def _export_texture_file(args: Dict[str, Any]) -> str:
@@ -8412,7 +8921,7 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
         result: Dict[str, Any] = {
             "artifact_path": artifact_path,
             "saved_path": saved_path,
-            "content_kind": "texture_readback_container",
+            "content_kind": str(_as_dict(stats, default={}).get("content_kind") or "texture_readback_container"),
             "container_format": "npz",
             "stats": stats,
             "byte_size": int(getattr(artifact_ref, "bytes", 0)),
@@ -8673,9 +9182,15 @@ async def _dispatch_texture(action: str, args: Dict[str, Any]) -> str:
         payload["texture_id"] = str(source_texture_id)
         payload["target_source"] = str(source.get("source") or "texture")
         payload["binding_truth_level"] = truth_meta.get("binding_truth_level")
-        payload["visual_truth_level"] = "visual_valid"
-        payload["evidence_truth_level"] = "visual_evidence_only"
-        payload["summary_degraded_reasons"] = list(truth_meta.get("summary_degraded_reasons") or [])
+        visual_stats = _exported_image_truth_stats(payload["image_path"])
+        visual_all_zero = bool(visual_stats.get("all_zero"))
+        payload["visual_truth_level"] = "visual_degraded" if visual_all_zero else "visual_valid"
+        payload["evidence_truth_level"] = "partial_visual_evidence" if visual_all_zero else "visual_evidence_only"
+        payload["visual_stats"] = visual_stats
+        degraded_reasons = list(truth_meta.get("summary_degraded_reasons") or [])
+        if visual_all_zero:
+            degraded_reasons.append("visual_all_zero")
+        payload["summary_degraded_reasons"] = list(dict.fromkeys(degraded_reasons))
         return _ok(**payload)
 
     if action == "save_mip_chain":
@@ -9256,91 +9771,6 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
     event_id = await _ensure_event(session_id, args.get("event_id"))
     pipe = await _offload(controller.GetPipelineState)
 
-    async def _resolve_shader_binding(
-        *,
-        shader_id: str = "",
-        stage_name: Any = None,
-        require_reflection: bool = False,
-    ) -> Tuple[str, str, Any]:
-        requested_shader_id = str(shader_id or "").strip()
-        requested_stage = _parse_stage(stage_name) if stage_name is not None and str(stage_name).strip() else ""
-        if requested_shader_id:
-            matches: List[Tuple[str, str, Any]] = []
-            for candidate_stage in _stage_candidates():
-                rd_stage = _rd_stage(candidate_stage)
-                bound = await _offload(pipe.GetShader, rd_stage)
-                if _is_null_resource_id(bound):
-                    continue
-                if requested_shader_id in _resource_keys(bound):
-                    reflection = await _offload(pipe.GetShaderReflection, rd_stage)
-                    matches.append((candidate_stage, str(bound), reflection))
-            if not matches:
-                raise CoreError(
-                    code="shader_binding_lookup_failed",
-                    message=f"Shader not bound at current event: {requested_shader_id}",
-                    category="runtime",
-                    details={
-                        "session_id": session_id,
-                        "resolved_event_id": int(event_id),
-                        "shader_id": requested_shader_id,
-                        "failure_stage": "resolve_binding",
-                        "failure_reason": "shader_id_not_bound",
-                    },
-                )
-            resolved_stage, resolved_shader_id, reflection = matches[0]
-            if requested_stage and resolved_stage != requested_stage:
-                raise CoreError(
-                    code="shader_stage_mismatch",
-                    message=(
-                        f"Shader stage mismatch for {requested_shader_id}: "
-                        f"expected {requested_stage}, got {resolved_stage}"
-                    ),
-                    category="validation",
-                    details={
-                        "session_id": session_id,
-                        "resolved_event_id": int(event_id),
-                        "shader_id": requested_shader_id,
-                        "expected_stage": requested_stage,
-                        "bound_stage": resolved_stage,
-                        "failure_stage": "resolve_binding",
-                        "failure_reason": "stage_mismatch",
-                    },
-                )
-        else:
-            resolved_stage = requested_stage or "ps"
-            rd_stage_explicit = _rd_stage(resolved_stage)
-            bound_shader = await _offload(pipe.GetShader, rd_stage_explicit)
-            if _is_null_resource_id(bound_shader):
-                raise CoreError(
-                    code="shader_binding_lookup_failed",
-                    message=f"No shader bound at stage {resolved_stage.upper()} for event {int(event_id)}",
-                    category="runtime",
-                    details={
-                        "session_id": session_id,
-                        "resolved_event_id": int(event_id),
-                        "stage": resolved_stage.upper(),
-                        "failure_stage": "resolve_binding",
-                        "failure_reason": "stage_unbound",
-                    },
-                )
-            resolved_shader_id = str(bound_shader)
-            reflection = await _offload(pipe.GetShaderReflection, rd_stage_explicit)
-        if require_reflection and reflection is None:
-            raise CoreError(
-                code="shader_reflection_unavailable",
-                message=f"Shader reflection unavailable at event {int(event_id)}",
-                category="runtime",
-                details={
-                    "session_id": session_id,
-                    "resolved_event_id": int(event_id),
-                    "shader_id": resolved_shader_id,
-                    "stage": resolved_stage.upper(),
-                    "failure_stage": "resolve_binding",
-                    "failure_reason": "reflection_unavailable",
-                },
-            )
-        return resolved_stage, resolved_shader_id, reflection
-
     if action == "debug_start":
         _require(args, "params")
         mode = str(args.get("mode", "pixel")).lower()
@@ -9897,6 +10327,10 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         shader_id = str(args.get("shader_id", "")).strip()
         try:
             _, shader_id, _ = await _resolve_shader_binding(
+                session_id=session_id,
+                event_id=int(event_id),
+                controller=controller,
+                pipe=pipe,
                 shader_id=shader_id,
                 stage_name=stage,
                 require_reflection=False,
@@ -9918,10 +10352,47 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 "expected_source_hash": str(args.get("expected_source_hash") or ""),
                 "max_diff_ops": _as_int(args.get("max_diff_ops"), 20),
                 "preserve_outputs": _as_bool(args.get("preserve_outputs"), True),
+                "force_replacement": _as_bool(args.get("force_replacement"), False),
             }
         )
         emit_patch_artifacts = _as_bool(args.get("emit_patch_artifacts"), False)
         patch_output_dir = str(args.get("output_dir") or "").strip()
+        validate_visual = _as_bool(args.get("validate_visual"), True)
+        validate_pixels = _as_bool(args.get("validate_pixels"), validate_visual)
+        visual_validation: Dict[str, Any] = {}
+        validation_target = args.get("validation_target", args.get("target"))
+        validation_dir = Path(patch_output_dir or artifacts_dir())
+        validation_stem = f"shader_patch_ev{int(event_id)}_{stage}_{patch_spec.patch_id}"
+        if validate_visual:
+            validation_dir.mkdir(parents=True, exist_ok=True)
+            before_validation_path = validation_dir / f"{validation_stem}_before_validation.png"
+            before_screenshot_args: Dict[str, Any] = {
+                "session_id": session_id,
+                "event_id": int(event_id),
+                "output_path": str(before_validation_path),
+            }
+            if validation_target:
+                before_screenshot_args["target"] = validation_target
+            before_payload = json.loads(await _dispatch_export("screenshot", before_screenshot_args))
+            visual_validation["before"] = before_payload
+            if (
+                not before_payload.get("success")
+                or str(before_payload.get("visual_truth_level") or "") != "visual_valid"
+            ):
+                return _err(
+                    "Shader replacement baseline visual validation failed",
+                    code="shader_replace_visual_baseline_failed",
+                    category="runtime",
+                    details={
+                        "failure_stage": "visual_baseline",
+                        "session_id": session_id,
+                        "resolved_event_id": int(event_id),
+                        "stage": stage.upper(),
+                        "shader_id": shader_id,
+                        "replacement_id": patch_spec.patch_id,
+                        "screenshot": before_payload,
+                    },
+                )
         patch_result = await _patch_engine.apply_patch(
             session_id=session_id,
             event_id=int(event_id),
@@ -9939,6 +10410,8 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             }
             if patch_result.error_details:
                 error_details.update(dict(patch_result.error_details))
+            if patch_result.diagnostics:
+                error_details.setdefault("diagnostics", dict(patch_result.diagnostics))
             return _err(
                 patch_result.error_message or "Shader replacement failed",
                 code=patch_result.error_code or "shader_replace_failed",
@@ -9946,6 +10419,8 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 details=error_details,
             )
         no_source_change = bool(
+            not patch_spec.force_replacement
+            and
             patch_result.applied_to_shader_hash
             and patch_result.applied_to_shader_hash == patch_result.original_shader_hash
             and any(
@@ -9962,6 +10437,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             "messages": list(patch_result.messages or []),
             "applied_to_shader_hash": patch_result.applied_to_shader_hash,
             "original_shader_hash": patch_result.original_shader_hash,
+            "diagnostics": dict(patch_result.diagnostics or {}),
             "compile": {
                 "encoding": str(patch_result.encoding or ""),
                 "disassembly_target": str(patch_result.disassembly_target or ""),
@@ -10015,6 +10491,103 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 if value
             }
             artifacts = [value for value in patch_artifacts.values() if value]
+        if validate_visual and not no_source_change:
+            validation_path = validation_dir / f"{validation_stem}_after_validation.png"
+            screenshot_args: Dict[str, Any] = {
+                "session_id": session_id,
+                "event_id": int(event_id),
+                "output_path": str(validation_path),
+            }
+            if validation_target:
+                screenshot_args["target"] = validation_target
+            screenshot_payload = json.loads(await _dispatch_export("screenshot", screenshot_args))
+            visual_validation["after"] = screenshot_payload
+            replacement["visual_validation"] = visual_validation
+            if (
+                not screenshot_payload.get("success")
+                or str(screenshot_payload.get("visual_truth_level") or "") != "visual_valid"
+            ):
+                cleanup_details: Dict[str, Any] = {"reverted": False}
+                try:
+                    cleanup_details["reverted"] = bool(
+                        await _patch_engine.revert_patch(session_id, patch_spec.patch_id, _session_manager)
+                    )
+                except Exception as exc:
+                    cleanup_details.update(
+                        {
+                            "revert_error": str(exc),
+                            "revert_exception_type": type(exc).__name__,
+                        }
+                    )
+                details = {
+                    "failure_stage": "visual_validation",
+                    "session_id": session_id,
+                    "resolved_event_id": int(event_id),
+                    "stage": stage.upper(),
+                    "shader_id": shader_id,
+                    "replacement_id": patch_spec.patch_id,
+                    "replacement": replacement,
+                    "screenshot": screenshot_payload,
+                    "cleanup": cleanup_details,
+                }
+                details.update(dict(patch_result.diagnostics or {}))
+                return _err(
+                    "Shader replacement visual validation failed",
+                    code="shader_replace_visual_validation_failed",
+                    category="runtime",
+                    details=details,
+                )
+            if validate_pixels:
+                before_image_path = str(
+                    (visual_validation.get("before") or {}).get("image_path")
+                    or (visual_validation.get("before") or {}).get("saved_path")
+                    or ""
+                )
+                after_image_path = str(
+                    screenshot_payload.get("image_path")
+                    or screenshot_payload.get("saved_path")
+                    or ""
+                )
+                pixel_compare = _compare_exported_images_for_shader_replace(
+                    before_image_path,
+                    after_image_path,
+                    _as_dict(args.get("pixel_thresholds"), default={}),
+                )
+                visual_validation["pixel_compare"] = pixel_compare
+                replacement["visual_validation"] = visual_validation
+                if not pixel_compare.get("success"):
+                    cleanup_details = {"reverted": False}
+                    try:
+                        cleanup_details["reverted"] = bool(
+                            await _patch_engine.revert_patch(session_id, patch_spec.patch_id, _session_manager)
+                        )
+                    except Exception as exc:
+                        cleanup_details.update(
+                            {
+                                "revert_error": str(exc),
+                                "revert_exception_type": type(exc).__name__,
+                            }
+                        )
+                    details = {
+                        "failure_stage": "pixel_validation",
+                        "session_id": session_id,
+                        "resolved_event_id": int(event_id),
+                        "stage": stage.upper(),
+                        "shader_id": shader_id,
+                        "replacement_id": patch_spec.patch_id,
+                        "replacement": replacement,
+                        "pixel_compare": pixel_compare,
+                        "cleanup": cleanup_details,
+                    }
+                    details.update(dict(patch_result.diagnostics or {}))
+                    return _err(
+                        "Shader replacement pixel validation failed",
+                        code="shader_replace_pixel_validation_failed",
+                        category="runtime",
+                        details=details,
+                    )
+        elif validate_visual:
+            replacement["visual_validation"] = visual_validation
         if not no_source_change:
             _store_replacement_payload(session_id, replacement)
         return _ok(
@@ -10041,6 +10614,10 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         shader_id = str(args.get("shader_id", "")).strip()
         try:
             stage, shader_id, reflection = await _resolve_shader_binding(
+                session_id=session_id,
+                event_id=int(event_id),
+                controller=controller,
+                pipe=pipe,
                 shader_id=shader_id,
                 stage_name=args.get("stage"),
                 require_reflection=True,
@@ -10094,6 +10671,10 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         requested_shader_id = str(args.get("shader_id", "")).strip()
         try:
             stage_name, resolved_shader_id, reflection = await _resolve_shader_binding(
+                session_id=session_id,
+                event_id=int(event_id),
+                controller=controller,
+                pipe=pipe,
                 shader_id=requested_shader_id,
                 stage_name=args.get("stage"),
                 require_reflection=True,
@@ -10120,6 +10701,10 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         shader_id = str(args.get("shader_id", "")).strip()
         try:
             stage, shader_id, reflection = await _resolve_shader_binding(
+                session_id=session_id,
+                event_id=int(event_id),
+                controller=controller,
+                pipe=pipe,
                 shader_id=shader_id,
                 stage_name=args.get("stage"),
                 require_reflection=action in {"get_reflection", "get_disassembly"},
@@ -10187,6 +10772,32 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         if action == "get_disassembly":
             requested_target = str(args.get("target", "auto"))
             requested_encoding = str(args.get("source_encoding") or "")
+            binding_resolution: Dict[str, Any] = {}
+            pipeline_object = None
+            try:
+                api_props = await _offload(controller.GetAPIProperties)
+                api = _pipeline_graphics_api(getattr(api_props, "pipelineType", None))
+                api, api_state = await _offload(_pipeline_select_api_state, controller, api)
+                resolution = await _offload(
+                    _pipeline_resolve_shader_binding,
+                    controller,
+                    pipe,
+                    api_state,
+                    api,
+                    _rd_stage(stage),
+                    ShaderStage(stage),
+                )
+                binding_resolution = resolution.to_diagnostics()
+                pipeline_object = resolution.pipeline_id
+            except Exception as exc:
+                binding_resolution = {"resolution_error": f"{type(exc).__name__}: {exc}"}
+            effective_requested_encoding = requested_encoding
+            if (
+                not effective_requested_encoding
+                and requested_target.lower() == "auto"
+                and str(binding_resolution.get("selected_api") or "").lower() == "vulkan"
+            ):
+                effective_requested_encoding = "spirvasm"
             try:
                 text, resolved_encoding, resolved_target, is_raw_spirv_asm = await _offload(
                     PatchEngine._resolve_source,
@@ -10196,7 +10807,8 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     ShaderStage(stage),
                     session_id,
                     requested_target=requested_target if requested_target != "auto" else "",
-                    requested_encoding=requested_encoding,
+                    requested_encoding=effective_requested_encoding,
+                    pipeline_object=pipeline_object,
                 )
             except RuntimeError as exc:
                 return _err(
@@ -10211,6 +10823,11 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                         "requested_source_encoding": requested_encoding,
                         "failure_stage": "disassembly",
                         "failure_reason": "source_unavailable",
+                        "binding_resolution": binding_resolution,
+                        "resolution_source": binding_resolution.get("resolution_source"),
+                        "pipeline_id": binding_resolution.get("pipeline_id"),
+                        "shader_id_candidates": binding_resolution.get("shader_id_candidates"),
+                        "selected_api": binding_resolution.get("selected_api"),
                     },
                 )
             source_encoding_name = _shader_encoding_name(resolved_encoding)
@@ -10223,6 +10840,8 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     source_encoding=source_encoding_name,
                     is_raw_spirv_asm=bool(is_raw_spirv_asm),
                     shader_id=shader_id,
+                    pipeline_id=str(binding_resolution.get("pipeline_id") or ""),
+                    binding_resolution=binding_resolution,
                     resolved_event_id=int(event_id),
                     source_hash="",
                 )
@@ -10232,6 +10851,8 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 source_encoding=source_encoding_name,
                 is_raw_spirv_asm=bool(is_raw_spirv_asm),
                 shader_id=shader_id,
+                pipeline_id=str(binding_resolution.get("pipeline_id") or ""),
+                binding_resolution=binding_resolution,
                 resolved_event_id=int(event_id),
                 source_hash=hashlib.sha256(str(text).encode("utf-8")).hexdigest(),
             )
@@ -11717,7 +12338,8 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
             _require(args, "host")
         if not host:
             host = "127.0.0.1"
-        port = _as_int(args.get("port"), 38920)
+        default_port = DEFAULT_ANDROID_REMOTE_PORT if transport == "adb_android" else 38920
+        port = _as_int(args.get("port"), default_port)
         timeout_ms = remote_connect_timeout_ms(args)
         if not _runtime.enable_remote:
             return _capability_error(
@@ -11772,9 +12394,14 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
             _progress("endpoint_ready", "Remote endpoint is reachable", progress_pct=0.55, details={"endpoint": url})
             remote_server = await _offload(_create_remote_server_connection, url)
             _progress("remote_connection_created", "Remote connection created", progress_pct=0.75, details={"endpoint": url})
-            ping_status = await _offload(remote_server.Ping)
-            if not _status_ok(ping_status):
-                raise RuntimeError(f"RemoteServer.Ping({url}) failed: {_status_text(ping_status)}")
+            diagnostics = _collect_android_diagnostics_from_bootstrap(bootstrap_result)
+            await _offload(
+                _ping_remote_server_or_raise,
+                remote_server,
+                url,
+                capture_context={"endpoint": url, "remote_id": ""},
+                diagnostics=diagnostics,
+            )
             _progress("remote_ping_ok", "Remote ping succeeded", progress_pct=0.9, details={"endpoint": url})
             server_info = await _offload(
                 _collect_remote_server_info,
@@ -11784,9 +12411,18 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
                 transport=transport,
                 bootstrap=bootstrap_detail,
             )
+            if transport == "adb_android":
+                await _offload(
+                    _ping_remote_server_or_raise,
+                    remote_server,
+                    url,
+                    capture_context={"endpoint": url, "remote_id": ""},
+                    diagnostics=diagnostics,
+                )
         except AndroidRemoteBootstrapError as exc:
             return _err(exc.message, code=exc.code, category="runtime", details=exc.details)
         except CoreError as exc:
+            diagnostics = _collect_android_diagnostics_from_bootstrap(bootstrap_result)
             if bootstrap_result is not None:
                 try:
                     await _offload(cleanup_android_remote, bootstrap_result)
@@ -11798,8 +12434,11 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
             details.setdefault("port", endpoint_port)
             details.setdefault("requested_host", host)
             details.setdefault("requested_port", port)
+            if diagnostics:
+                details.setdefault("android_diagnostics", diagnostics)
             return _err(exc.message, code=exc.code, category=exc.category, details=details)
         except Exception as exc:
+            diagnostics = _collect_android_diagnostics_from_bootstrap(bootstrap_result)
             if bootstrap_result is not None:
                 try:
                     await _offload(cleanup_android_remote, bootstrap_result)
@@ -11823,6 +12462,7 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
                         "remote_id": "",
                     },
                     "classification": "remote_endpoint",
+                    "android_diagnostics": diagnostics,
                     "fix_hint": "Repair the remote endpoint or Android bootstrap path before retrying rd.remote.connect.",
                 },
             )
@@ -11851,7 +12491,7 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
             bootstrap_result=bootstrap_result,
             requested_host=host,
             requested_port=port,
-            device_serial=str(options.get("device_serial") or ""),
+            device_serial=str(options.get("device_serial") or bootstrap_detail.get("device_serial") or ""),
             detail=detail,
         )
         _set_context_remote_live(remote_id, detail["endpoint"])
@@ -11905,17 +12545,57 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
         except CoreError as exc:
             return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
         if not handle.connected or handle.remote_server is None:
-            return _err(
-                f"Remote handle {remote_id} is not connected",
-                code="remote_not_connected",
-                category="runtime",
-                details={"remote_id": remote_id},
-            )
+            if handle.transport == "adb_android":
+                try:
+                    await _offload(_reconnect_android_remote_handle_sync, handle, remote_connect_timeout_ms({}))
+                except CoreError as exc:
+                    details = dict(exc.details)
+                    details.setdefault("remote_id", remote_id)
+                    details.setdefault("classification", "remote_endpoint_blocker")
+                    return _err(exc.message, code="remote_not_connected", category="runtime", details=details)
+            if not handle.connected or handle.remote_server is None:
+                return _err(
+                    f"Remote handle {remote_id} is not connected",
+                    code="remote_not_connected",
+                    category="runtime",
+                    details={"remote_id": remote_id},
+                )
         started = time.perf_counter()
         try:
             status = await _offload(handle.remote_server.Ping)
         except Exception as exc:
             _mark_remote_handle_disconnected(handle)
+            if handle.transport == "adb_android":
+                try:
+                    await _offload(_reconnect_android_remote_handle_sync, handle, remote_connect_timeout_ms({}))
+                    status = await _offload(handle.remote_server.Ping)
+                    if _status_ok(status):
+                        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+                        handle.detail["connected"] = True
+                        return _ok(
+                            latency_ms=latency_ms,
+                            server_info=handle.server_info,
+                            detail={
+                                "connected": True,
+                                "reconnected": True,
+                                "transport": handle.transport,
+                                "endpoint": _remote_url(handle.host, handle.port),
+                                "active_session_ids": _remote_active_session_ids(handle),
+                            },
+                        )
+                except CoreError as recovery_exc:
+                    details = dict(recovery_exc.details)
+                    details.setdefault("remote_id", remote_id)
+                    details.setdefault("source_layer", "runtime")
+                    details.setdefault("operation", "rd.remote.ping")
+                    details.setdefault("backend_type", "remote")
+                    details.setdefault("classification", "remote_endpoint_blocker")
+                    return _err(
+                        f"RemoteServer.Ping({_remote_url(handle.host, handle.port)}) failed: {exc}",
+                        code="remote_ping_failed",
+                        category="runtime",
+                        details=details,
+                    )
             return _err(
                 f"RemoteServer.Ping({_remote_url(handle.host, handle.port)}) failed: {exc}",
                 code="remote_ping_failed",
@@ -11942,6 +12622,27 @@ async def _dispatch_remote(action: str, args: Dict[str, Any]) -> str:
                 classification="remote_endpoint",
                 fix_hint="Reconnect to the remote endpoint before issuing more remote tools.",
             )
+            if handle.transport == "adb_android":
+                try:
+                    await _offload(_reconnect_android_remote_handle_sync, handle, remote_connect_timeout_ms({}))
+                    status = await _offload(handle.remote_server.Ping)
+                    if _status_ok(status):
+                        latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
+                        handle.detail["connected"] = True
+                        return _ok(
+                            latency_ms=latency_ms,
+                            server_info=handle.server_info,
+                            detail={
+                                "connected": True,
+                                "reconnected": True,
+                                "transport": handle.transport,
+                                "endpoint": _remote_url(handle.host, handle.port),
+                                "active_session_ids": _remote_active_session_ids(handle),
+                            },
+                        )
+                except CoreError as recovery_exc:
+                    details["android_diagnostics"] = dict(recovery_exc.details.get("android_diagnostics") or {})
+                    details["classification"] = "remote_endpoint_blocker"
             return _err(
                 f"RemoteServer.Ping({_remote_url(handle.host, handle.port)}) failed: {details['renderdoc_status']['status_text']}",
                 code="remote_ping_failed",

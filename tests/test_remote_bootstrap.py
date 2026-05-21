@@ -27,6 +27,11 @@ def test_select_android_package_matches_packaged_apk() -> None:
     assert apk_path.is_file()
 
 
+def test_android_remote_default_port_matches_renderdoc_remote_server_socket() -> None:
+    assert remote_bootstrap.DEFAULT_ANDROID_TARGET_CONTROL_PORT == 38920
+    assert remote_bootstrap.DEFAULT_ANDROID_REMOTE_PORT == 39920
+
+
 def test_cleanup_android_remote_removes_forward_and_config(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     commands: list[list[str]] = []
 
@@ -69,8 +74,40 @@ def test_cleanup_android_remote_removes_forward_and_config(monkeypatch: pytest.M
     assert any(cmd[:3] == ["adb", "-s", "serial-1"] and "force-stop" in cmd for cmd in commands)
 
 def test_select_remote_socket_port_prefers_requested_port() -> None:
-    assert remote_bootstrap._select_remote_socket_port(38920, [39920], [38920, 39920]) == 38920
+    assert remote_bootstrap._select_remote_socket_port(39920, [38920], [38920, 39920]) == 39920
 
 
 def test_select_remote_socket_port_falls_back_to_detected_single_port() -> None:
     assert remote_bootstrap._select_remote_socket_port(38920, [], [39920]) == 39920
+
+
+def test_collect_android_remote_diagnostics_reports_matching_forward(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        remote_bootstrap,
+        "_list_adb_forwards",
+        lambda adb_path, serial: [
+            "serial-1 tcp:38969 localabstract:renderdoc_39920",
+            "serial-1 tcp:38960 localabstract:renderdoc_38920",
+        ],
+    )
+    monkeypatch.setattr(remote_bootstrap, "_package_pid", lambda adb_path, serial, package: "12345")
+    monkeypatch.setattr(remote_bootstrap, "_list_renderdoc_socket_ports", lambda adb_path, serial: [38920, 39920])
+
+    result = AndroidBootstrapResult(
+        adb_path="adb",
+        device_serial="serial-1",
+        package_name="org.renderdoc.renderdoccmd.arm64",
+        activity_name="org.renderdoc.renderdoccmd.arm64.Loader",
+        abi="arm64-v8a",
+        host="127.0.0.1",
+        port=38969,
+        remote_port=39920,
+        apk_path="apk",
+        forward_spec="tcp:38969",
+    )
+
+    diagnostics = remote_bootstrap.collect_android_remote_diagnostics(result)
+
+    assert diagnostics["package_pid"] == "12345"
+    assert diagnostics["socket_ports"] == [38920, 39920]
+    assert diagnostics["matching_forwards"] == ["serial-1 tcp:38969 localabstract:renderdoc_39920"]

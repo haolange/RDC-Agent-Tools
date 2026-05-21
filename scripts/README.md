@@ -48,6 +48,8 @@
   - 复制 runtime staging 内容并生成 manifest。
 - `cleanup_workspace.py`
   - 只清理仓库根目录内的忽略产物与临时目录。
+- `_shared.py`
+  - `scripts/` 内部共享 helper，只供正式脚本导入使用，不作为用户直接入口。
 
 ## 进入标准
 

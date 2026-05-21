@@ -62,6 +62,7 @@
   - 若没有可用 Android 设备 serial，或设备状态是 `offline` / `unauthorized`，立即停止 Android remote 后续测试，并输出 blocker 报告，说明“当前 shell 未看到可用 Android 设备”。
   - 这类 blocker 只阻断 Android remote 分支；不要因此跳过桌面 local / 其他可执行分支，除非用户明确要求整轮停止。
 - 不要手工执行 `adb forward tcp:38920 tcp:38920`，也不要把某个固定 host:port 是否监听当作通用前置检查。
+- Android `adb_android` 的默认 remote server socket 是 `renderdoc_39920`；`renderdoc_38920` 是 target control socket，只能作为诊断线索。
 - Android remote 的 bootstrap 必须通过仓库自身 `rd.remote.connect(options.transport="adb_android")` 完成。
 
 2. 做仓库基础可运行性检查。
@@ -113,6 +114,7 @@
   - 如有需要，再记录 `rd.session.get_context`
 - `rd.remote.connect` 的参数必须以本轮任务和平台定义为准：
   - 如果测试的是 Android remote，则必须显式传 `options.transport="adb_android"` 与 `options.device_serial="<adb devices -l 里看到的目标 serial>"`
+  - 如果没有显式传 `port`，Android remote 默认按 `auto / renderdoc_39920` 处理，并以 bootstrap 返回的实际 endpoint 为准
   - 如果用户已显式给出 `host`、`port`、`timeout_ms`，则按用户要求传
   - 如果用户没有给出这些值，则基于当前平台文档、工具契约和本轮测试目标确定，并在报告中写明实际使用值
 - `rd.remote.connect` 成功后，必须额外记录：

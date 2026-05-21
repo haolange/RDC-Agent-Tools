@@ -5,7 +5,9 @@ import json
 from types import SimpleNamespace
 
 from rdx import server
-from rdx.core.session_manager import _map_graphics_api
+from rdx.core import session_manager as session_manager_mod
+from rdx.core.session_manager import SessionError, SessionManager, SessionState, _map_graphics_api
+from rdx.models import BackendType
 from rdx.context_snapshot import clear_context_snapshot
 
 
@@ -24,6 +26,31 @@ class DummyRemoteServer:
 
     def ShutdownConnection(self) -> None:
         self.shutdown_called = True
+
+
+class StrictAndroidRemoteServer(DummyRemoteServer):
+    def DriverName(self) -> str:
+        raise AssertionError("Android connect must not query DriverName before replay")
+
+    def RemoteSupportedReplays(self) -> list[str]:
+        raise AssertionError("Android connect must not query RemoteSupportedReplays before replay")
+
+
+class FailingSecondPingRemoteServer(StrictAndroidRemoteServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ping_count = 0
+
+    def Ping(self) -> SimpleNamespace:
+        self.ping_count += 1
+        if self.ping_count == 1:
+            return SimpleNamespace(OK=lambda: True, Message=lambda: "Succeeded")
+        return SimpleNamespace(OK=lambda: False, Message=lambda: "Connection lost to remote server")
+
+
+class RaisingPingRemoteServer(DummyRemoteServer):
+    def Ping(self) -> SimpleNamespace:
+        raise RuntimeError("Connection lost to remote server")
 
 
 class FailingExecuteStatus:
@@ -96,6 +123,19 @@ class FakeSessionManager:
 class FakeOpenReplayFailSessionManager(FakeSessionManager):
     async def open_capture(self, session_id: str, path: str) -> SimpleNamespace:
         raise RuntimeError("Network I/O operation failed")
+
+
+class EmptyCopyRemoteServer(DummyRemoteServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.open_capture_called = False
+
+    def CopyCaptureToRemote(self, path: str, progress: object) -> str:
+        return ""
+
+    def OpenCapture(self, capture_id: int, path: str, options: object, progress: object) -> tuple[object, object]:
+        self.open_capture_called = True
+        return SimpleNamespace(OK=lambda: True, Message=lambda: "Succeeded"), FakeController()
 
 
 class FakeMeshFormat:
@@ -211,11 +251,17 @@ def test_dispatch_remote_connect_allows_omitting_host_for_adb_android(monkeypatc
 
     monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
     monkeypatch.setattr(server.server_runtime, "_wait_for_remote_endpoint", lambda url, timeout_ms: None)
-    monkeypatch.setattr(server.server_runtime, "_create_remote_server_connection", lambda url: DummyRemoteServer())
+    monkeypatch.setattr(server.server_runtime, "_create_remote_server_connection", lambda url: StrictAndroidRemoteServer())
+    captured_bootstrap: dict[str, object] = {}
+
+    def _fake_bootstrap(remote_port, options):
+        captured_bootstrap["remote_port"] = remote_port
+        return SimpleNamespace(host="127.0.0.1", port=39920, serial="e38b8019")
+
     monkeypatch.setattr(
         server.server_runtime,
         "bootstrap_android_remote",
-        lambda remote_port, options: SimpleNamespace(host="127.0.0.1", port=39920, serial="e38b8019"),
+        _fake_bootstrap,
     )
     monkeypatch.setattr(
         server.server_runtime,
@@ -245,6 +291,9 @@ def test_dispatch_remote_connect_allows_omitting_host_for_adb_android(monkeypatc
         assert payload["success"] is True
         assert payload["detail"]["transport"] == "adb_android"
         assert payload["detail"]["endpoint"] == "127.0.0.1:39920"
+        assert captured_bootstrap["remote_port"] == 39920
+        assert payload["server_info"]["platform"] == "android"
+        assert "capabilities" not in payload["server_info"]
         remote_id = payload["remote_id"]
         assert server._runtime.remotes[remote_id].requested_host == "127.0.0.1"
     finally:
@@ -252,6 +301,127 @@ def test_dispatch_remote_connect_allows_omitting_host_for_adb_android(monkeypatc
         server._runtime.context_snapshots.clear()
         server._runtime.remotes.clear()
         server._runtime.remotes.update(original_remotes)
+        server._runtime.enable_remote = original_enable_remote
+
+
+def test_dispatch_remote_connect_unstable_android_endpoint_does_not_allocate_remote_id(monkeypatch) -> None:
+    original_remotes = dict(server._runtime.remotes)
+    original_enable_remote = server._runtime.enable_remote
+    cleanup_calls: list[object] = []
+
+    async def _inline_offload(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_wait_for_remote_endpoint", lambda url, timeout_ms: None)
+    monkeypatch.setattr(server.server_runtime, "_create_remote_server_connection", lambda url: FailingSecondPingRemoteServer())
+    monkeypatch.setattr(
+        server.server_runtime,
+        "bootstrap_android_remote",
+        lambda remote_port, options: SimpleNamespace(
+            host="127.0.0.1",
+            port=39920,
+            remote_port=39920,
+            adb_path="adb",
+            device_serial="e38b8019",
+            package_name="org.renderdoc.renderdoccmd.arm64",
+            forward_spec="tcp:39920",
+        ),
+    )
+    monkeypatch.setattr(
+        server.server_runtime,
+        "describe_android_remote",
+        lambda result: {
+            "transport": "adb_android",
+            "device_serial": "e38b8019",
+            "endpoint": f"{result.host}:{result.port}",
+            "remote_port": result.remote_port,
+            "forward_spec": result.forward_spec,
+        },
+    )
+    monkeypatch.setattr(
+        server.server_runtime,
+        "collect_android_remote_diagnostics",
+        lambda result: {
+            "device_serial": "e38b8019",
+            "package_name": "org.renderdoc.renderdoccmd.arm64",
+            "endpoint": "127.0.0.1:39920",
+            "forward_spec": "tcp:39920",
+            "matching_forwards": [],
+            "socket_ports": [],
+        },
+    )
+    monkeypatch.setattr(server.server_runtime, "cleanup_android_remote", lambda result: cleanup_calls.append(result) or [])
+
+    server._runtime.remotes.clear()
+    server._runtime.enable_remote = True
+    try:
+        payload = json.loads(
+            asyncio.run(
+                server._dispatch_remote(
+                    "connect",
+                    {"options": {"transport": "adb_android", "device_serial": "e38b8019"}, "timeout_ms": 1000},
+                )
+            )
+        )
+        assert payload["success"] is False
+        assert payload["code"] == "remote_ping_failed"
+        assert "remote_id" not in payload
+        assert server._runtime.remotes == {}
+        assert cleanup_calls
+        assert payload["details"]["android_diagnostics"]["device_serial"] == "e38b8019"
+    finally:
+        server._runtime.remotes.clear()
+        server._runtime.remotes.update(original_remotes)
+        server._runtime.enable_remote = original_enable_remote
+
+
+def test_dispatch_remote_ping_reconnects_android_handle_on_connection_loss(monkeypatch) -> None:
+    original_remotes = dict(server._runtime.remotes)
+    original_enable_remote = server._runtime.enable_remote
+
+    async def _inline_offload(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_wait_for_remote_endpoint", lambda url, timeout_ms: None)
+    monkeypatch.setattr(server.server_runtime, "_create_remote_server_connection", lambda url: DummyRemoteServer())
+    monkeypatch.setattr(
+        server.server_runtime,
+        "collect_android_remote_diagnostics",
+        lambda result: {
+            "device_serial": "e38b8019",
+            "package_name": "org.renderdoc.renderdoccmd.arm64",
+            "endpoint": "127.0.0.1:39920",
+            "forward_spec": "tcp:39920",
+            "matching_forwards": ["e38b8019 tcp:39920 localabstract:renderdoc_39920"],
+            "package_pid": "12345",
+            "socket_ports": [39920],
+        },
+    )
+
+    server._runtime.remotes = {
+        "remote_demo": server.RemoteHandle(
+            remote_id="remote_demo",
+            host="127.0.0.1",
+            port=39920,
+            connected=True,
+            transport="adb_android",
+            remote_server=RaisingPingRemoteServer(),
+            bootstrap={"remote_port": 39920},
+            bootstrap_result=SimpleNamespace(remote_port=39920),
+            detail={"connected": True},
+        )
+    }
+    server._runtime.enable_remote = True
+    try:
+        payload = json.loads(asyncio.run(server._dispatch_remote("ping", {"remote_id": "remote_demo"})))
+        assert payload["success"] is True
+        assert payload["detail"]["reconnected"] is True
+        assert server._runtime.remotes["remote_demo"].connected is True
+        assert isinstance(server._runtime.remotes["remote_demo"].remote_server, DummyRemoteServer)
+    finally:
+        server._runtime.remotes = original_remotes
         server._runtime.enable_remote = original_enable_remote
 
 
@@ -419,6 +589,33 @@ def test_dispatch_capture_open_replay_remote_network_failure_marks_handle_discon
         server._runtime.remotes = original_remotes
         server._runtime.session_owned_remotes = original_session_owned
         server._runtime.consumed_remotes = original_consumed
+
+
+def test_session_manager_remote_copy_empty_path_fails_before_open_capture(monkeypatch) -> None:
+    manager = SessionManager()
+    remote = EmptyCopyRemoteServer()
+    state = SessionState(
+        session_id="sess_demo",
+        backend_type=BackendType.REMOTE,
+        remote_server=remote,
+    )
+
+    async def _inline_offload(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_offload", _inline_offload)
+    monkeypatch.setattr(session_manager_mod, "_get_rd", lambda: SimpleNamespace(ReplayOptions=lambda: object()))
+
+    try:
+        asyncio.run(manager._open_remote_capture(state, "capture.rdc"))
+    except SessionError as exc:
+        assert exc.detail.code == "remote_capture_copy_failed"
+        assert exc.detail.details["operation"] == "remote.CopyCaptureToRemote"
+        assert exc.detail.details["capture_context"]["remote_capture_path"] == ""
+    else:
+        raise AssertionError("empty remote copy path should fail")
+
+    assert remote.open_capture_called is False
 
 
 def test_remote_handle_reuse_across_contexts_fails(monkeypatch) -> None:

@@ -360,6 +360,7 @@ rdx.bat --non-interactive cli call rd.session.get_context --args-file $argsFile 
 - `adb devices -l` 是否只有一个 `device`，或你是否显式传了 `options.device_serial`
 - 仓库内 APK 是否存在：`binaries/android/arm32/`、`binaries/android/arm64/`
 - `rd.remote.connect` 的 `options.transport` 是否设为 `adb_android`
+- Android 默认 remote server socket 是否是 `renderdoc_39920`；`renderdoc_38920` 只是 target control socket，不要把它当成默认 remote endpoint
 - `rd.remote.ping` 是否成功
 - `adb forward --list` 中是否看到了本次链路创建的本地端口
 
@@ -375,6 +376,7 @@ rdx.bat --non-interactive cli call rd.session.get_context --args-file $argsFile 
 
 - 只有一台 Android 设备在线时，可以不额外指定 serial。
 - 多设备场景下，优先显式设置 `RDX_REMOTE_DEVICE_SERIAL`。
+- Android 默认 remote branch 会优先连接 RenderDoc remote server socket `renderdoc_39920`；如果你需要覆盖端口，请显式设置 `RDX_REMOTE_PORT` 或 tool 参数。
 - 如果目标不是 Android `adb` remote，而是裸 `RenderDoc` remote host，请显式设置 `RDX_REMOTE_CONNECT_TRANSPORT=renderdoc`。
 - 当桌面 local replay 只是不兼容当前 GPU / extension 时，正式 smoke 应把它归类为 `sample_compatibility`，而不是无限重复 `open_file` 直到触发 capture limit。
 

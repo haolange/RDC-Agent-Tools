@@ -9,6 +9,7 @@ import pytest
 
 from rdx import server
 from rdx.core import patch_engine as patch_engine_mod
+from rdx.core import pipeline_service as pipeline_service_mod
 from rdx.models import PatchOp, PatchResult, PatchSpec, ShaderStage
 
 
@@ -60,6 +61,7 @@ class _FakePatchEngine:
         self.error_details = dict(error_details or {})
         self.messages = list(messages or [])
         self.calls: list[dict[str, object]] = []
+        self.revert_calls: list[dict[str, object]] = []
 
     async def apply_patch(
         self,
@@ -102,6 +104,16 @@ class _FakePatchEngine:
             error_details=dict(self.error_details),
             messages=list(self.messages),
         )
+
+    async def revert_patch(self, session_id: str, patch_id: str, session_manager: object) -> bool:
+        self.revert_calls.append(
+            {
+                "session_id": session_id,
+                "patch_id": patch_id,
+                "session_manager": session_manager,
+            }
+        )
+        return True
 
 
 class _FakeSessionManager:
@@ -158,6 +170,7 @@ def test_edit_and_replace_records_real_applied_replacement(monkeypatch: pytest.M
                     "session_id": "sess_demo",
                     "event_id": 101,
                     "stage": "ps",
+                    "validate_visual": False,
                     "ops": [
                         {
                             "op": "replace_expr",
@@ -182,6 +195,127 @@ def test_edit_and_replace_records_real_applied_replacement(monkeypatch: pytest.M
     assert str(getattr(patch_spec, "target_shader_id")) == "ResourceId::77"
     assert server._runtime.shader_replacements["sess_demo"][0]["status"] == "applied"
     assert session_manager.state.capabilities.patch_supported is True
+
+
+def test_patch_engine_parent_shader_resolution_replaces_original_shader_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeShaderStage:
+        Vertex = "vs"
+        Hull = "hs"
+        Domain = "ds"
+        Geometry = "gs"
+        Pixel = "ps"
+        Compute = "cs"
+
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderStage=_FakeShaderStage,
+        ShaderCompileFlags=lambda: SimpleNamespace(flags=[]),
+        GraphicsAPI=SimpleNamespace(D3D11="d3d11", D3D12="d3d12", OpenGL="opengl", Vulkan="vulkan"),
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(pipeline_service_mod, "_get_rd", lambda: fake_rd)
+
+    class _Pipe:
+        def GetShader(self, stage: object) -> str:
+            return "ResourceId::0"
+
+        def GetShaderReflection(self, stage: object) -> None:
+            return None
+
+        def GetGraphicsPipelineObject(self) -> str:
+            return "ResourceId::pipe"
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.replacements: list[tuple[object, object]] = []
+            self.built_sources: list[bytes] = []
+            self.vulkan = SimpleNamespace(
+                graphics=SimpleNamespace(pipelineResourceId="ResourceId::pipe"),
+                vertexShader=SimpleNamespace(shaderResourceId="ResourceId::0"),
+                tessControlShader=SimpleNamespace(shaderResourceId="ResourceId::0"),
+                tessEvalShader=SimpleNamespace(shaderResourceId="ResourceId::0"),
+                geometryShader=SimpleNamespace(shaderResourceId="ResourceId::0"),
+                fragmentShader=SimpleNamespace(shaderResourceId="ResourceId::0", entryPoint="main", reflection=None),
+                computeShader=SimpleNamespace(shaderResourceId="ResourceId::0"),
+                inputAssembly=SimpleNamespace(topology="TriangleList"),
+            )
+
+        def SetFrameEvent(self, event_id: int, apply: bool) -> None:
+            return None
+
+        def GetPipelineState(self) -> _Pipe:
+            return _Pipe()
+
+        def GetAPIProperties(self) -> SimpleNamespace:
+            return SimpleNamespace(pipelineType="d3d11")
+
+        def GetD3D11PipelineState(self) -> SimpleNamespace:
+            return SimpleNamespace()
+
+        def GetD3D12PipelineState(self) -> None:
+            return None
+
+        def GetOpenGLPipelineState(self) -> None:
+            return None
+
+        def GetVulkanPipelineState(self) -> SimpleNamespace:
+            return self.vulkan
+
+        def GetResources(self) -> list[SimpleNamespace]:
+            return [SimpleNamespace(resourceId="ResourceId::pipe", parentResources=["ResourceId::frag-module"])]
+
+        def GetShaderEntryPoints(self, shader_id: object) -> list[SimpleNamespace]:
+            return [SimpleNamespace(name="main", stage="ps")]
+
+        def GetShader(self, pipeline_id: object, shader_id: object, entry: object) -> SimpleNamespace:
+            return SimpleNamespace(entryPoint="main", resourceId="ResourceId::frag-module", debugInfo=None)
+
+        def BuildTargetShader(self, entry: object, encoding: object, source: bytes, flags: object, stage: object) -> tuple[str, str]:
+            self.built_sources.append(source)
+            return "ResourceId::replacement", ""
+
+        def ReplaceResource(self, original: object, replacement: object) -> None:
+            self.replacements.append((original, replacement))
+
+        def RemoveReplacement(self, shader_id: object) -> None:
+            return None
+
+        def FreeTargetResource(self, shader_id: object) -> None:
+            return None
+
+    controller = _Controller()
+    session_manager = SimpleNamespace(get_controller=lambda session_id: controller)
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_resolve_source",
+        classmethod(
+            lambda cls, *args, **kwargs: (
+                "OpDecorate %1 RelaxedPrecision\nOpReturn\n",
+                "spirvasm",
+                "SPIR-V",
+                True,
+            )
+        ),
+    )
+    monkeypatch.setattr(patch_engine_mod.PatchEngine, "_encoding_name", staticmethod(lambda encoding: "spirvasm"))
+
+    result = asyncio.run(
+        patch_engine_mod.PatchEngine().apply_patch(
+            "sess_demo",
+            1248,
+            ShaderStage.PS,
+            session_manager,
+            PatchSpec(
+                patch_id="patch_demo",
+                ops=[PatchOp(op="force_full_precision")],
+                source_encoding="spirvasm",
+            ),
+        )
+    )
+
+    assert result.success is True
+    assert controller.replacements == [("ResourceId::frag-module", "ResourceId::replacement")]
+    assert b"RelaxedPrecision" not in controller.built_sources[0]
 
 
 def test_edit_and_replace_noop_patch_is_not_recorded_as_active_replacement(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -214,6 +348,7 @@ def test_edit_and_replace_noop_patch_is_not_recorded_as_active_replacement(monke
                     "session_id": "sess_demo",
                     "event_id": 101,
                     "stage": "ps",
+                    "validate_visual": False,
                     "ops": [
                         {
                             "op": "replace_expr",
@@ -262,6 +397,7 @@ def test_edit_and_replace_can_emit_patch_artifacts(monkeypatch: pytest.MonkeyPat
                     "event_id": 101,
                     "stage": "ps",
                     "emit_patch_artifacts": True,
+                    "validate_visual": False,
                     "ops": [
                         {
                             "op": "replace_expr",
@@ -303,6 +439,7 @@ def test_edit_and_replace_accepts_source_text_workflow_inputs(monkeypatch: pytes
                     "source_target": "SPIR-V ASM",
                     "source_encoding": "spirvasm",
                     "expected_source_hash": "hash_demo",
+                    "validate_visual": False,
                 },
             )
         )
@@ -315,6 +452,118 @@ def test_edit_and_replace_accepts_source_text_workflow_inputs(monkeypatch: pytes
     assert getattr(patch_spec, "source_encoding") == "spirvasm"
     assert getattr(patch_spec, "expected_source_hash") == "hash_demo"
     assert getattr(patch_spec, "ops") == []
+
+
+def test_edit_and_replace_visual_validation_failure_reverts_and_does_not_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    patch_engine = _FakePatchEngine(success=True)
+    session_manager = _FakeSessionManager()
+    _install_shader_replace_env(monkeypatch, _SupportedController())
+    server.server_runtime._patch_engine = patch_engine
+    server.server_runtime._session_manager = session_manager
+
+    async def _fake_export(action: str, args: dict[str, object]) -> str:
+        assert action == "screenshot"
+        path = str(args.get("output_path") or "")
+        if path.endswith("_before_validation.png"):
+            return json.dumps(
+                {
+                    "success": True,
+                    "visual_truth_level": "visual_valid",
+                    "image_path": path,
+                }
+            )
+        return json.dumps(
+            {
+                "success": True,
+                "visual_truth_level": "visual_degraded",
+                "image_path": path,
+                "visual_stats": {"all_zero": True},
+            }
+        )
+
+    monkeypatch.setattr(server.server_runtime, "_dispatch_export", _fake_export)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "edit_and_replace",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 101,
+                    "stage": "ps",
+                    "source_text": "OpCapability Shader\n",
+                    "source_target": "SPIR-V ASM",
+                    "source_encoding": "spirvasm",
+                    "output_dir": str(tmp_path),
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["code"] == "shader_replace_visual_validation_failed"
+    assert payload["details"]["failure_stage"] == "visual_validation"
+    assert patch_engine.revert_calls[0]["patch_id"] == payload["details"]["replacement_id"]
+    assert server._runtime.shader_replacements.get("sess_demo", []) == []
+
+
+def test_edit_and_replace_pixel_validation_failure_reverts_and_does_not_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    patch_engine = _FakePatchEngine(success=True)
+    session_manager = _FakeSessionManager()
+    _install_shader_replace_env(monkeypatch, _SupportedController())
+    server.server_runtime._patch_engine = patch_engine
+    server.server_runtime._session_manager = session_manager
+
+    async def _fake_export(action: str, args: dict[str, object]) -> str:
+        assert action == "screenshot"
+        return json.dumps(
+            {
+                "success": True,
+                "visual_truth_level": "visual_valid",
+                "image_path": str(args.get("output_path") or ""),
+            }
+        )
+
+    monkeypatch.setattr(server.server_runtime, "_dispatch_export", _fake_export)
+    monkeypatch.setattr(
+        server.server_runtime,
+        "_compare_exported_images_for_shader_replace",
+        lambda *args, **kwargs: {
+            "success": False,
+            "failure_reason": "mean_abs_rgb_exceeded",
+            "mean_abs_rgb": 8.0,
+        },
+    )
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "edit_and_replace",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 101,
+                    "stage": "ps",
+                    "source_text": "OpCapability Shader\n",
+                    "source_target": "SPIR-V ASM",
+                    "source_encoding": "spirvasm",
+                    "output_dir": str(tmp_path),
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["code"] == "shader_replace_pixel_validation_failed"
+    assert payload["details"]["failure_stage"] == "pixel_validation"
+    assert payload["details"]["pixel_compare"]["failure_reason"] == "mean_abs_rgb_exceeded"
+    assert patch_engine.revert_calls[0]["patch_id"] == payload["details"]["replacement_id"]
+    assert server._runtime.shader_replacements.get("sess_demo", []) == []
 
 
 def test_edit_and_replace_rejects_multiple_edit_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -462,6 +711,7 @@ def test_edit_and_replace_returns_capability_failure_without_mock_success(
                     "session_id": "sess_demo",
                     "event_id": 101,
                     "stage": "ps",
+                    "validate_visual": False,
                     "ops": [
                         {
                             "op": "replace_expr",
@@ -507,6 +757,7 @@ def test_edit_and_replace_preserves_patch_engine_error_details(monkeypatch: pyte
                     "session_id": "sess_demo",
                     "event_id": 101,
                     "stage": "ps",
+                    "validate_visual": False,
                     "ops": [
                         {
                             "op": "replace_expr",
@@ -782,6 +1033,165 @@ def test_patch_engine_skips_build_and_replace_when_patch_is_noop(monkeypatch: py
     assert controller.replace_calls == []
 
 
+def test_patch_engine_force_replacement_builds_and_replaces_noop_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderCompileFlags=_FakeShaderCompileFlags,
+        ShaderCompileFlag=_FakeShaderCompileFlag,
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(patch_engine_mod, "_to_rd_stage", lambda stage: "ps")
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_get_best_encoding",
+        staticmethod(lambda controller, session_id: ("SPIRVAsm", "SPIR-V (RenderDoc)")),
+    )
+
+    controller = _PatchEngineController()
+    session_manager = _PatchEngineSessionManager(controller)
+    engine = patch_engine_mod.PatchEngine()
+
+    result = asyncio.run(
+        engine.apply_patch(
+            session_id="sess_demo",
+            event_id=314,
+            stage=ShaderStage.PS,
+            session_manager=session_manager,
+            patch_spec=PatchSpec(
+                patch_id="repl_demo",
+                target_event_id=314,
+                target_stage=ShaderStage.PS,
+                target_shader_id="ResourceId::77",
+                ops=[PatchOp(op="replace_expr", expr_from="main", expr_to="main")],
+                force_replacement=True,
+            ),
+        )
+    )
+
+    assert result.success is True
+    assert result.applied_to_shader_hash == result.original_shader_hash
+    assert controller.build_calls
+    assert controller.replace_calls == [("ResourceId::77", "ResourceId::99")]
+    assert result.diagnostics["replacement_from_id"] == "ResourceId::77"
+    assert result.diagnostics["replacement_to_id"] == "ResourceId::99"
+    assert result.diagnostics["forced_noop_replacement"] is True
+
+
+def test_patch_engine_assembles_spirv_asm_when_backend_accepts_spirv_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderCompileFlags=_FakeShaderCompileFlags,
+        ShaderCompileFlag=_FakeShaderCompileFlag,
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(patch_engine_mod, "_to_rd_stage", lambda stage: "ps")
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_disassemble_raw_spirv_bytes",
+        staticmethod(lambda refl: "OpCapability Shader\nOpEntryPoint Fragment %1 \"main\"\n"),
+    )
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_assemble_spirv_asm",
+        staticmethod(lambda source, flags: b"\x03\x02\x23\x07SPIRV_BINARY"),
+    )
+
+    class _BinarySpirvController(_PatchEngineController):
+        def GetDisassemblyTargets(self, include_unsupported: bool) -> list[str]:
+            return ["SPIR-V (RenderDoc)"]
+
+        def GetTargetShaderEncodings(self) -> list[int]:
+            return [3, 2]
+
+    controller = _BinarySpirvController()
+    session_manager = _PatchEngineSessionManager(controller)
+    engine = patch_engine_mod.PatchEngine()
+
+    result = asyncio.run(
+        engine.apply_patch(
+            session_id="sess_demo",
+            event_id=314,
+            stage=ShaderStage.PS,
+            session_manager=session_manager,
+            patch_spec=PatchSpec(
+                patch_id="repl_demo",
+                target_event_id=314,
+                target_stage=ShaderStage.PS,
+                target_shader_id="ResourceId::77",
+                source_text="OpCapability Shader\nOpEntryPoint Fragment %1 \"main\"\n",
+                source_encoding="spirvasm",
+                force_replacement=True,
+            ),
+        )
+    )
+
+    assert result.success is True
+    assert controller.build_calls[0][1] == 3
+    assert controller.build_calls[0][2] == b"\x03\x02\x23\x07SPIRV_BINARY"
+    assert result.encoding == "spirv"
+    assert result.diagnostics["source_assembled_to_binary"] is True
+    assert result.diagnostics["build_input_kind"] == "spirv_binary"
+    assert result.diagnostics["build_input_magic"] == "0x07230203"
+    assert result.diagnostics["source_after_spirv_binary_hash"]
+
+
+def test_patch_engine_rejects_pipeline_id_as_replace_resource_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderCompileFlags=_FakeShaderCompileFlags,
+        ShaderCompileFlag=_FakeShaderCompileFlag,
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(patch_engine_mod, "_to_rd_stage", lambda stage: "ps")
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_get_best_encoding",
+        staticmethod(lambda controller, session_id: ("SPIRVAsm", "SPIR-V (RenderDoc)")),
+    )
+    monkeypatch.setattr(patch_engine_mod, "_pipeline_graphics_api", lambda value: "Vulkan")
+    monkeypatch.setattr(patch_engine_mod, "_pipeline_select_api_state", lambda controller, api: ("Vulkan", object()))
+    monkeypatch.setattr(
+        patch_engine_mod,
+        "_pipeline_resolve_shader_binding",
+        lambda controller, pipe, api_state, api, rd_stage, stage: SimpleNamespace(
+            shader_id="ResourceId::9001",
+            reflection=SimpleNamespace(entryPoint="main", debugInfo=None),
+            pipeline_id="ResourceId::9001",
+            resolution_source="pipeline_state_shader",
+            diagnostics={"shader_id_candidates": [{"source": "bad", "shader_id": "ResourceId::9001"}]},
+        ),
+    )
+
+    class _ControllerWithApi(_PatchEngineController):
+        def GetAPIProperties(self) -> SimpleNamespace:
+            return SimpleNamespace(pipelineType="Vulkan")
+
+    controller = _ControllerWithApi()
+    session_manager = _PatchEngineSessionManager(controller)
+    engine = patch_engine_mod.PatchEngine()
+
+    result = asyncio.run(
+        engine.apply_patch(
+            session_id="sess_demo",
+            event_id=314,
+            stage=ShaderStage.PS,
+            session_manager=session_manager,
+            patch_spec=PatchSpec(
+                patch_id="repl_demo",
+                target_event_id=314,
+                target_stage=ShaderStage.PS,
+                ops=[PatchOp(op="replace_expr", expr_from="main", expr_to="main_changed")],
+            ),
+        )
+    )
+
+    assert result.success is False
+    assert result.error_code == "shader_replace_invalid_source_resource"
+    assert result.error_details["replacement_from_id"] == "ResourceId::9001"
+    assert result.error_details["pipeline_id"] == "ResourceId::9001"
+    assert controller.replace_calls == []
+
+
 def test_patch_engine_supports_source_text_replacement(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_rd = SimpleNamespace(
         ResourceId=lambda: "ResourceId::0",
@@ -947,7 +1357,9 @@ def test_collect_spirv_precision_targets_matches_exact_tokens_only() -> None:
 
 
 def test_patch_engine_encoding_name_maps_numeric_spirv_encoding() -> None:
-    assert patch_engine_mod.PatchEngine._encoding_name(3) == "spirvasm"
+    assert patch_engine_mod.PatchEngine._encoding_name(3) == "spirv"
+    assert patch_engine_mod.PatchEngine._encoding_name(4) == "spirvasm"
+    assert patch_engine_mod.PatchEngine._encoding_name(8) == "openglspirvasm"
 
 
 def test_patch_engine_reports_structured_build_failures(monkeypatch: pytest.MonkeyPatch) -> None:

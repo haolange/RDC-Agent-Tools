@@ -202,6 +202,8 @@ rdx.bat --non-interactive cli --daemon-context smoke daemon status
 关键约束：
 
 - `rd.remote.connect` 会负责 Android `adb` bootstrap：选择设备、选择仓库内 APK、启动 `RenderDocCmd`、push `renderdoc.conf`、建立 `adb forward`。
+- Android `adb_android` 默认使用 RenderDoc remote server socket `renderdoc_39920`；`renderdoc_38920` 是 target control socket，不应作为默认 remote server 端口。
+- Android connect 阶段不会强制采集 `server_info.capabilities.supported_replays`；该字段是可选诊断信息，不是 endpoint 存活判据。
 - 如果 `rd.remote.connect` 失败，不应继续盲跑依赖 `remote_id` 的后续链路。
 - 如果 `rd.capture.open_replay(options.remote_id=...)` 成功，原 `remote_id` 默认仍保持 live；此时应通过 `rd.session.get_context` 检查 `remote.active_session_ids`，而不是假设它已经失效。
 - 当 live remote handle 仍被 replay lease 时，`rd.remote.disconnect` 预期返回 `remote_handle_in_use`；应先关闭相关 replay session。

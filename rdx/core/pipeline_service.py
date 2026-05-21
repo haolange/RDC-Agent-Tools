@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from rdx.models import (
@@ -22,6 +23,37 @@ from rdx.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ShaderBindingResolution:
+    """Resolved event-bound shader identity shared by pipeline/shader/patch tools."""
+
+    shader_id: Any = None
+    reflection: Any = None
+    entry_point: str = "main"
+    stage: Optional[ShaderStage] = None
+    pipeline_id: Any = None
+    resolution_source: str = "unresolved"
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+    stage_object: Any = None
+
+    @property
+    def found(self) -> bool:
+        return not _is_null_id(self.shader_id)
+
+    def to_diagnostics(self) -> Dict[str, Any]:
+        payload = dict(self.diagnostics)
+        payload.update(
+            {
+                "shader_id": "" if _is_null_id(self.shader_id) else str(self.shader_id),
+                "pipeline_id": "" if _is_null_id(self.pipeline_id) else str(self.pipeline_id),
+                "entry_point": str(self.entry_point or "main"),
+                "stage": str((self.stage.value if self.stage is not None else "")),
+                "resolution_source": self.resolution_source,
+            },
+        )
+        return payload
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -144,6 +176,32 @@ def _our_stage_to_rd(stage: ShaderStage) -> Any:
 def _map_graphics_api(rd_api: Any) -> GraphicsAPI:
     """Internal helper."""
     rd = _get_rd()
+    raw_text = str(rd_api or "").strip().lower()
+    numeric_map: Dict[int, GraphicsAPI] = {
+        0: GraphicsAPI.D3D11,
+        1: GraphicsAPI.D3D12,
+        2: GraphicsAPI.OPENGL,
+        3: GraphicsAPI.VULKAN,
+    }
+    if raw_text.isdigit():
+        mapped = numeric_map.get(int(raw_text))
+        if mapped is not None:
+            return mapped
+    try:
+        raw_int = int(rd_api)
+    except (TypeError, ValueError):
+        raw_int = None
+    if raw_int is not None:
+        if raw_int in numeric_map:
+            return numeric_map[raw_int]
+    for key, value in {
+        "d3d11": GraphicsAPI.D3D11,
+        "d3d12": GraphicsAPI.D3D12,
+        "opengl": GraphicsAPI.OPENGL,
+        "vulkan": GraphicsAPI.VULKAN,
+    }.items():
+        if key in raw_text:
+            return value
     mapping: Dict[Any, GraphicsAPI] = {
         rd.GraphicsAPI.D3D11: GraphicsAPI.D3D11,
         rd.GraphicsAPI.D3D12: GraphicsAPI.D3D12,
@@ -159,11 +217,16 @@ def _map_graphics_api(rd_api: Any) -> GraphicsAPI:
 
 def _is_null_id(resource_id: Any) -> bool:
     """Internal helper."""
+    if resource_id is None:
+        return True
+    text = str(resource_id).strip().lower()
+    if text in {"", "0", "none", "resourceid::0"}:
+        return True
     rd = _get_rd()
     try:
         return resource_id == rd.ResourceId()
     except Exception:
-        return resource_id is None
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +245,439 @@ def _get_api_specific_state(controller: Any, rd_api: Any) -> Any:
     if rd_api == rd.GraphicsAPI.OpenGL:
         return controller.GetOpenGLPipelineState()
     return None
+
+
+def _get_api_specific_state_by_api(controller: Any, api: GraphicsAPI) -> Any:
+    """Return API-specific state using RDX's normalized API value."""
+    if api == GraphicsAPI.D3D11:
+        return controller.GetD3D11PipelineState()
+    if api == GraphicsAPI.D3D12:
+        return controller.GetD3D12PipelineState()
+    if api == GraphicsAPI.VULKAN:
+        return controller.GetVulkanPipelineState()
+    if api == GraphicsAPI.OPENGL:
+        return controller.GetOpenGLPipelineState()
+    return None
+
+
+def _api_state_shader_score(api_state: Any, api: GraphicsAPI) -> int:
+    if api_state is None:
+        return 0
+    score = 0
+    for rd_stage in _rd_shader_stages():
+        stage_obj = _stage_object_from_api_state(api_state, api, rd_stage)
+        if not _is_null_id(_shader_id_from_stage_object(stage_obj)):
+            score += 100
+    for attr in (
+        "pipelineResourceId",
+        "pipelineComputeLayoutResourceId",
+        "pipelinePreRastLayoutResourceId",
+        "pipelineFragmentLayoutResourceId",
+    ):
+        if not _is_null_id(getattr(api_state, attr, None)):
+            score += 10
+    for attr in ("graphics", "compute"):
+        pipeline = getattr(api_state, attr, None)
+        if pipeline is not None and not _is_null_id(getattr(pipeline, "pipelineResourceId", None)):
+            score += 10
+    topology = _extract_topology(api_state, api)
+    if topology:
+        score += 1
+    if _extract_viewport(api_state, api):
+        score += 1
+    if _extract_scissor(api_state, api):
+        score += 1
+    return score
+
+
+def _select_api_specific_state(controller: Any, preferred_api: GraphicsAPI) -> Tuple[GraphicsAPI, Any]:
+    """Pick the API state that actually exposes the loaded capture pipeline."""
+    candidates: List[GraphicsAPI] = []
+    for api in (GraphicsAPI.VULKAN, GraphicsAPI.D3D12, GraphicsAPI.OPENGL, GraphicsAPI.D3D11):
+        if api not in candidates:
+            candidates.append(api)
+    if preferred_api != GraphicsAPI.UNKNOWN and preferred_api not in candidates:
+        candidates.append(preferred_api)
+
+    best_api = preferred_api
+    best_state = None
+    best_score = -1
+    for api in candidates:
+        try:
+            state = _get_api_specific_state_by_api(controller, api)
+        except Exception:
+            continue
+        score = _api_state_shader_score(state, api)
+        if score > best_score:
+            best_api = api
+            best_state = state
+            best_score = score
+        if score > 0:
+            break
+    return best_api, best_state
+
+
+def _stage_object_from_api_state(api_state: Any, api: GraphicsAPI, rd_stage: Any) -> Any:
+    """Find an API-specific stage object when generic PipelineState is empty."""
+    rd = _get_rd()
+    if api == GraphicsAPI.VULKAN:
+        stage_attrs = {
+            rd.ShaderStage.Vertex: "vertexShader",
+            rd.ShaderStage.Hull: "tessControlShader",
+            rd.ShaderStage.Domain: "tessEvalShader",
+            rd.ShaderStage.Geometry: "geometryShader",
+            rd.ShaderStage.Pixel: "fragmentShader",
+            rd.ShaderStage.Compute: "computeShader",
+        }
+    else:
+        stage_attrs = {
+            rd.ShaderStage.Vertex: "vertexShader",
+            rd.ShaderStage.Hull: "hullShader",
+            rd.ShaderStage.Domain: "domainShader",
+            rd.ShaderStage.Geometry: "geometryShader",
+            rd.ShaderStage.Pixel: "pixelShader",
+            rd.ShaderStage.Compute: "computeShader",
+        }
+    attr = stage_attrs.get(rd_stage)
+    if not attr or api_state is None:
+        return None
+    return getattr(api_state, attr, None)
+
+
+def _shader_id_from_stage_object(stage_obj: Any) -> Any:
+    if stage_obj is None:
+        return None
+    for attr in ("shaderResourceId", "resourceId", "shaderId"):
+        rid = getattr(stage_obj, attr, None)
+        if not _is_null_id(rid):
+            return rid
+    return _shader_id_from_reflection(getattr(stage_obj, "reflection", None))
+
+
+def _shader_id_from_reflection(refl: Any) -> Any:
+    if refl is None:
+        return None
+    for attr in ("resourceId", "shaderResourceId", "shaderId"):
+        rid = getattr(refl, attr, None)
+        if not _is_null_id(rid):
+            return rid
+    return None
+
+
+def _shader_reflection_from_stage_object(stage_obj: Any) -> Any:
+    if stage_obj is None:
+        return None
+    return getattr(stage_obj, "reflection", None)
+
+
+def _shader_entry_from_stage_object(stage_obj: Any) -> str:
+    if stage_obj is None:
+        return "main"
+    return str(getattr(stage_obj, "entryPoint", "") or "main")
+
+
+def _api_specific_pipeline_object(api_state: Any, api: GraphicsAPI, stage: ShaderStage) -> Any:
+    rd = _get_rd()
+    if api_state is None:
+        return rd.ResourceId()
+    if stage == ShaderStage.CS:
+        for attr in ("pipelineResourceId", "pipelineComputeLayoutResourceId"):
+            rid = getattr(api_state, attr, None)
+            if not _is_null_id(rid):
+                return rid
+        compute = getattr(api_state, "compute", None)
+        rid = getattr(compute, "pipelineResourceId", None) if compute is not None else None
+        if not _is_null_id(rid):
+            return rid
+    for attr in (
+        "pipelineResourceId",
+        "pipelineFragmentLayoutResourceId",
+        "pipelinePreRastLayoutResourceId",
+    ):
+        rid = getattr(api_state, attr, None)
+        if not _is_null_id(rid):
+            return rid
+    graphics = getattr(api_state, "graphics", None)
+    rid = getattr(graphics, "pipelineResourceId", None) if graphics is not None else None
+    if not _is_null_id(rid):
+        return rid
+    return rd.ResourceId()
+
+
+def _pipeline_object_from_pipe(pipe: Any, stage: ShaderStage) -> Any:
+    rd = _get_rd()
+    try:
+        if stage == ShaderStage.CS and hasattr(pipe, "GetComputePipelineObject"):
+            rid = pipe.GetComputePipelineObject()
+            if not _is_null_id(rid):
+                return rid
+        if hasattr(pipe, "GetGraphicsPipelineObject"):
+            rid = pipe.GetGraphicsPipelineObject()
+            if not _is_null_id(rid):
+                return rid
+    except Exception:
+        pass
+    return rd.ResourceId()
+
+
+def _resource_id_keys(resource_id: Any) -> set[str]:
+    if resource_id is None:
+        return set()
+    text = str(resource_id).strip()
+    keys = {text}
+    if "::" in text:
+        keys.add(text.split("::", 1)[1])
+    try:
+        keys.add(str(int(resource_id)))
+    except Exception:
+        pass
+    return {key for key in keys if key and key != "0"}
+
+
+def _resource_ids_equal(left: Any, right: Any) -> bool:
+    if _is_null_id(left) or _is_null_id(right):
+        return False
+    return bool(_resource_id_keys(left) & _resource_id_keys(right))
+
+
+def _entry_point_name(entry: Any) -> str:
+    for attr in ("name", "entryPoint"):
+        value = getattr(entry, attr, None)
+        if value:
+            return str(value)
+    if isinstance(entry, str):
+        return entry
+    return ""
+
+
+def _stage_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "0": "vertex",
+        "1": "hull",
+        "2": "domain",
+        "3": "geometry",
+        "4": "pixel",
+        "5": "compute",
+        "fragment": "pixel",
+        "frag": "pixel",
+        "ps": "pixel",
+        "pixel": "pixel",
+        "vs": "vertex",
+        "cs": "compute",
+    }
+    if text in aliases:
+        return aliases[text]
+    for key, alias in aliases.items():
+        if key and key in text:
+            return alias
+    return text
+
+
+def _entry_stage_matches(entry: Any, rd_stage: Any) -> bool:
+    stage_value = getattr(entry, "stage", None)
+    if stage_value is None:
+        return True
+    return _stage_key(stage_value) == _stage_key(rd_stage)
+
+
+def _make_entry_point(name: str, rd_stage: Any) -> Any:
+    rd = _get_rd()
+    entry_name = str(name or "main") or "main"
+    try:
+        entry = rd.ShaderEntryPoint()
+        entry.name = entry_name
+        entry.stage = rd_stage
+        return entry
+    except Exception:
+        return {"name": entry_name, "stage": rd_stage}
+
+
+def _resource_parent_ids(controller: Any, pipeline_id: Any) -> Tuple[List[Any], Dict[str, Any]]:
+    diag: Dict[str, Any] = {"pipeline_resource_found": False, "parent_shader_candidates": []}
+    if _is_null_id(pipeline_id) or not hasattr(controller, "GetResources"):
+        return [], diag
+    try:
+        resources = list(controller.GetResources() or [])
+    except Exception as exc:
+        diag["resource_query_error"] = f"{type(exc).__name__}: {exc}"
+        return [], diag
+    for resource in resources:
+        rid = getattr(resource, "resourceId", None)
+        if not _resource_ids_equal(rid, pipeline_id):
+            continue
+        diag["pipeline_resource_found"] = True
+        parents = list(getattr(resource, "parentResources", None) or [])
+        diag["parent_shader_candidates"] = [str(parent) for parent in parents if not _is_null_id(parent)]
+        return [parent for parent in parents if not _is_null_id(parent)], diag
+    return [], diag
+
+
+def resolve_shader_binding(
+    controller: Any,
+    pipe: Any,
+    api_state: Any,
+    api: GraphicsAPI,
+    rd_stage: Any,
+    our_stage: Optional[ShaderStage] = None,
+) -> ShaderBindingResolution:
+    """Resolve the shader bound at the current event using all RenderDoc state layers."""
+    rd = _get_rd()
+    stage = our_stage or _map_shader_stage(rd_stage)
+    diagnostics: Dict[str, Any] = {
+        "selected_api": str(getattr(api, "value", api)),
+        "api_state_type": type(api_state).__name__ if api_state is not None else "",
+        "shader_id_candidates": [],
+        "candidate_errors": [],
+    }
+
+    pipeline_id = _pipeline_object_from_pipe(pipe, stage)
+    if _is_null_id(pipeline_id):
+        pipeline_id = _api_specific_pipeline_object(api_state, api, stage)
+    diagnostics["pipeline_id"] = "" if _is_null_id(pipeline_id) else str(pipeline_id)
+
+    stage_obj = _stage_object_from_api_state(api_state, api, rd_stage)
+    diagnostics["stage_object_type"] = type(stage_obj).__name__ if stage_obj is not None else ""
+    diagnostics["stage_attrs"] = [
+        attr
+        for attr in ("resourceId", "shaderResourceId", "shaderId", "reflection", "entryPoint")
+        if stage_obj is not None and hasattr(stage_obj, attr)
+    ]
+
+    shader_id = None
+    reflection = None
+    try:
+        shader_id = pipe.GetShader(rd_stage)
+        diagnostics["shader_id_candidates"].append({"source": "pipeline_state", "shader_id": str(shader_id or "")})
+    except Exception as exc:
+        diagnostics["candidate_errors"].append(f"PipelineState.GetShader: {type(exc).__name__}: {exc}")
+    try:
+        reflection = pipe.GetShaderReflection(rd_stage)
+    except Exception as exc:
+        diagnostics["candidate_errors"].append(f"PipelineState.GetShaderReflection: {type(exc).__name__}: {exc}")
+    if _is_null_id(shader_id):
+        shader_id = _shader_id_from_reflection(reflection)
+        if not _is_null_id(shader_id):
+            diagnostics["shader_id_candidates"].append({"source": "pipeline_state_reflection", "shader_id": str(shader_id)})
+    if not _is_null_id(shader_id):
+        if reflection is None:
+            reflection = _shader_reflection_from_stage_object(stage_obj)
+        entry = str(getattr(reflection, "entryPoint", "") or _shader_entry_from_stage_object(stage_obj) or "main")
+        return ShaderBindingResolution(
+            shader_id=shader_id,
+            reflection=reflection,
+            entry_point=entry,
+            stage=stage,
+            pipeline_id=pipeline_id,
+            resolution_source="pipeline_state_shader",
+            diagnostics=diagnostics,
+            stage_object=stage_obj,
+        )
+
+    stage_reflection = _shader_reflection_from_stage_object(stage_obj)
+    stage_shader_id = _shader_id_from_stage_object(stage_obj)
+    if not _is_null_id(stage_shader_id):
+        diagnostics["shader_id_candidates"].append({"source": "api_stage_object", "shader_id": str(stage_shader_id)})
+        return ShaderBindingResolution(
+            shader_id=stage_shader_id,
+            reflection=stage_reflection,
+            entry_point=_shader_entry_from_stage_object(stage_obj),
+            stage=stage,
+            pipeline_id=pipeline_id,
+            resolution_source="api_specific_stage_object",
+            diagnostics=diagnostics,
+            stage_object=stage_obj,
+        )
+
+    stage_entry = str(
+        getattr(stage_reflection, "entryPoint", "")
+        or _shader_entry_from_stage_object(stage_obj)
+        or "main"
+    )
+    parent_ids, parent_diag = _resource_parent_ids(controller, pipeline_id)
+    diagnostics.update(parent_diag)
+    get_entry_points = getattr(controller, "GetShaderEntryPoints", None)
+    get_shader = getattr(controller, "GetShader", None)
+    if callable(get_shader):
+        for candidate_id in parent_ids:
+            entries: List[Any] = []
+            if callable(get_entry_points):
+                try:
+                    entries = [
+                        entry
+                        for entry in list(get_entry_points(candidate_id) or [])
+                        if _entry_stage_matches(entry, rd_stage)
+                    ]
+                except Exception as exc:
+                    diagnostics["candidate_errors"].append(
+                        f"GetShaderEntryPoints({candidate_id}): {type(exc).__name__}: {exc}",
+                    )
+            if not entries:
+                entries = [_make_entry_point(stage_entry or "main", rd_stage)]
+            preferred_entries = [
+                entry
+                for entry in entries
+                if _entry_point_name(entry) in {stage_entry, "main", ""}
+            ] or entries
+            for entry in preferred_entries:
+                entry_name = _entry_point_name(entry) or stage_entry or "main"
+                diagnostics["shader_id_candidates"].append(
+                    {
+                        "source": "pipeline_parent_shader_module",
+                        "shader_id": str(candidate_id),
+                        "entry_point": entry_name,
+                    },
+                )
+                try:
+                    refl = get_shader(pipeline_id, candidate_id, entry)
+                except TypeError:
+                    try:
+                        refl = get_shader(pipeline_id, candidate_id, entry_name)
+                    except Exception as exc:
+                        diagnostics["candidate_errors"].append(
+                            f"GetShader({candidate_id}, {entry_name}): {type(exc).__name__}: {exc}",
+                        )
+                        continue
+                except Exception as exc:
+                    diagnostics["candidate_errors"].append(
+                        f"GetShader({candidate_id}, {entry_name}): {type(exc).__name__}: {exc}",
+                    )
+                    continue
+                if refl is None:
+                    continue
+                refl_shader_id = _shader_id_from_reflection(refl)
+                return ShaderBindingResolution(
+                    shader_id=candidate_id if not _is_null_id(candidate_id) else refl_shader_id,
+                    reflection=refl,
+                    entry_point=str(getattr(refl, "entryPoint", "") or entry_name or "main"),
+                    stage=stage,
+                    pipeline_id=pipeline_id,
+                    resolution_source="pipeline_parent_shader_module",
+                    diagnostics=diagnostics,
+                    stage_object=stage_obj,
+                )
+
+    return ShaderBindingResolution(
+        shader_id=rd.ResourceId(),
+        reflection=stage_reflection,
+        entry_point=stage_entry or "main",
+        stage=stage,
+        pipeline_id=pipeline_id,
+        resolution_source="unresolved",
+        diagnostics=diagnostics,
+        stage_object=stage_obj,
+    )
+
+
+def _resolve_bound_stage(
+    pipe: Any,
+    api_state: Any,
+    api: GraphicsAPI,
+    rd_stage: Any,
+    controller: Any = None,
+) -> Tuple[Any, Any, Any]:
+    resolution = resolve_shader_binding(controller, pipe, api_state, api, rd_stage)
+    return resolution.shader_id, resolution.reflection, resolution.stage_object
 
 
 # ---------------------------------------------------------------------------
@@ -649,29 +1145,35 @@ class PipelineService:
         api_props = await asyncio.to_thread(controller.GetAPIProperties)
         api = _map_graphics_api(api_props.pipelineType)
 
-        # API-specific state for blend / depth / viewport / topology.
-        api_state = await asyncio.to_thread(
-            _get_api_specific_state, controller, api_props.pipelineType,
+        # APIProperties can describe the replay renderer on remote sessions.
+        # Probe API-specific states and use the one that exposes real stages.
+        api, api_state = await asyncio.to_thread(
+            _select_api_specific_state, controller, api,
         )
 
         shaders: List[ShaderInfo] = []
         for rd_stage in _rd_shader_stages():
             try:
-                shader_id = pipe.GetShader(rd_stage)
-                if _is_null_id(shader_id):
+                resolution = await asyncio.to_thread(
+                    resolve_shader_binding,
+                    controller,
+                    pipe,
+                    api_state,
+                    api,
+                    rd_stage,
+                    _map_shader_stage(rd_stage),
+                )
+                if not resolution.found:
                     continue
-
-                refl = pipe.GetShaderReflection(rd_stage)
-                entry_point = "main"
+                refl = resolution.reflection
+                entry_point = resolution.entry_point or "main"
                 encoding = ""
                 if refl is not None:
-                    if hasattr(refl, "entryPoint"):
-                        entry_point = str(refl.entryPoint)
                     if hasattr(refl, "encoding"):
                         encoding = str(refl.encoding)
 
                 shaders.append(ShaderInfo(
-                    resource_id=str(shader_id),
+                    resource_id=str(resolution.shader_id),
                     stage=_map_shader_stage(rd_stage),
                     entry_point=entry_point,
                     encoding=encoding,
@@ -701,8 +1203,16 @@ class PipelineService:
         bindings: List[ResourceBindingEntry] = []
         for rd_stage in _rd_shader_stages():
             try:
-                shader_id = pipe.GetShader(rd_stage)
-                if _is_null_id(shader_id):
+                resolution = await asyncio.to_thread(
+                    resolve_shader_binding,
+                    controller,
+                    pipe,
+                    api_state,
+                    api,
+                    rd_stage,
+                    _map_shader_stage(rd_stage),
+                )
+                if not resolution.found:
                     continue
                 stage_bindings = _collect_bindings_for_stage(
                     pipe, rd_stage, _map_shader_stage(rd_stage),
@@ -744,29 +1254,37 @@ class PipelineService:
         await asyncio.to_thread(controller.SetFrameEvent, event_id, True)
 
         pipe = await asyncio.to_thread(controller.GetPipelineState)
+        api_props = await asyncio.to_thread(controller.GetAPIProperties)
+        api = _map_graphics_api(api_props.pipelineType)
+        api, api_state = await asyncio.to_thread(
+            _select_api_specific_state, controller, api,
+        )
         rd_stage = _our_stage_to_rd(stage)
 
-        shader_id = pipe.GetShader(rd_stage)
+        resolution = await asyncio.to_thread(
+            resolve_shader_binding,
+            controller,
+            pipe,
+            api_state,
+            api,
+            rd_stage,
+            stage,
+        )
+        shader_id, refl = resolution.shader_id, resolution.reflection
         if _is_null_id(shader_id):
             raise ValueError(
                 f"No shader bound at stage {stage.value} for event {event_id}"
             )
 
-        refl = pipe.GetShaderReflection(rd_stage)
         if refl is None:
             raise RuntimeError(
                 f"Shader reflection unavailable for stage {stage.value} "
                 f"at event {event_id}"
             )
 
-        pipeline_rid = rd.ResourceId()
-        try:
-            if stage == ShaderStage.CS:
-                pipeline_rid = pipe.GetComputePipelineObject()
-            else:
-                pipeline_rid = pipe.GetGraphicsPipelineObject()
-        except (AttributeError, TypeError):
-            pass
+        pipeline_rid = resolution.pipeline_id
+        if _is_null_id(pipeline_rid):
+            pipeline_rid = rd.ResourceId()
 
         entry_point = "main"
         encoding = ""
@@ -782,6 +1300,8 @@ class PipelineService:
             "shader_id": str(shader_id),
             "entry_point": entry_point,
             "encoding": encoding,
+            "pipeline_id": str(pipeline_rid),
+            "resolution_source": resolution.resolution_source,
         }
         refl_bytes = json.dumps(refl_dict, indent=2, default=str).encode()
         refl_artifact = await artifact_store.store(
@@ -872,22 +1392,34 @@ class PipelineService:
         await asyncio.to_thread(controller.SetFrameEvent, event_id, True)
 
         pipe = await asyncio.to_thread(controller.GetPipelineState)
+        api_props = await asyncio.to_thread(controller.GetAPIProperties)
+        api = _map_graphics_api(api_props.pipelineType)
+        api, api_state = await asyncio.to_thread(
+            _select_api_specific_state, controller, api,
+        )
 
         entries: List[ResourceBindingEntry] = []
         for rd_stage in _rd_shader_stages():
             try:
-                shader_id = pipe.GetShader(rd_stage)
-                if _is_null_id(shader_id):
+                our_stage = _map_shader_stage(rd_stage)
+                resolution = await asyncio.to_thread(
+                    resolve_shader_binding,
+                    controller,
+                    pipe,
+                    api_state,
+                    api,
+                    rd_stage,
+                    our_stage,
+                )
+                if not resolution.found:
                     continue
 
-                our_stage = _map_shader_stage(rd_stage)
                 stage_entries = _collect_bindings_for_stage(
                     pipe, rd_stage, our_stage,
                 )
 
-                refl = pipe.GetShaderReflection(rd_stage)
-                if refl is not None:
-                    _enrich_binding_names(stage_entries, refl)
+                if resolution.reflection is not None:
+                    _enrich_binding_names(stage_entries, resolution.reflection)
 
                 entries.extend(stage_entries)
             except Exception as exc:

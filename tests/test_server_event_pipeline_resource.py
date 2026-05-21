@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -183,6 +184,7 @@ def _install_common_env(monkeypatch: pytest.MonkeyPatch, controller: _FakeContro
     fake_rd = SimpleNamespace(
         ActionFlags=_FakeActionFlags,
         ShaderStage=_FakeShaderStage,
+        ResourceId=lambda: "ResourceId::0",
     )
     monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
     monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
@@ -497,6 +499,49 @@ def test_pipeline_get_shader_returns_runtime_error_when_stage_is_unbound(monkeyp
     assert payload["code"] == "shader_not_bound"
     assert payload["details"]["resolved_event_id"] == 101
     assert payload["details"]["stage"] == "PS"
+
+
+def test_texture_inference_does_not_fallback_to_first_capture_texture(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _OutputlessPipe(_FakePipe):
+        def GetOutputTargets(self) -> list[object]:
+            return []
+
+    class _OutputlessController(_FakeController):
+        def GetPipelineState(self) -> _OutputlessPipe:
+            return _OutputlessPipe(self.current_event)
+
+    controller = _OutputlessController(
+        roots=[
+            _FakeAction(101, flags=_FakeActionFlags.Drawcall, outputs=[]),
+        ],
+        resources=[
+            SimpleNamespace(resourceId="ResourceId::first", name="first_texture"),
+        ],
+    )
+    _install_common_env(monkeypatch, controller)
+    _seed_capture()
+    _seed_session(101)
+
+    with pytest.raises(ValueError, match="No event-bound output render target"):
+        asyncio.run(
+            server.server_runtime._resolve_texture_id(
+                "sess_demo",
+                None,
+                event_id=101,
+            )
+        )
+
+
+def test_exported_image_truth_stats_detects_all_zero_png(tmp_path: Path) -> None:
+    Image = pytest.importorskip("PIL.Image")
+    image_path = tmp_path / "black.png"
+    Image.new("RGBA", (4, 3), (0, 0, 0, 0)).save(image_path)
+
+    stats = server.server_runtime._exported_image_truth_stats(image_path)
+
+    assert stats["inspectable"] is True
+    assert stats["all_zero"] is True
+    assert stats["size"] == [4, 3]
 
 
 def test_resource_usage_and_history_expose_canonical_and_raw_event_ids(monkeypatch: pytest.MonkeyPatch) -> None:

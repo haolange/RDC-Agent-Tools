@@ -147,6 +147,8 @@
 
 - `rd.remote.connect` 返回的 `remote_id` 代表 live remote connection；若连接失败，不会返回占位 handle。
 - `rd.remote.connect` 在 `adb_android` transport 下允许省略 `host`；运行时会按 `127.0.0.1` 处理，并以 bootstrap 后的实际 endpoint 为准。
+- `adb_android` 未显式指定 remote port 时默认连接 RenderDoc remote server socket `renderdoc_39920`；`renderdoc_38920` 是 target control socket。
+- Android connect 阶段的 `server_info.capabilities.supported_replays` 可缺省；需要 replay backend 信息时，应在 remote replay 建成后再读取。
 - `rd.capture.open_replay` 的 remote 入口是 `options.remote_id`，而不是隐式回退到 `localhost`。
 - 一旦传入 `options.remote_id`，运行时就只能走该 remote backend；`remote_id` 缺失、失效、跨 context 复用或会导致 local fallback 时，必须直接失败。
 - remote replay 成功后，原 `remote_id` 默认仍保持 live；其 replay-owned lease 会反映在 `rd.session.get_context -> remote.active_session_ids`。

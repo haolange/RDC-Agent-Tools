@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from rdx import server
+from rdx.core import render_service
+from rdx.core.render_service import RenderService
 
 
 class _FakeShaderPipe:
@@ -192,6 +194,78 @@ def test_shader_reflection_and_disassembly_support_stage_only_queries(monkeypatc
     assert disassembly_payload["disassembly"] == "disassembly:mock-target"
 
 
+def test_texture_readback_empty_raw_uses_visual_container_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Slice:
+        sliceIndex = 0
+
+    class _Sample:
+        sampleIndex = 0
+
+    class _Subresource:
+        mip = 0
+        slice = 0
+        sample = 0
+
+    class _TextureSave:
+        def __init__(self) -> None:
+            self.resourceId = ""
+            self.destType = ""
+            self.mip = 0
+            self.slice = _Slice()
+            self.sample = _Sample()
+
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        Subresource=_Subresource,
+        TextureSave=_TextureSave,
+        FileType=SimpleNamespace(PNG="png", EXR="exr", HDR="hdr"),
+    )
+    monkeypatch.setattr(render_service, "_get_rd", lambda: fake_rd)
+
+    class _Controller:
+        def SetFrameEvent(self, event_id: int, apply: bool) -> None:
+            return None
+
+        def GetTextures(self) -> list[SimpleNamespace]:
+            return [SimpleNamespace(resourceId="ResourceId::208592", width=2, height=1)]
+
+        def GetTextureData(self, resource_id: object, subresource: object) -> bytes:
+            return b""
+
+        def SaveTexture(self, save_data: object, output_path: str) -> bool:
+            if str(getattr(save_data, "destType", "")) != "png":
+                return False
+            from PIL import Image
+
+            Image.new("RGBA", (2, 1), (8, 16, 24, 255)).save(output_path)
+            return True
+
+    class _SessionManager:
+        def get_controller(self, session_id: str) -> _Controller:
+            return _Controller()
+
+    class _ArtifactStore:
+        async def store(self, data: bytes, *, mime: str, suffix: str, meta: dict[str, object]) -> SimpleNamespace:
+            return SimpleNamespace(uri="artifact://pixels.npz", bytes=len(data), meta=meta)
+
+    artifact, stats = asyncio.run(
+        RenderService().readback_texture(
+            session_id="sess_demo",
+            event_id=1248,
+            texture_id="ResourceId::208592",
+            session_manager=_SessionManager(),
+            artifact_store=_ArtifactStore(),
+        )
+    )
+
+    assert artifact.bytes > 0
+    assert stats["content_kind"] == "texture_visual_readback_container"
+    assert stats["readback_source"] == "visual_export_fallback"
+    assert stats["shape"] == [1, 2, 4]
+    assert stats["min"] == 8
+    assert stats["max"] == 255
+
+
 def test_shader_get_constant_buffer_contents_returns_decoded_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
         return fn(*args, **kwargs)
@@ -202,7 +276,10 @@ def test_shader_get_constant_buffer_contents_returns_decoded_payload(monkeypatch
     async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
         return int(event_id or 314)
 
-    async def _fake_resolve_shader_binding(*, shader_id: str = "", stage_name=None, require_reflection=False):  # type: ignore[no-untyped-def]
+    async def _fake_resolve_shader_binding(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["session_id"] == "sess_demo"
+        assert int(kwargs["event_id"]) == 314
+        assert kwargs["require_reflection"] is True
         return "ps", "ResourceId::77", SimpleNamespace(entryPoint="main", constantBlocks=[SimpleNamespace(name="Globals", bindPoint=2, byteSize=64, variables=[])])
 
     async def _fake_collect_constant_buffers(*args, **kwargs):  # type: ignore[no-untyped-def]

@@ -29,6 +29,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 from rdx.models import (
@@ -36,6 +37,12 @@ from rdx.models import (
     PatchResult,
     PatchSpec,
     ShaderStage,
+)
+from rdx.core.pipeline_service import (
+    _api_specific_pipeline_object as _pipeline_api_specific_pipeline_object,
+    resolve_shader_binding as _pipeline_resolve_shader_binding,
+    _map_graphics_api as _pipeline_graphics_api,
+    _select_api_specific_state as _pipeline_select_api_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,12 +101,45 @@ def _to_rd_stage(stage: ShaderStage) -> Any:
             f"Shader stage '{stage.value}' is not supported for patching. "
             f"Supported stages: {sorted(s.value for s in _STAGE_TO_RD_INDEX)}"
         )
-    return rd.ShaderStage(idx)
+    try:
+        return rd.ShaderStage(idx)
+    except TypeError:
+        attr_map = {
+            ShaderStage.VS: "Vertex",
+            ShaderStage.HS: "Hull",
+            ShaderStage.DS: "Domain",
+            ShaderStage.GS: "Geometry",
+            ShaderStage.PS: "Pixel",
+            ShaderStage.CS: "Compute",
+        }
+        return getattr(rd.ShaderStage, attr_map[stage])
 
 
 def _shader_id_str(shader_id: Any) -> str:
     """将 ``renderdoc.ResourceId`` 或兼容对象稳定转换为字符串。"""
     return str(shader_id or "")
+
+
+def _bytes_sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest() if payload else ""
+
+
+def _binary_magic_hex(payload: bytes) -> str:
+    if len(payload) < 4:
+        return ""
+    return f"0x{int.from_bytes(payload[:4], 'little'):08x}"
+
+
+def _api_specific_shader_binding(controller: Any, rd_stage: Any) -> Tuple[Any, Any]:
+    try:
+        api_props = controller.GetAPIProperties()
+        api = _pipeline_graphics_api(getattr(api_props, "pipelineType", None))
+        api, api_state = _pipeline_select_api_state(controller, api)
+        pipe = controller.GetPipelineState()
+        resolution = _pipeline_resolve_shader_binding(controller, pipe, api_state, api, rd_stage)
+        return resolution.shader_id, resolution.reflection
+    except Exception:
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +218,46 @@ class PatchEngine:
             # 2 -- pipeline state 与 shader 标识
             pipe = controller.GetPipelineState()
             rd_stage = _to_rd_stage(stage)
-            shader_id = pipe.GetShader(rd_stage)
-            refl = pipe.GetShaderReflection(rd_stage)
+            try:
+                api_props = controller.GetAPIProperties()
+                api = _pipeline_graphics_api(getattr(api_props, "pipelineType", None))
+                api, api_state = _pipeline_select_api_state(controller, api)
+                binding = _pipeline_resolve_shader_binding(controller, pipe, api_state, api, rd_stage, stage)
+                shader_id = binding.shader_id
+                refl = binding.reflection
+            except Exception as exc:
+                shader_id = pipe.GetShader(rd_stage)
+                refl = pipe.GetShaderReflection(rd_stage)
+                if shader_id is None or _shader_id_str(shader_id) in {"", "0", "ResourceId::0"}:
+                    shader_id, refl = _api_specific_shader_binding(controller, rd_stage)
+                binding = SimpleNamespace(
+                    shader_id=shader_id,
+                    reflection=refl,
+                    pipeline_id="",
+                    resolution_source="pipeline_state_shader",
+                    diagnostics={
+                        "resolver_error": f"{type(exc).__name__}: {exc}",
+                        "shader_id_candidates": [
+                            {"source": "pipeline_state_legacy", "shader_id": _shader_id_str(shader_id)}
+                        ],
+                    },
+                )
+                api = ""
+
+            binding_diagnostics = dict(getattr(binding, "diagnostics", {}) or {})
+            patch_diagnostics: Dict[str, Any] = {
+                "event_id": int(event_id),
+                "stage": stage.value.upper(),
+                "session_id": str(session_id),
+                "shader_id": _shader_id_str(shader_id),
+                "pipeline_id": _shader_id_str(getattr(binding, "pipeline_id", "")),
+                "entry_point": str(getattr(refl, "entryPoint", "") or "main") if refl is not None else "",
+                "rd_stage": str(rd_stage),
+                "resolution_source": str(getattr(binding, "resolution_source", "")),
+                "selected_api": str(getattr(api, "value", api)),
+                "shader_id_candidates": list(binding_diagnostics.get("shader_id_candidates") or []),
+                "force_replacement": bool(getattr(patch_spec, "force_replacement", False)),
+            }
 
             if shader_id is None or _shader_id_str(shader_id) in {"", "0", "ResourceId::0"}:
                 return PatchResult(
@@ -199,6 +277,10 @@ class PatchEngine:
                         "failure_reason": "stage_unbound",
                         "expected_shader_id": str(patch_spec.target_shader_id or ""),
                         "bound_shader_id": _shader_id_str(shader_id),
+                        "pipeline_id": _shader_id_str(binding.pipeline_id),
+                        "resolution_source": binding.resolution_source,
+                        "selected_api": str(getattr(api, "value", api)),
+                        "shader_id_candidates": list(binding.diagnostics.get("shader_id_candidates") or []),
                     },
                 )
 
@@ -220,6 +302,8 @@ class PatchEngine:
                         "failure_reason": "shader_id_mismatch",
                         "expected_shader_id": str(patch_spec.target_shader_id or ""),
                         "bound_shader_id": _shader_id_str(shader_id),
+                        "pipeline_id": _shader_id_str(binding.pipeline_id),
+                        "resolution_source": binding.resolution_source,
                     },
                 )
 
@@ -241,6 +325,10 @@ class PatchEngine:
                         "failure_reason": "reflection_unavailable",
                         "expected_shader_id": str(patch_spec.target_shader_id or ""),
                         "bound_shader_id": _shader_id_str(shader_id),
+                        "pipeline_id": _shader_id_str(binding.pipeline_id),
+                        "resolution_source": binding.resolution_source,
+                        "selected_api": str(getattr(api, "value", api)),
+                        "shader_id_candidates": list(binding.diagnostics.get("shader_id_candidates") or []),
                     },
                 )
 
@@ -254,6 +342,7 @@ class PatchEngine:
                     session_id,
                     requested_target=str(patch_spec.source_target or ""),
                     requested_encoding=str(patch_spec.source_encoding or ""),
+                    pipeline_object=binding.pipeline_id,
                 )
             except RuntimeError as exc:
                 return PatchResult(
@@ -302,6 +391,23 @@ class PatchEngine:
                 source.encode("utf-8"),
             ).hexdigest()
             encoding_name = self._encoding_name(encoding)
+            original_spirv_bytes = self._shader_raw_bytes(refl)
+            patch_diagnostics.update(
+                {
+                    "source_encoding": encoding_name,
+                    "source_target": str(disasm_target),
+                    "disassembly_target": str(disasm_target),
+                    "source_before_hash": original_hash,
+                    "source_before_asm_hash": original_hash,
+                    "source_before_spirv_binary_hash": _bytes_sha256(original_spirv_bytes),
+                    "source_before_spirv_binary_size": len(original_spirv_bytes),
+                    "source_before_spirv_magic": _binary_magic_hex(original_spirv_bytes),
+                    "is_raw_spirv_asm": (
+                        ("spirv" in encoding_name.lower() or "spv" in encoding_name.lower())
+                        and "OpCapability" in source
+                    ),
+                }
+            )
             messages: List[str] = []
             if patch_spec.expected_source_hash and patch_spec.expected_source_hash != original_hash:
                 return PatchResult(
@@ -385,7 +491,12 @@ class PatchEngine:
                             )
                     modified = self._apply_op(modified, encoding_name, op)
 
-            if modified == source:
+            applied_hash = hashlib.sha256(
+                modified.encode("utf-8"),
+            ).hexdigest()
+            patch_diagnostics["source_after_hash"] = applied_hash
+
+            if modified == source and not getattr(patch_spec, "force_replacement", False):
                 logger.warning(
                     "Patch %s: operations produced no changes to the shader "
                     "source (stage=%s, event=%d)",
@@ -405,13 +516,57 @@ class PatchEngine:
                     disassembly_target=str(disasm_target),
                     encoding=encoding_name,
                     entry_point=str(getattr(refl, "entryPoint", "") or "main"),
+                    diagnostics=patch_diagnostics,
                 )
+            if modified == source:
+                messages.append(
+                    "Patch operations produced no source changes; force_replacement requested a raw build/replace trial.",
+                )
+                patch_diagnostics["forced_noop_replacement"] = True
 
             # 5 -- 编译修改后的源码
             entry_point = refl.entryPoint if refl.entryPoint else "main"
-            source_bytes = modified.encode("utf-8")
             compile_flags = self._build_compile_flags(refl)
             compile_flag_payload = self._compile_flag_payload(compile_flags)
+            patch_diagnostics.update(
+                {
+                    "entry_point": str(entry_point),
+                    "compile_flags": compile_flag_payload,
+                }
+            )
+            try:
+                source_bytes, build_input_meta = self._source_bytes_for_build(
+                    modified,
+                    encoding_name,
+                    compile_flag_payload,
+                )
+            except RuntimeError as exc:
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    original_shader_hash=original_hash,
+                    success=False,
+                    error_message=str(exc),
+                    error_code="shader_spirv_asm_assembly_failed",
+                    error_category="runtime",
+                    error_details={
+                        **patch_diagnostics,
+                        "failure_stage": "assemble",
+                        "failure_reason": "spirv_as_failed",
+                    },
+                    messages=messages,
+                    source_before_text=source,
+                    source_after_text=modified,
+                    disassembly_target=str(disasm_target),
+                    encoding=encoding_name,
+                    entry_point=str(entry_point),
+                    compile_flags=compile_flag_payload,
+                    diagnostics=patch_diagnostics,
+                )
+            patch_diagnostics.update(build_input_meta)
+            if build_input_meta.get("source_assembled_to_binary"):
+                patch_diagnostics["source_after_spirv_binary_hash"] = str(build_input_meta.get("build_input_sha256") or "")
+                patch_diagnostics["source_after_spirv_binary_size"] = int(build_input_meta.get("build_input_size") or 0)
+                patch_diagnostics["source_after_spirv_magic"] = str(build_input_meta.get("build_input_magic") or "")
             try:
                 new_id, errors = controller.BuildTargetShader(
                     entry_point,
@@ -442,7 +597,11 @@ class PatchEngine:
                         "failure_reason": "build_runtime_error",
                     },
                     messages=messages,
+                    diagnostics=patch_diagnostics,
                 )
+
+            patch_diagnostics["build_resource_id"] = _shader_id_str(new_id)
+            patch_diagnostics["replacement_to_id"] = _shader_id_str(new_id)
 
             if errors:
                 # 区分硬失败（null resource）与仅有警告
@@ -476,6 +635,7 @@ class PatchEngine:
                         encoding=encoding_name,
                         entry_point=str(entry_point),
                         compile_flags=compile_flag_payload,
+                        diagnostics=patch_diagnostics,
                     )
                 # 非致命警告 —— 记录日志并继续。
                 logger.warning(
@@ -485,6 +645,50 @@ class PatchEngine:
                 messages.append(str(errors))
 
             # 6 -- 热替换资源
+            replacement_from_id = _shader_id_str(shader_id)
+            pipeline_id_str = _shader_id_str(getattr(binding, "pipeline_id", ""))
+            replacement_to_id = _shader_id_str(new_id)
+            patch_diagnostics.update(
+                {
+                    "replacement_from_id": replacement_from_id,
+                    "replacement_to_id": replacement_to_id,
+                    "build_resource_id": replacement_to_id,
+                }
+            )
+            if replacement_from_id in {"", "0", "ResourceId::0"} or (
+                pipeline_id_str and replacement_from_id == pipeline_id_str
+            ):
+                try:
+                    controller.FreeTargetResource(new_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to free replacement resource after invalid replacement source",
+                        exc_info=True,
+                    )
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    original_shader_hash=original_hash,
+                    success=False,
+                    error_message=(
+                        "Invalid ReplaceResource source: expected the resolved shader module id, "
+                        "not null or the graphics pipeline id"
+                    ),
+                    error_code="shader_replace_invalid_source_resource",
+                    error_category="validation",
+                    error_details={
+                        **patch_diagnostics,
+                        "failure_stage": "apply_replacement",
+                        "failure_reason": "invalid_replacement_from_id",
+                    },
+                    messages=messages,
+                    source_before_text=source,
+                    source_after_text=modified,
+                    disassembly_target=str(disasm_target),
+                    encoding=encoding_name,
+                    entry_point=str(entry_point),
+                    compile_flags=compile_flag_payload,
+                    diagnostics=patch_diagnostics,
+                )
             try:
                 controller.ReplaceResource(shader_id, new_id)
             except Exception as exc:
@@ -503,9 +707,7 @@ class PatchEngine:
                     error_code="shader_replace_apply_failed",
                     error_category="runtime",
                     error_details={
-                        "event_id": int(event_id),
-                        "stage": stage.value.upper(),
-                        "session_id": str(session_id),
+                        **patch_diagnostics,
                         "shader_id": _shader_id_str(shader_id),
                         "replacement_shader_id": _shader_id_str(new_id),
                         "entry_point": str(entry_point),
@@ -522,6 +724,7 @@ class PatchEngine:
                     encoding=encoding_name,
                     entry_point=str(entry_point),
                     compile_flags=compile_flag_payload,
+                    diagnostics=patch_diagnostics,
                 )
 
             try:
@@ -549,9 +752,7 @@ class PatchEngine:
                     error_code="shader_replace_rebind_failed",
                     error_category="runtime",
                     error_details={
-                        "event_id": int(event_id),
-                        "stage": stage.value.upper(),
-                        "session_id": str(session_id),
+                        **patch_diagnostics,
                         "shader_id": _shader_id_str(shader_id),
                         "replacement_shader_id": _shader_id_str(new_id),
                         "entry_point": str(entry_point),
@@ -568,6 +769,7 @@ class PatchEngine:
                     encoding=encoding_name,
                     entry_point=str(entry_point),
                     compile_flags=compile_flag_payload,
+                    diagnostics=patch_diagnostics,
                 )
 
             applied_hash = hashlib.sha256(
@@ -604,6 +806,7 @@ class PatchEngine:
                 encoding=encoding_name,
                 entry_point=str(entry_point),
                 compile_flags=compile_flag_payload,
+                diagnostics=patch_diagnostics,
             )
 
         except Exception as exc:
@@ -630,6 +833,7 @@ class PatchEngine:
                 encoding=encoding_name if 'encoding_name' in locals() else "",
                 entry_point=str(entry_point) if 'entry_point' in locals() else "",
                 compile_flags=compile_flag_payload if 'compile_flag_payload' in locals() else [],
+                diagnostics=patch_diagnostics if 'patch_diagnostics' in locals() else {},
             )
 
     async def revert_patch(
@@ -958,6 +1162,7 @@ class PatchEngine:
         *,
         requested_target: str = "",
         requested_encoding: str = "",
+        pipeline_object: Any = None,
     ) -> Tuple[str, Any, str, bool]:
         target_name = str(requested_target or "").strip()
         encoding_name = str(requested_encoding or "").strip().lower()
@@ -965,13 +1170,24 @@ class PatchEngine:
 
         rd = _get_rd()
         pipeline_obj = rd.ResourceId()
-        try:
-            if stage == ShaderStage.CS:
-                pipeline_obj = pipe.GetComputePipelineObject()
-            else:
-                pipeline_obj = pipe.GetGraphicsPipelineObject()
-        except Exception:
-            pipeline_obj = rd.ResourceId()
+        if pipeline_object is not None and _shader_id_str(pipeline_object) not in {"", "0", "ResourceId::0"}:
+            pipeline_obj = pipeline_object
+        else:
+            try:
+                if stage == ShaderStage.CS:
+                    pipeline_obj = pipe.GetComputePipelineObject()
+                else:
+                    pipeline_obj = pipe.GetGraphicsPipelineObject()
+            except Exception:
+                pipeline_obj = rd.ResourceId()
+        if _shader_id_str(pipeline_obj) in {"", "0", "ResourceId::0"}:
+            try:
+                api_props = controller.GetAPIProperties()
+                api = _pipeline_graphics_api(getattr(api_props, "pipelineType", None))
+                api, api_state = _pipeline_select_api_state(controller, api)
+                pipeline_obj = _pipeline_api_specific_pipeline_object(api_state, api, stage)
+            except Exception:
+                pipeline_obj = rd.ResourceId()
 
         if not target_name and not encoding_name:
             encoding, disasm_target = cls._get_best_encoding(controller, session_id)
@@ -984,8 +1200,10 @@ class PatchEngine:
         if raw_requested:
             encoding = cls._find_requested_encoding(supported_encodings, encoding_name or "spirvasm")
             if encoding is None:
+                encoding = cls._find_requested_encoding(supported_encodings, "spirv")
+            if encoding is None:
                 raise RuntimeError(
-                    "Raw SPIR-V ASM editing requires a replay backend that supports SPIRVAsm source encoding"
+                    "Raw SPIR-V ASM editing requires a replay backend that supports SPIRVAsm or SPIR-V binary source encoding"
                 )
             raw_target = cls._find_raw_spirv_asm_target(targets)
             if raw_target:
@@ -1056,7 +1274,8 @@ class PatchEngine:
         if not normalized:
             return None
         aliases = {
-            "spirvasm": {"spirvasm", "spirvdis"},
+            "spirvasm": {"spirvasm", "openglspirvasm", "spirvdis"},
+            "spirv": {"spirv", "openglspirv"},
             "hlsl": {"hlsl"},
             "glsl": {"glsl"},
             "dxbc": {"dxbc"},
@@ -1079,16 +1298,9 @@ class PatchEngine:
 
     @staticmethod
     def _disassemble_raw_spirv_bytes(refl: Any) -> str:
-        raw_bytes = getattr(refl, "rawBytes", None)
-        if raw_bytes is None:
+        payload = PatchEngine._shader_raw_bytes(refl)
+        if not payload:
             return ""
-        try:
-            payload = bytes(raw_bytes)
-        except Exception:
-            try:
-                payload = raw_bytes.tobytes()
-            except Exception:
-                return ""
         tool = shutil.which("spirv-dis") or shutil.which("spirv-dis.exe")
         if not tool:
             return ""
@@ -1114,6 +1326,83 @@ class PatchEngine:
                 )
                 return ""
             return output_path.read_text(encoding="utf-8")
+        finally:
+            for path in (source_path, output_path):
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+
+    @classmethod
+    def _source_bytes_for_build(
+        cls,
+        source: str,
+        encoding_name: str,
+        compile_flags: List[Dict[str, str]],
+    ) -> Tuple[bytes, Dict[str, Any]]:
+        if encoding_name not in {"spirv", "openglspirv"} or not cls._looks_like_raw_spirv_asm(source):
+            payload = source.encode("utf-8")
+            return payload, {
+                "build_input_kind": "text",
+                "build_input_size": len(payload),
+                "build_input_sha256": _bytes_sha256(payload),
+                "build_input_magic": _binary_magic_hex(payload),
+                "source_assembled_to_binary": False,
+            }
+        payload = cls._assemble_spirv_asm(source, compile_flags)
+        return payload, {
+            "build_input_kind": "spirv_binary",
+            "build_input_size": len(payload),
+            "build_input_sha256": _bytes_sha256(payload),
+            "build_input_magic": _binary_magic_hex(payload),
+            "source_assembled_to_binary": True,
+        }
+
+    @staticmethod
+    def _shader_raw_bytes(refl: Any) -> bytes:
+        raw_bytes = getattr(refl, "rawBytes", None)
+        if raw_bytes is None:
+            return b""
+        try:
+            return bytes(raw_bytes)
+        except Exception:
+            pass
+        try:
+            return raw_bytes.tobytes()
+        except Exception:
+            return b""
+
+    @staticmethod
+    def _assemble_spirv_asm(source: str, compile_flags: List[Dict[str, str]]) -> bytes:
+        tool = shutil.which("spirv-as") or shutil.which("spirv-as.exe")
+        if not tool:
+            raise RuntimeError(
+                "Raw SPIR-V ASM editing requires spirv-as when the replay backend only accepts SPIR-V binary"
+            )
+        runtime_dir = Path(__file__).resolve().parents[2] / "intermediate" / "runtime" / "rdx_cli" / "patch_engine"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"spirv_as_{uuid.uuid4().hex[:10]}"
+        source_path = runtime_dir / f"{stem}.spvasm"
+        output_path = runtime_dir / f"{stem}.spv"
+        source_path.write_text(source, encoding="utf-8")
+        commands = [
+            [tool, "--preserve-numeric-ids", str(source_path), "-o", str(output_path)],
+            [tool, str(source_path), "-o", str(output_path)],
+        ]
+        try:
+            last_output = ""
+            for command in commands:
+                proc = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=False,
+                )
+                if proc.returncode == 0 and output_path.exists():
+                    return output_path.read_bytes()
+                last_output = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(f"spirv-as failed: {last_output}")
         finally:
             for path in (source_path, output_path):
                 try:
@@ -1306,11 +1595,15 @@ class PatchEngine:
         if numeric is not None:
             numeric_map = {
                 0: "unknown",
-                1: "hlsl",
+                1: "dxbc",
                 2: "glsl",
-                3: "spirvasm",
-                4: "dxil",
-                5: "slang",
+                3: "spirv",
+                4: "spirvasm",
+                5: "hlsl",
+                6: "dxil",
+                7: "openglspirv",
+                8: "openglspirvasm",
+                9: "slang",
             }
             if numeric in numeric_map:
                 return numeric_map[numeric]

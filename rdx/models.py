@@ -338,6 +338,7 @@ class PatchSpec(BaseModel):
     expected_source_hash: str = ""
     max_diff_ops: int = 20
     preserve_outputs: bool = True
+    force_replacement: bool = False
 
 
 class PatchResult(BaseModel):
@@ -356,6 +357,7 @@ class PatchResult(BaseModel):
     encoding: str = ""
     entry_point: str = ""
     compile_flags: List[Dict[str, str]] = Field(default_factory=list)
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

@@ -196,13 +196,25 @@ function Invoke-Subprocess {
         [int]$TimeoutMs = 30000
     )
 
-    $stdoutFile = New-TemporaryFile
-    $stderrFile = New-TemporaryFile
     $argumentLine = ([string[]]$ArgumentList | ForEach-Object { Quote-CommandArg $_ }) -join ' '
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($FilePath, $argumentLine)
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
     try {
-        $proc = Start-Process -FilePath $FilePath -ArgumentList $argumentLine -WorkingDirectory $WorkingDirectory -NoNewWindow -PassThru -RedirectStandardOutput $stdoutFile.FullName -RedirectStandardError $stderrFile.FullName
+        [void]$proc.Start()
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
         if (-not $proc.WaitForExit($TimeoutMs)) {
-            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+            try { $proc.Kill() } catch {}
+            try { [void]$proc.WaitForExit(5000) } catch {}
             return [pscustomobject]@{
                 ExitCode = $script:RETURN_TIMEOUT
                 TimedOut = $true
@@ -210,9 +222,10 @@ function Invoke-Subprocess {
                 StdErr = 'timeout'
             }
         }
+        try { $proc.WaitForExit() } catch {}
 
-        $outText = if (Test-Path -LiteralPath $stdoutFile.FullName) { Get-Content -Raw -Encoding UTF8 -Path $stdoutFile.FullName } else { '' }
-        $errText = if (Test-Path -LiteralPath $stderrFile.FullName) { Get-Content -Raw -Encoding UTF8 -Path $stderrFile.FullName } else { '' }
+        $outText = $stdoutTask.GetAwaiter().GetResult()
+        $errText = $stderrTask.GetAwaiter().GetResult()
         return [pscustomobject]@{
             ExitCode = [int]$proc.ExitCode
             TimedOut = $false
@@ -221,7 +234,7 @@ function Invoke-Subprocess {
         }
     }
     finally {
-        Remove-Item -Force $stdoutFile.FullName, $stderrFile.FullName -ErrorAction SilentlyContinue
+        if ($null -ne $proc) { $proc.Dispose() }
     }
 }
 

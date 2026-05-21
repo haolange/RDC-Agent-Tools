@@ -262,11 +262,16 @@ def _resolve_overlay(name: str) -> Any:
 
 def _is_null_resource_id(resource_id: Any) -> bool:
     """当 *resource_id* 为空/null ID 时返回 ``True``。"""
+    if resource_id is None:
+        return True
+    text = str(resource_id).strip().lower()
+    if text in {"", "0", "none", "resourceid::0"}:
+        return True
     rd = _get_rd()
     try:
         return resource_id == rd.ResourceId()
     except Exception:
-        return resource_id is None
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +653,104 @@ class RenderService:
                 except Exception:
                     pass
 
+    async def _visual_readback_container(
+        self,
+        controller: Any,
+        texture_id: Any,
+        subresource: Any,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        rd = _get_rd()
+        attempts: List[Dict[str, Any]] = []
+        last_error = ""
+        try:
+            from PIL import Image
+        except Exception as exc:
+            raise RuntimeToolError(
+                "Texture raw readback was empty and Pillow is unavailable for visual fallback",
+                details={
+                    "failure_stage": "texture_visual_readback",
+                    "failure_reason": "visual_decode_dependency_unavailable",
+                    "exception_type": type(exc).__name__,
+                },
+            ) from exc
+
+        for fmt in ("exr", "hdr", "png"):
+            temp_path: Optional[Path] = None
+            try:
+                normalized_fmt, file_type = _resolve_file_type(fmt)
+                suffix = _SUFFIX_MAP.get(normalized_fmt, f".{normalized_fmt}")
+                fd, temp_name = tempfile.mkstemp(prefix="rdx_visual_readback_", suffix=suffix)
+                os.close(fd)
+                temp_path = Path(temp_name)
+
+                save_data = rd.TextureSave()
+                save_data.resourceId = texture_id
+                save_data.destType = file_type
+                save_data.mip = int(getattr(subresource, "mip", 0))
+                try:
+                    save_data.slice.sliceIndex = max(0, int(getattr(subresource, "slice", 0)))
+                except Exception:
+                    pass
+                try:
+                    save_data.sample.sampleIndex = max(0, int(getattr(subresource, "sample", 0)))
+                except Exception:
+                    pass
+
+                save_result = await asyncio.to_thread(controller.SaveTexture, save_data, str(temp_path))
+                ok, status_payload = _save_texture_result(save_result)
+                attempt: Dict[str, Any] = {
+                    "format": normalized_fmt,
+                    "ok": bool(ok),
+                    "status": status_payload,
+                }
+                if not ok:
+                    attempts.append(attempt)
+                    last_error = status_payload.get("status_text") or str(status_payload)
+                    continue
+                if not temp_path.is_file() or temp_path.stat().st_size <= 0:
+                    attempt["decode_error"] = "empty_or_missing_export"
+                    attempts.append(attempt)
+                    last_error = "SaveTexture created an empty or missing fallback image"
+                    continue
+                try:
+                    with Image.open(temp_path) as image:
+                        arr = np.asarray(image.convert("RGBA"))
+                    if arr.size > 0 and arr.ndim == 3:
+                        attempt["shape"] = list(arr.shape)
+                        attempts.append(attempt)
+                        return arr, {
+                            "format": normalized_fmt,
+                            "attempts": attempts,
+                            "source": "SaveTexture",
+                        }
+                    attempt["decode_error"] = f"decoded_empty_shape={list(arr.shape)}"
+                    attempts.append(attempt)
+                    last_error = attempt["decode_error"]
+                except Exception as exc:
+                    attempt["decode_error"] = f"{type(exc).__name__}: {exc}"
+                    attempts.append(attempt)
+                    last_error = attempt["decode_error"]
+            except Exception as exc:
+                attempts.append({"format": fmt, "error": f"{type(exc).__name__}: {exc}"})
+                last_error = f"{type(exc).__name__}: {exc}"
+            finally:
+                if temp_path is not None:
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+        raise RuntimeToolError(
+            "Texture raw readback was empty and visual fallback failed",
+            details={
+                "failure_stage": "texture_visual_readback",
+                "failure_reason": "texture_readback_empty",
+                "texture_id": str(texture_id),
+                "attempts": attempts,
+                "last_error": last_error,
+            },
+        )
+
     # ------------------------------------------------------------------
     # readback_texture
     # ------------------------------------------------------------------
@@ -712,6 +815,9 @@ class RenderService:
         raw_data: bytes = await asyncio.to_thread(
             controller.GetTextureData, resolved_id, sub,
         )
+        readback_source = "raw_gpu_bytes"
+        content_kind = "texture_readback_container"
+        visual_fallback_meta: Dict[str, Any] = {}
 
         # ---- 解析字节布局 ---------------------------------------------
         # RenderDoc 返回紧密打包的像素数据，其分量布局与资源格式一致。
@@ -720,7 +826,15 @@ class RenderService:
         bytes_per_pixel_f32 = 16  # 4 channels x 4 bytes
         bytes_per_pixel_u8 = 4   # 4 channels x 1 byte
 
-        if len(raw_data) >= expected_pixels * bytes_per_pixel_f32:
+        if len(raw_data) <= 0:
+            arr, visual_fallback_meta = await self._visual_readback_container(
+                controller,
+                resolved_id,
+                sub,
+            )
+            readback_source = "visual_export_fallback"
+            content_kind = "texture_visual_readback_container"
+        elif len(raw_data) >= expected_pixels * bytes_per_pixel_f32:
             arr = np.frombuffer(
                 raw_data[: expected_pixels * bytes_per_pixel_f32],
                 dtype=np.float32,
@@ -738,6 +852,21 @@ class RenderService:
                 len(raw_data), tex_width, tex_height,
             )
             arr = np.frombuffer(raw_data, dtype=np.uint8)
+
+        if arr.size <= 0 or arr.ndim < 3:
+            raise RuntimeToolError(
+                "Texture readback produced an empty pixel container",
+                details={
+                    "failure_stage": "texture_readback",
+                    "failure_reason": "texture_readback_empty",
+                    "texture_id": str(resolved_id),
+                    "event_id": int(event_id),
+                    "raw_byte_size": int(len(raw_data or b"")),
+                    "content_kind": content_kind,
+                    "readback_source": readback_source,
+                    "visual_fallback": dict(visual_fallback_meta),
+                },
+            )
 
         # ---- Optional crop -------------------------------------------
         if region and arr.ndim == 3:
@@ -761,7 +890,12 @@ class RenderService:
             "texture_id": str(texture_id),
             "shape": list(arr.shape),
             "dtype": str(arr.dtype),
+            "content_kind": content_kind,
+            "readback_source": readback_source,
+            "raw_byte_size": int(len(raw_data or b"")),
         }
+        if visual_fallback_meta:
+            stats["visual_fallback"] = visual_fallback_meta
 
         if np.issubdtype(arr.dtype, np.floating):
             stats["nan_count"] = int(np.isnan(arr).sum())
@@ -992,16 +1126,8 @@ class RenderService:
                 return resource_id
 
         # 回退：使用 capture 中的第一张 texture。
-        textures = await asyncio.to_thread(controller.GetTextures)
-        if textures:
-            logger.warning(
-                "_resolve_source_texture: no output targets found; "
-                "falling back to first capture texture",
-            )
-            return textures[0].resourceId
-
         raise RuntimeError(
-            "No output render target or texture found for the current event"
+            "No event-bound output render target found for the current event"
         )
 
     @staticmethod

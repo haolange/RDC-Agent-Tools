@@ -634,13 +634,14 @@ class DaemonExecutor:
 
 
 def _remote_connect_args() -> dict[str, Any]:
-    args: dict[str, Any] = {
-        "host": "127.0.0.1",
-        "port": 38920,
-        "timeout_ms": REMOTE_CONNECT_DEFAULT_TIMEOUT_MS,
-    }
     # Android bootstrap is the default remote smoke path for this repository.
     transport = str(os.environ.get("RDX_REMOTE_CONNECT_TRANSPORT", "adb_android") or "adb_android").strip().lower()
+    default_port = 39920 if transport == "adb_android" else 38920
+    args: dict[str, Any] = {
+        "host": "127.0.0.1",
+        "port": default_port,
+        "timeout_ms": REMOTE_CONNECT_DEFAULT_TIMEOUT_MS,
+    }
     options: dict[str, Any] = {}
     if transport and transport != "renderdoc":
         options["transport"] = transport
