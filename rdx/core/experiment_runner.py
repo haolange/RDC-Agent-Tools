@@ -1,5 +1,5 @@
 """
-RDX-MCP 的原子化 experiment runner。
+rdx-tools 的原子化 experiment runner。
 
 负责编排 GPU-debug experiment 的完整生命周期：
 

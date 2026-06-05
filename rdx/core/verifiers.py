@@ -1,5 +1,5 @@
 """
-RDX-MCP 的可插拔 verifier engine。
+rdx-tools 的可插拔 verifier engine。
 
 每个 verifier 接收 experiment 输入（context），并返回包含 metrics、
 异常信息与 artifact 引用的结构化 verdict。

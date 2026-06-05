@@ -86,7 +86,7 @@
     {
       "name": "rd.core.set_log_level",
       "group": "3.1，核心与环境管理 (Core & Environment)",
-      "description": "设置内部日志等级，便于定位 MCP Server 与 RenderDoc 侧错误。",
+      "description": "设置内部日志等级，便于定位 CLI runtime 与 RenderDoc 侧错误。",
       "parameter_raw": "level (str): 'trace'|'debug'|'info'|'warn'|'error'",
       "returns_raw": "ok (bool)<br>data (dict): tool-specific payload<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
@@ -186,7 +186,7 @@
       "group": "3.2，捕获文件与 Replay Session (Capture & Replay)",
       "description": "获取捕获文件缩略图（如果存在）。",
       "parameter_raw": "capture_file_id (str)<br>max_size_px (int, 可选, 默认 256): 缩略图最大边长<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
-      "returns_raw": "ok (bool)<br>data (dict): {image_path, width, height}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+        "returns_raw": "ok (bool)<br>data (dict): success returns {image_path, width, height}; thumbnail unavailable returns error.code=thumbnail_unavailable with details.capture_file_id and details.max_size_px<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "capture_file_id",
         "max_size_px",
@@ -2536,10 +2536,6 @@
         "preserve_outputs",
         "emit_patch_artifacts",
         "output_dir",
-        "validate_visual",
-        "validate_pixels",
-        "pixel_thresholds",
-        "validation_target",
         "context_id",
         "runtime_owner",
         "owner_lease_id",
@@ -3154,8 +3150,8 @@
       "name": "rd.export.screenshot",
       "group": "3.11，导出、报告与可复现打包 (Export & Reporting)",
       "description": "导出当前 event 的输出截图（等价于 UI 的保存 framebuffer）。",
-      "parameter_raw": "session_id (str)<br>target (dict, 可选): {texture_id? , rt_index?}；缺省为当前 RT0<br>event_id (int, 可选): 指定 event 输出；缺省为当前 active event<br>output_path (str)<br>file_format (str, 可选, 默认 'png')<br>include_alpha (bool, 可选, 默认 true)<br>overlay (str, 可选): 'None'|'Drawcall'|'Wireframe'|'Overdraw'<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
-      "returns_raw": "ok (bool)<br>data (dict): single export returns {artifact_path, saved_path, image_path, meta, resolved_event_id, selected_formats, requested_formats, recommended_formats, name_info, texture_format, chosen_output_slot, texture_id, target_source, binding_truth_level, visual_truth_level, evidence_truth_level, summary_degraded_reasons}; multi-format export returns {exports, saved_paths, image_paths, resolved_event_id, selected_formats, requested_formats, recommended_formats, name_info, texture_format, chosen_output_slot, texture_id, target_source, binding_truth_level, visual_truth_level, evidence_truth_level, summary_degraded_reasons}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
+        "parameter_raw": "session_id (str)<br>target (dict, 可选): {semantic?='swapchain'|'event_output', texture_id?, rt_index?}；未显式指定 texture_id / rt_index 时默认 semantic='swapchain'，优先导出最终 Present / swapchain backbuffer；semantic='event_output' 保留当前 event 的 output targets / event bindings 可视目标选择；显式 rt_index 不存在时返回结构化错误<br>event_id (int, 可选): 指定 event 输出；swapchain 语义会选择不晚于该 event 的最后 Present，缺省为当前 active event<br>output_path (str)<br>file_format (str, 可选, 默认 'png')<br>include_alpha (bool, 可选, 默认 true)<br>overlay (str, 可选): 'None'|'Drawcall'|'Wireframe'|'Overdraw'<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
+        "returns_raw": "ok (bool)<br>data (dict): single export returns {artifact_path, saved_path, image_path, meta, width, height, resolved_event_id, requested_event_id, present_event_id, present_action_name, present_usage, selected_formats, requested_formats, recommended_formats, name_info, texture_format, chosen_output_slot, texture_id, target_source, requested_semantic, fallback_reason, swapchain_error, binding_truth_level, visual_truth_level, evidence_truth_level, summary_degraded, summary_degraded_reasons}; multi-format export returns {exports, saved_paths, image_paths, width, height, resolved_event_id, requested_event_id, present_event_id, present_action_name, present_usage, selected_formats, requested_formats, recommended_formats, name_info, texture_format, chosen_output_slot, texture_id, target_source, requested_semantic, fallback_reason, swapchain_error, binding_truth_level, visual_truth_level, evidence_truth_level, summary_degraded, summary_degraded_reasons}; target_source may be swapchain_present, event_output_slot, event_output_fallback, event_binding_* or explicit_resource; failures include error.code/category/details with session_id, event_id and failure_stage (resolve_visual_target or save_texture)<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
         "target",
@@ -3490,7 +3486,7 @@
       "name": "rd.remote.connect",
       "group": "3.12，远程连接与自动化抓帧 (Remote Capture & Target Control)",
       "description": "连接到远程 RenderDoc server（RDC remote server / target control）。",
-      "parameter_raw": "host (str, 可选): `adb_android` transport 下可省略，缺省按 `127.0.0.1` 处理；`renderdoc` transport 下仍建议显式提供<br>port (int, 可选): `adb_android` 默认 auto / RenderDoc remote server `39920`，裸 `renderdoc` 默认 `38920`<br>timeout_ms (int, 可选, 默认 5000)<br>options (dict, 可选): {transport?, device_serial?, local_port?, install_apk?, push_config?}<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
+      "parameter_raw": "host (str, 可选): `adb_android` transport 下可省略，缺省按 `127.0.0.1` 处理；`renderdoc` transport 下仍建议显式提供<br>port (int, 可选, 默认 38920)<br>timeout_ms (int, 可选, 默认 5000)<br>options (dict, 可选): {transport?, device_serial?, local_port?, install_apk?, push_config?}<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id<br>owner_lease_id (str, optional): owner lease id returned by rd.session.claim_runtime_owner; required for live tools when the context is claimed<br>baton_id (str, optional): runtime baton id for a resumed live investigation",
       "returns_raw": "ok (bool)<br>data (dict): {remote_id, server_info, detail}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "host",
@@ -4569,7 +4565,7 @@
       "name": "rd.session.claim_runtime_owner",
       "group": "3.17，上下文快照工具 (Context Snapshot Tools)",
       "description": "Claim a live runtime owner lease for the current context. Matching runtime_owner and owner_lease_id are then required for live rd.* calls.",
-      "parameter_raw": "force (bool, optional, default false): force takeover of an existing owner<br>entry_mode (str, optional): cli or mcp<br>backend (str, optional): local or remote<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id",
+      "parameter_raw": "force (bool, optional, default false): force takeover of an existing owner<br>entry_mode (str, optional): cli<br>backend (str, optional): local or remote<br>context_id (str, optional): choose the context to use; defaults to the current daemon context<br>runtime_owner (str, optional): live runtime owner id; when a context has a claimed owner, live tools must match it together with owner_lease_id",
       "returns_raw": "ok (bool)<br>data (dict): {context_id, entry_mode, backend, runtime_owner, owner_lease, runtime, remote, focus, active_baton, rehydrate_status, updated_at_ms}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, optional)",
       "param_names": [
         "runtime_owner",

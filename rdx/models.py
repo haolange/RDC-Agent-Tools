@@ -1,6 +1,6 @@
 """
-RDX-MCP 的核心数据模型。
-供 MCP tools 与内部服务使用的结构化类型集合。
+rdx-tools 的核心数据模型。
+供 runtime tools 与内部服务使用的结构化类型集合。
 """
 
 from __future__ import annotations
@@ -338,7 +338,6 @@ class PatchSpec(BaseModel):
     expected_source_hash: str = ""
     max_diff_ops: int = 20
     preserve_outputs: bool = True
-    force_replacement: bool = False
 
 
 class PatchResult(BaseModel):
@@ -357,7 +356,6 @@ class PatchResult(BaseModel):
     encoding: str = ""
     entry_point: str = ""
     compile_flags: List[Dict[str, str]] = Field(default_factory=list)
-    diagnostics: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

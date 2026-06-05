@@ -1,5 +1,6 @@
 @echo off
 setlocal
+set "RDX_CALLER_CWD=%CD%"
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "LAUNCHER=%SCRIPT_DIR%\scripts\rdx_bat_launcher.ps1"

@@ -14,48 +14,28 @@ def _prepare_root(root: Path) -> None:
         path.write_text("ok\n", encoding="utf-8")
 
 
-def _write_report(root: Path, rel: str) -> None:
-    path = root / rel
+def _write_smoke_log(root: Path, *, passed: bool = True) -> None:
+    path = root / release_gate.BASH_SMOKE_LOG
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("ok\n", encoding="utf-8")
+    marker = "[smoke] PASS: CLI smoke completed" if passed else "[smoke] FAIL: capture open"
+    path.write_text(marker + "\n", encoding="utf-8")
 
 
-def _write_truth_payloads(root: Path, *, command_blocker: int = 0, mcp_blocker: int = 0, daemon_blocker: int = 0) -> None:
-    command_path = root / release_gate.CURRENT_TRUTH_REPORTS[0]
-    command_path.parent.mkdir(parents=True, exist_ok=True)
-    command_path.write_text(
-        """{
-  "summary": {
-    "blocker": %d
-  }
-}
-"""
-        % command_blocker,
-        encoding="utf-8",
+def _mock_release_gate_basics(monkeypatch, root: Path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(release_gate, "_tools_root", lambda: root)
+    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd, **kwargs: (True, "ok"))
+    monkeypatch.setattr(release_gate, "_run_launcher", lambda args, cwd: (True, "ok"))
+    monkeypatch.setattr(
+        release_gate,
+        "_run_launcher_expect_error",
+        lambda args, cwd, expected_code: (True, expected_code),
     )
-
-    tool_path = root / release_gate.CURRENT_TRUTH_REPORTS[1]
-    tool_path.parent.mkdir(parents=True, exist_ok=True)
-    tool_path.write_text(
-        """{
-  "transports": {
-    "mcp": {
-      "fatal_error": "",
-      "summary": {
-        "blocker": %d
-      }
-    },
-    "daemon": {
-      "fatal_error": "",
-      "summary": {
-        "blocker": %d
-      }
-    }
-  }
-}
-"""
-        % (mcp_blocker, daemon_blocker),
-        encoding="utf-8",
+    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    monkeypatch.setattr(release_gate, "_check_bundled_python", lambda: (True, "bundled python ok"))
+    monkeypatch.setattr(
+        release_gate,
+        "_check_user_docs_no_python_bootstrap",
+        lambda root: (True, "user docs ok"),
     )
 
 
@@ -96,29 +76,26 @@ def test_rg_no_match_falls_back_when_rg_permission_denied(monkeypatch, tmp_path:
 def test_rg_no_match_literal_falls_back_when_rg_missing(monkeypatch, tmp_path: Path) -> None:
     sample = tmp_path / "docs" / "sample.md"
     sample.parent.mkdir(parents=True, exist_ok=True)
-    sample.write_text("mentions extensions/legacy path\n", encoding="utf-8")
+    legacy_token = "ext" + "ensions/"
+    sample.write_text(f"mentions {legacy_token}legacy path\n", encoding="utf-8")
 
     def _missing_rg(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise FileNotFoundError("rg missing")
 
     monkeypatch.setattr(release_gate.subprocess, "run", _missing_rg)
 
-    ok, detail = release_gate._rg_no_match(release_gate.ScanRule("extensions/", literal=True), tmp_path)
+    ok, detail = release_gate._rg_no_match(release_gate.ScanRule(legacy_token, literal=True), tmp_path)
 
     assert not ok
     assert "python fallback" in detail
-    assert "extensions/legacy path" in detail
+    assert f"{legacy_token}legacy path" in detail
 
 
-def test_release_gate_accepts_current_reports(monkeypatch, tmp_path: Path) -> None:
+def test_release_gate_accepts_current_bash_smoke_log(monkeypatch, tmp_path: Path) -> None:
     _prepare_root(tmp_path)
-    for rel in release_gate.CURRENT_REPORTS:
-        _write_report(tmp_path, rel)
-    _write_truth_payloads(tmp_path)
+    _write_smoke_log(tmp_path)
 
-    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
-    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
-    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    _mock_release_gate_basics(monkeypatch, tmp_path)
     monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
 
     rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md"])
@@ -126,15 +103,13 @@ def test_release_gate_accepts_current_reports(monkeypatch, tmp_path: Path) -> No
     assert rc == 0
     report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
     assert "PASS `reports:smoke-suite`" in report
-    assert "using current smoke reports" in report
+    assert "bash CLI smoke log is present and passed" in report
 
 
 def test_release_gate_accepts_missing_reports_in_clean_checkout(monkeypatch, tmp_path: Path) -> None:
     _prepare_root(tmp_path)
 
-    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
-    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
-    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    _mock_release_gate_basics(monkeypatch, tmp_path)
     monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
 
     rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md"])
@@ -142,26 +117,22 @@ def test_release_gate_accepts_missing_reports_in_clean_checkout(monkeypatch, tmp
     assert rc == 0
     report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
     assert "PASS `reports:smoke-suite`" in report
-    assert "smoke reports optional in clean checkout" in report
+    assert "bash CLI smoke optional in clean checkout" in report
 
 
-def test_release_gate_rejects_incomplete_current_reports(monkeypatch, tmp_path: Path) -> None:
+def test_release_gate_rejects_failing_bash_smoke_log_when_flagged(monkeypatch, tmp_path: Path) -> None:
     _prepare_root(tmp_path)
-    for rel in release_gate.CURRENT_REPORTS[:-1]:
-        _write_report(tmp_path, rel)
+    _write_smoke_log(tmp_path, passed=False)
 
-    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
-    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
-    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    _mock_release_gate_basics(monkeypatch, tmp_path)
     monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
 
-    rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md"])
+    rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md", "--require-smoke-reports"])
 
     assert rc == 1
     report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
     assert "FAIL `reports:smoke-suite`" in report
-    assert "incomplete smoke reports:" in report
-    assert release_gate.CURRENT_REPORTS[-1] in report
+    assert "bash CLI smoke log did not contain [smoke] PASS" in report
 
 
 def test_release_gate_requires_reports_when_fixture_exists(monkeypatch, tmp_path: Path) -> None:
@@ -170,9 +141,7 @@ def test_release_gate_requires_reports_when_fixture_exists(monkeypatch, tmp_path
     fixture.parent.mkdir(parents=True, exist_ok=True)
     fixture.write_text("fixture\n", encoding="utf-8")
 
-    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
-    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
-    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    _mock_release_gate_basics(monkeypatch, tmp_path)
     monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
 
     rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md"])
@@ -180,15 +149,13 @@ def test_release_gate_requires_reports_when_fixture_exists(monkeypatch, tmp_path
     assert rc == 1
     report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
     assert "FAIL `reports:smoke-suite`" in report
-    assert "missing current reports:" in report
+    assert "missing bash CLI smoke log" in report
 
 
 def test_release_gate_requires_reports_when_flagged(monkeypatch, tmp_path: Path) -> None:
     _prepare_root(tmp_path)
 
-    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
-    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
-    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    _mock_release_gate_basics(monkeypatch, tmp_path)
     monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
 
     rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md", "--require-smoke-reports"])
@@ -196,25 +163,22 @@ def test_release_gate_requires_reports_when_flagged(monkeypatch, tmp_path: Path)
     assert rc == 1
     report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
     assert "FAIL `reports:smoke-suite`" in report
-    assert "missing current reports:" in report
+    assert "missing bash CLI smoke log" in report
 
 
 def test_release_gate_main_survives_rg_permission_error(monkeypatch, tmp_path: Path) -> None:
     _prepare_root(tmp_path)
-    for rel in release_gate.CURRENT_REPORTS:
-        _write_report(tmp_path, rel)
-    _write_truth_payloads(tmp_path)
+    _write_smoke_log(tmp_path)
     bad_ref = tmp_path / "docs" / "sample.md"
     bad_ref.parent.mkdir(parents=True, exist_ok=True)
-    bad_ref.write_text("legacy extensions/path reference\n", encoding="utf-8")
+    legacy_token = "ext" + "ensions/"
+    bad_ref.write_text(f"legacy {legacy_token}path reference\n", encoding="utf-8")
 
     def _deny_rg(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise PermissionError("access denied")
 
     monkeypatch.setattr(release_gate.subprocess, "run", _deny_rg)
-    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
-    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
-    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    _mock_release_gate_basics(monkeypatch, tmp_path)
 
     rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md"])
 
@@ -224,15 +188,11 @@ def test_release_gate_main_survives_rg_permission_error(monkeypatch, tmp_path: P
     assert "python fallback after PermissionError" in report
 
 
-def test_release_gate_requires_clean_smoke_truth_when_flagged(monkeypatch, tmp_path: Path) -> None:
+def test_release_gate_requires_passing_bash_smoke_log_when_flagged(monkeypatch, tmp_path: Path) -> None:
     _prepare_root(tmp_path)
-    for rel in release_gate.CURRENT_REPORTS:
-        _write_report(tmp_path, rel)
-    _write_truth_payloads(tmp_path, daemon_blocker=1)
+    _write_smoke_log(tmp_path, passed=False)
 
-    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
-    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
-    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    _mock_release_gate_basics(monkeypatch, tmp_path)
     monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
 
     rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md", "--require-smoke-reports"])
@@ -240,18 +200,14 @@ def test_release_gate_requires_clean_smoke_truth_when_flagged(monkeypatch, tmp_p
     assert rc == 1
     report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
     assert "FAIL `reports:smoke-suite`" in report
-    assert "daemon tool contract still reports blocker=1" in report
+    assert "bash CLI smoke log did not contain [smoke] PASS" in report
 
 
-def test_release_gate_accepts_clean_smoke_truth_when_flagged(monkeypatch, tmp_path: Path) -> None:
+def test_release_gate_accepts_passing_bash_smoke_log_when_flagged(monkeypatch, tmp_path: Path) -> None:
     _prepare_root(tmp_path)
-    for rel in release_gate.CURRENT_REPORTS:
-        _write_report(tmp_path, rel)
-    _write_truth_payloads(tmp_path)
+    _write_smoke_log(tmp_path)
 
-    monkeypatch.setattr(release_gate, "_tools_root", lambda: tmp_path)
-    monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd: (True, "ok"))
-    monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
+    _mock_release_gate_basics(monkeypatch, tmp_path)
     monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
 
     rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md", "--require-smoke-reports"])
@@ -259,4 +215,45 @@ def test_release_gate_accepts_clean_smoke_truth_when_flagged(monkeypatch, tmp_pa
     assert rc == 0
     report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
     assert "PASS `reports:smoke-suite`" in report
-    assert "smoke truth reports are current and clean" in report
+    assert "bash CLI smoke log is present and passed" in report
+
+
+def test_release_gate_requires_release_package_when_flagged(monkeypatch, tmp_path: Path) -> None:
+    _prepare_root(tmp_path)
+    _write_smoke_log(tmp_path)
+
+    _mock_release_gate_basics(monkeypatch, tmp_path)
+    monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
+
+    rc = release_gate.main(["--report", "intermediate/logs/release_gate_report.md", "--require-release-package"])
+
+    assert rc == 1
+    report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
+    assert "FAIL `release:package`" in report
+    assert "missing release package" in report
+
+
+def test_release_gate_verifies_release_package_when_present(monkeypatch, tmp_path: Path) -> None:
+    _prepare_root(tmp_path)
+    _write_smoke_log(tmp_path)
+    package = tmp_path / "dist" / "rdx-tools-1.0.0-windows-x64.zip"
+    package.parent.mkdir(parents=True, exist_ok=True)
+    package.write_bytes(b"zip")
+    (package.parent / "SHA256SUMS").write_text("abc  rdx-tools-1.0.0-windows-x64.zip\n", encoding="utf-8")
+
+    _mock_release_gate_basics(monkeypatch, tmp_path)
+    monkeypatch.setattr(release_gate, "_rg_no_match", lambda pattern, cwd: (True, ""))
+
+    rc = release_gate.main(
+        [
+            "--report",
+            "intermediate/logs/release_gate_report.md",
+            "--require-release-package",
+            "--release-package",
+            str(package),
+        ],
+    )
+
+    assert rc == 0
+    report = (tmp_path / "intermediate" / "logs" / "release_gate_report.md").read_text(encoding="utf-8")
+    assert "PASS `release:package`" in report

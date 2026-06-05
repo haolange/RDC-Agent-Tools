@@ -1,234 +1,57 @@
-﻿# `rdx-tools`
+﻿# rdx-tools
 
-`rdx-tools` 是面向 `RenderDoc` 的本地工具集，用于暴露稳定的 `rd.*` tool 能力、管理 `.rdc` 到 replay session 的运行时链路，并为 daemon-backed 本地入口与协议桥接提供统一入口。
+`rdx-tools` is a CLI-only RenderDoc `.rdc` runtime package. It exposes 200 `rd.*` tools through `rdx.bat`, `bin/rdx`, or `python cli/run_cli.py`; it no longer ships an MCP server, MCP transport, or built-in RDC ToolBridge MCP descriptor.
 
-本仓库的默认公开能力边界聚焦于“打开 `.rdc` 后做离线 replay / 调试 / 导出”，不把任意 app 控制或 app-side integration 作为默认主能力面。
-
-本仓库关注“平台层使用模型”：
-
-- 提供 `CLI`、`MCP`、tool catalog 与 runtime 约束。
-- 说明如何把一份 `.rdc` 变成可操作的 session。
-- 说明 `context`、daemon、artifact、context snapshot 的关系。
-
-本仓库**不**提供上层业务 workflow：
-
-- 不描述 shader debug、reverse、analysis、optimize 等任务策略。
-- 不替代上层 skills、system prompt、reference docs。
-- 不规定 Agent 必须按哪条业务链路组合 tools。
-
-## 默认能力介绍顺序
-
-对外介绍 `rdx-tools` 时，默认应按以下顺序理解能力面：
-
-1. 把 `.rdc` 建成可操作的 `capture/replay/session`。
-2. 通过 canonical `rd.*` tools 做事件、管线、资源、纹理、shader、debug、export 等结构化读取与操作。
-3. 用 `rd.macro.*` 承载常见高阶分析工作流。
-4. 用 `rd.session.*` / `rd.core.*` 管理 context、恢复与 discovery。
-5. 用 context 绑定的 preview 给人类提供同步观察窗口；它是 human observer，不进入平台真相裁决链。
-6. 用 `rd.vfs.*` 做只读浏览与路径式导航。
-7. 用 `tabular/tsv projection` 提供表格化摘要输出。
-
-补充口径：
-
-- 主调试接口始终是 canonical `rd.*`。
-- `rd.vfs.*` 是只读导航层，用于浏览结构，不替代正式调试接口。
-- `tabular/tsv projection` 是结果展示投影，用于提升扫描效率，不是新的规范能力面，也不表示语义重要度排序。
-- `rd.session.open_preview` / `rd.session.close_preview` 只负责给人类打开或关闭 context 绑定的同步监控窗口；`rd.session.get_context.preview` 是唯一公开状态源。
-- preview 固定跟随当前 context 的 `current_session_id + active_event_id`，不是 `qrenderdoc` 替身，也不是 fix verification / evidence 输入。
-- preview 默认显示当前 event 对应的完整 framebuffer / RT，不按 viewport 裁小；若当前 event 存在 viewport / scissor，会以区域标识叠加到完整 framebuffer 上。
-- `rd.session.get_context.preview.display` 会返回人类观察面使用的几何元数据，例如 `output_slot`、`texture_id`、`texture_format`、`framebuffer_extent`、`viewport_rect`、`scissor_rect`、`effective_region_rect`、`window_rect`、`fit_mode` 与 `screen_cap_ratio`。
-- `rd.texture.get_data` 的默认语义是数值 readback 容器，不是图片导出。
-- 需要直接打开的纹理图片时，统一使用 `rd.export.texture`。
-- `runtime_mode_truth.json` 只定义 transport/runtime ceiling，不定义平台是否具备 team agents。
-- local multi-context 只表示 runtime ceiling；上层是否把它消费成 `concurrent_team` 或 `staged_handoff` 的 orchestrated multi-context，取决于 `Frameworks`。
-- `Tools` 只暴露 runtime ceiling 与 context 语义；是否采用 team-agents、如何做 `staged_handoff` 或多 context 编排，由上层 `Frameworks` 决定。
-
-## 规范源优先级
-
-理解本仓库时，请按以下顺序判断“什么是平台定义”：
-
-1. `spec/tool_catalog.json` 与共享响应契约
-2. runtime 实际行为
-3. `CLI` 对常见平台动作的封装
-
-这意味着：
-
-- tool 能力面与参数语义，以 catalog 和共享契约为准。
-- runtime 行为是平台真相的运行时体现。
-- `CLI` 只是 convenience wrapper，不是完整能力面的等价镜像，也不是规范源。
-- `capture open` 只负责建立 tools-layer session state，不会初始化上层 framework 的 `workspace/case/run`。
-- 规范定义以 `spec/tool_catalog.json` 为准。
-- `spec/runtime_mode_truth.json` 是 transport/runtime 已验证模式的权威文件；平台 coordination 能力由上层 Frameworks 决定。
-
-## 入口概览
-
-### `rdx.bat`
-
-统一 launcher，用于启动本地入口或协议桥接入口。
-
-- 默认模式：交互式入口，提供 `Start CLI`、`Start MCP`、`Help`。
-- `--non-interactive`：脚本与自动化入口。
+## Entry Points
 
 ```bat
-rdx.bat
-rdx.bat --non-interactive cli --help
-rdx.bat --non-interactive mcp --ensure-env
+rdx.bat --version
+rdx.bat version --json
+rdx.bat --json doctor
+rdx.bat tools list --json
+rdx.bat context status --json
+rdx.bat capture open --file "C:\path\capture.rdc" --frame-index 0
+rdx.bat context update --key notes --value "triaged" --json
+rdx.bat vfs ls --path / --format tsv
+rdx.bat completion powershell
 ```
 
-终端用户默认只需要这三条 `rdx.bat` 入口，不需要额外安装系统 `Python`、`pip` 或创建 `.venv`。
-
-`--non-interactive` 下如果子命令返回 canonical JSON，launcher 会直接透传完整 payload；只有 launcher 自身失败或子命令没有 JSON 时，才回退到短状态 JSON。
-对 `rdx.bat --non-interactive cli|mcp ... --args-file <path>`，相对路径按用户调用 `rdx.bat` 时的当前工作目录解析，而不是按 tools root 重写。
-
-### cli/run_cli.py 
-
-该入口继续保留给源码维护、CI 与排障使用；终端用户默认不需要直接调用 python cli/run_cli.py ...。
-
-daemon-backed 本地命令入口，适合人工、脚本、CI 和可直接访问本地环境的 Agent。
-
-- 面向“命令”而不是 tool schema。
-- 负责把常见平台动作封装成 `capture open`、`capture status`、`daemon status` 等命令。
-- 不拥有独立 runtime；所有业务命令都经当前 context 的 daemon 执行。
-- `call` 同时支持 `--args-json` 与 `--args-file`；跨 shell 自动化优先使用 `--args-file`。
-
-### mcp/run_mcp.py 
-
-该入口继续保留给源码维护与调试；终端用户默认通过 `rdx.bat` 启动 `MCP`，而不是先安装系统 `Python` 再手工执行脚本。
-
-`MCP` server 入口，适合无法直接进入本地环境的外部宿主，或用户明确要求按 `MCP` 接入的场景。
-
-- 暴露 catalog 当前定义的全部 `rd.*` tools；数量以 `spec/tool_catalog.json` 的 `tool_count` 为准。
-- 新增只读 `rd.vfs.*` 导航层，用于以 JSON-first 方式探索 draw/pass/resource/pipeline/context 结构。
-- 已公开包含 `rd.session.get_context`、`rd.session.update_context`、`rd.session.list_sessions`、`rd.session.select_session`、`rd.session.resume`。
-- 已公开包含 `rd.session.open_preview`、`rd.session.close_preview`；preview 状态固定通过 `rd.session.get_context.preview` 读取。
-- 已公开包含 `rd.core.get_operation_history`、`rd.core.get_runtime_metrics`、`rd.core.list_tools`、`rd.core.search_tools`、`rd.core.get_tool_graph`。
-- catalog 现已为 tool 提供结构化 `prerequisites`，上层 Agent 应在调用前优先做静态前置检查，而不是依赖试错。
-- 由上层 client 进行 tool discovery、参数组织与调用编排。
-
-## 入口选择原则
-
-选择入口时，按以下顺序判断：
-
-1. 调用方能否直接访问本地进程、文件系统与 daemon。
-2. 如果能，默认 local-first，优先使用 daemon-backed `CLI`。
-3. 如果不能直达本地环境，或用户明确要求按 `MCP` 接入时，使用 `MCP`。
-
-补充约束：
-
-- `daemon` 是唯一的长生命周期 runtime / context 持有层，不是 `CLI` 或 `MCP` 的附属概念。
-- 不论走 `CLI` 还是 `MCP`，上层 Agent 都应先向用户说明当前采用的入口模式。
-- 如果选择 `MCP`，但宿主没有配置对应 MCP server，必须显式报错或阻断，而不是假设平台能力已经存在。
-
-## 最小示例
-
-下面的示例按顺序执行：先启动 `rdx.bat` 进入交互 shell，后续 `rdx ...` 命令在该 shell 内继续执行。
-
-```bat
-rdx.bat
-rdx capture open --file "C:\path\capture.rdc" --frame-index 0 --preview
-rdx session preview status
-rdx call rd.session.get_context --args-file ".\args.json" --format json
-rdx.bat --non-interactive mcp --ensure-env --daemon-context smoke-test
+```bash
+bash resources/tools/bin/rdx --json doctor
 ```
 
-文档示例默认按顺序执行语义编写。除非显式声明支持并发，否则不应把并发观测结果视为平台定义。
+`--non-interactive` is a launcher flag only. `rdx.bat --non-interactive --json doctor` runs the same CLI. `rdx.bat --non-interactive mcp --ensure-env` is intentionally unsupported and returns non-zero JSON.
 
-当前 remote replay / debug 主链路的关键约束是：
+## Smoke
 
-- `rd.remote.connect` 返回的是 live `remote_id`，不是占位 handle。
-- `rd.remote.ping` 用于确认该 `remote_id` 仍然连着 live endpoint。
-- `rd.capture.open_replay` 需要通过 `options.remote_id` 显式进入 remote replay backend；传了 `remote_id` 就只能走该 remote backend，`remote_id` 缺失、失效、跨 context 复用或会掉回 local 时必须 hard fail。
-- remote `open_replay` 成功后，会基于该 live `remote_id` 建立 replay-owned lease；原 `remote_id` 默认继续保持 live，可继续执行 `rd.remote.ping`、`rd.remote.list_targets` 等 live endpoint tool。
-- `rd.session.get_context` 的 `remote.active_session_ids` 会显式暴露当前 live remote handle 被哪些 replay session lease。
-- 当 live remote handle 仍被 session lease 时，`rd.remote.disconnect` 预期返回 `remote_handle_in_use`；应先关闭相关 replay 或等待 lease 释放。
-- `remote_handle_consumed` 仍可能出现在旧 tombstone / 恢复异常路径，但它不再是正常 remote `open_replay` 成功后的默认结果。
-- Android remote 可通过 `rd.remote.connect` 的 `options.transport="adb_android"` 触发仓库内置的 `adb` bootstrap。
-- Android `adb_android` 未显式指定 remote port 时默认走 RenderDoc remote server socket `renderdoc_39920`；`renderdoc_38920` 是 target control socket，仅作为扫描/诊断兼容信息保留。
-- `rd.remote.connect` 的 `options` 参数面在 `CLI` / daemon / `MCP` 下保持一致，至少包括 `transport`、`device_serial`、`local_port`、`install_apk`、`push_config`。
-- Android connect 阶段的 `server_info.capabilities.supported_replays` 是可选诊断字段；endpoint 成功以 bootstrap、endpoint reachable、connection ping 与 final ping 为准。
-- `rd.shader.compile` 现在是 session-aware tool：可显式传 `session_id` 与 `source_encoding`，并通过返回里的 `supported_source_encodings` 判断当前 replay backend 接受哪类源码；返回还会显式区分 `runtime_replacement_supported` 与 compile 本身是否可用。
-- `rd.remote.set_overlay_options` 在当前 `RenderDoc` Python binding 未暴露 overlay RPC 时，会返回显式 `remote_overlay_options_unavailable`，而不是静默成功。
-- 长链任务优先通过 `rd.session.get_context` / `rd.session.update_context` 维护当前 context，而不是依赖模型自己记住上一轮 handle 与 artifact 路径。
-- 人类同步监控窗口固定通过 `rd.session.open_preview` 建立，并把状态写入 `rd.session.get_context.preview`。
-- preview 是 context 级 enabled intent：session 切换、resume、replay 重建后会自动重绑；`rd.session.close_preview`、`rd.core.shutdown` 与 `rdx context clear` 会关闭窗口并清掉该 intent。
-- 如果第一次 `rd.session.open_preview` 建窗或绑定失败，`rd.session.get_context.preview` 会保留 `enabled=false`，清空绑定字段，并把错误写入 `last_error`；不会残留“已启用但不可用”的 intent。
-- preview 不允许 silent fallback：不能悄悄从 remote 掉回 local，也不能悄悄从 `active_event` 退回 frame-end framebuffer 或导出轮询。
-- 当 preview 已 enabled 时，`rd.event.set_active`、`rd.replay.set_frame`、`rd.session.select_session` 与 `rd.session.resume` 会在返回前至少完成一次 preview 同步刷新尝试；若刷新失败，只更新 `rd.session.get_context.preview` 的状态与错误，不回滚 canonical runtime truth。
-- preview 窗口会按当前 framebuffer 几何自动调整大小，并把默认上限限制在当前屏幕工作区的 `50%`；若用户手动拖拽过窗口，在 framebuffer 几何不变时不会被持续抢改。
-- 一个 context 现在可持有多条本地 session 记录；`rd.session.get_context` 会同时返回 `current_session_id`、`sessions`、`recovery`、`limits` 与 `recent_operations`。
-- 现已公开 `rd.session.create_context`、`rd.session.list_contexts`、`rd.session.select_context`、`rd.session.clear_context`，把 multi-context 变成正式 public surface，而不是 CLI 侧隐式约定。
-- 现已公开 `rd.session.claim_runtime_owner` / `rd.session.release_runtime_owner`；当 context 已 claim owner 时，live `rd.*` 调用必须提供匹配的 `runtime_owner` 与 `owner_lease_id`，否则返回 `runtime_owner_conflict`。
-- 现已公开 `rd.session.export_runtime_baton` / `rd.session.rehydrate_runtime_baton`；跨 agent、跨轮次与重连恢复的 live handoff 现在有了正式 baton surface。
-- `rd.session.get_context` 现在会额外返回 `remote_capability_matrix`、`remote_context_locality`、`remote_handle_origin_context` 与 `remote_handle_reuse_policy`；这些字段是上层 Framework remote gate 的唯一底层输入。
-- `rd.session.get_context` / `rd.session.list_contexts` / `rd.session.export_runtime_baton` 中的 `session_locator` 只用于对齐 `rdc_path`、`session_id`、`frame_index` 与 `active_event_id`，是关联/恢复提示，不是稳定 handle。
-- daemon 退出或重启后，平台会优先按持久化索引恢复本地与可恢复 remote session，并尽量复用原 `session_id`；只有 remote endpoint 真断开、bootstrap 失败或恢复元数据缺失时，才会把该 session 标记为 `degraded` 并返回明确错误。
-- `rd.remote.connect` 与 `rd.capture.open_replay` 在 daemon / streamable transports 下会更新结构化 progress；如宿主不支持 push，至少应通过 `daemon status` 读取 `active_operation`。
-- `active_event_id` 与对外暴露的 canonical `event_id` 只表示可被 `rd.event.get_action_details` round-trip 的 action event；对 `rd.resource.get_usage` / `rd.resource.get_history` 中不可 round-trip 的底层记录，应查看 `raw_event_id` 与 `event_resolvable`。
-- event-bound `rd.pipeline.*`、`rd.shader.*`、`rd.texture.get_pixel_value`、`rd.export.shader_bundle` 与 `rd.shader.debug_start` 会返回 `resolved_event_id`；若 backend 不能精确绑定请求 event，运行时会显式失败，不做 silent fallback。
-- `rd.pipeline.get_state` / `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` / `rd.export.screenshot` / `rd.texture.get_data` 会返回 truth/degrade 元数据，用于区分 `visual_evidence_only`、`binding degraded`、`summary partial` 与 `api_summary_untrusted`。
-- `rd.pipeline.get_state_summary` / `rd.pipeline.get_output_targets` 现在会额外返回 `selected_visual_target` 与 `export_target_available`；`rd.export.screenshot` 与 event-bound texture readback 会共享同一套 event target 解析链，避免“pipeline 说无输出但 screenshot 又静默导出 RT0”的分叉。
-- `rd.shader.edit_and_replace` 现在要么执行真实 runtime shader replacement，要么返回明确的 capability/runtime 失败；不会再返回 `mock_applied` 一类伪成功状态。
-- `rd.shader.edit_and_replace` 只有在 replacement 应用后重新绑定目标 `event_id` 成功时，才会返回 `status="applied"`；返回中会保留 `replacement_id`、`resolved_event_id`、`original_shader_id`、`applied_to_shader_hash` 与 `original_shader_hash`，供后续 screenshot / readback / revert 做同链路核对。
-- `rd.shader.edit_and_replace` / patch engine 的错误面现在会显式区分绑定失败、stage mismatch、build failed、apply failed、backend unsupported 与 source hash mismatch，而不再把多阶段失败全部折叠成 `shader_not_bound`。
-- `rd.shader.debug_start` 会先读取 remote capability matrix；若当前 remote replay backend 明确不支持 shader debug，会在创建 trace 前直接 truthful-fail，并保留 `failure_stage` / `failure_reason` / `attempts`。
-- `rd.texture.get_data` 默认返回 `.npz` 容器，并显式带上 `content_kind="texture_readback_container"`、`container_format="npz"`、`artifact_path`、`saved_path` 与 `stats`。
-- `rd.texture.get_data` 若显式传 `output_path`，必须使用 `.npz` 扩展名；不再接受把 readback 容器伪装成 `.png`。
-- `rd.export.texture` 是唯一的纹理图片导出 public surface；`rd.texture.get_data` 只负责数值读回与容器 artifact。
-- daemon 超时错误现在会通过结构化 `error.details` 返回 `operation`、`context_id`、`timeout_seconds`、`active_operation` 与 `daemon_state_excerpt`。
-- transport/runtime 层当前已验证模式固定写入 `spec/runtime_mode_truth.json`；上层 framework 应消费它，而不是自行发明 local/remote 模式真相。
+Agent platforms should run smoke through bash so every CLI step is visible in the terminal:
 
-更完整的操作说明见 [docs/quickstart.md](docs/quickstart.md)。
-
-## 文档导航
-
-- [docs/README.md](docs/README.md)：文档导航与阅读顺序
-- [docs/quickstart.md](docs/quickstart.md)：最短上手路径
-- [docs/session-model.md](docs/session-model.md)：`.rdc` 到 session 的平台模型
-- [docs/agent-model.md](docs/agent-model.md)：上层 Agent / framework 使用原则
-- [docs/doc-governance.md](docs/doc-governance.md)：文档自更新治理、量化指标与影响面映射
-- [docs/configuration.md](docs/configuration.md)：runtime layout、环境变量、根目录约束
-- [docs/troubleshooting.md](docs/troubleshooting.md)：常见故障与恢复
-- [docs/tools.md](docs/tools.md)：tool catalog 入口与校验方式
-- [docs/android-remote-cli-smoke-prompt.md](docs/android-remote-cli-smoke-prompt.md)：桌面 / Android 分层 smoke 与 contract 测试模板
-- [docs/fixture-strategy.md](docs/fixture-strategy.md)：first-party `.rdc` fixture 与测试分层策略
-- [docs/release-baseline.md](docs/release-baseline.md)：当前发布基线与已校正口径
-- [docs/compatibility-notes.md](docs/compatibility-notes.md)：当前兼容边界与分发定位
-- [scripts/README.md](scripts/README.md)：正式 `scripts/` 主链与治理规则
-- [CHANGELOG.md](CHANGELOG.md)：最近一轮发布级变更摘要
-
-## `scripts/` 说明
-
-正式支持的脚本主链见 [scripts/README.md](scripts/README.md)。
-一次性调查脚本不属于受支持的仓库接口。
-
-若需要把真实 local smoke 纳入发布门禁：
-
-- 继续通过显式参数把外部 `.rdc` 样本传给 `tool_contract_check.py`
-- 若同时做 Android remote matrix，`tool_contract_check.py` 当前默认通过 `rd.remote.connect(options.transport="adb_android")` 走仓库内置 `adb` bootstrap；如需改成裸 `renderdoc` remote，可显式设置 `RDX_REMOTE_CONNECT_TRANSPORT=renderdoc`
-- 如果本轮只做 Android remote-only 全量验证，可直接运行 `python scripts/tool_contract_remote_smoke.py --rdc "<sample.rdc>" --transport <daemon|mcp|both>`
-- 如果本轮改动影响 preview 的几何适配、窗口行为、display metadata 或 event 跟随语义，可额外运行 `python scripts/preview_geometry_smoke.py --local-rdc "<local.rdc>" --remote-rdc "<remote.rdc>" --transport both`
-- 生成当前 `rdx_bat_command_smoke.*`、`tool_contract_report.*`、`rdx_smoke_issues_blockers.md`、`rdx_smoke_detailed_report.md`
-- 再执行 `python scripts/release_gate.py --require-smoke-reports`
-
-此时 `release_gate.py` 不再只看报告文件是否存在，而会读取当前 smoke truth JSON，确认 command / MCP / daemon 都没有 blocker 或 fatal error。
-
-## 关键约束
-
-- tool catalog 的权威来源是 `spec/tool_catalog.json`。
-- catalog 当前数量以 `tool_count` 字段为准；后续变更必须同步更新 validator、help 输出与文档口径。
-- 运行时响应遵循共享契约；调试时优先检查 `ok` 与 `error.message`，必要时继续看 `error.details`。
-- 默认参考根目录由 `rdx.bat` 或脚本自身位置推导；`RDX_TOOLS_ROOT` 仅用于覆盖默认值。
-- `rd.event.set_active` 若收到不可解析的 `event_id`，必须失败且保持现有 runtime / context 状态不变。
-- `rd.capture.close_file` 若目标 `capture_file_id` 仍被 live replay 持有，必须失败；推荐顺序是 `rd.capture.close_replay -> rd.capture.close_file`。
-- `rd.vfs.*` 是只读探索层，不替代结构化 `rd.*` canonical tools；所有修改、切换、导出与 context 更新仍继续通过原有 `rd.*` API 完成。
-- `rdx daemon stop` 只停止 daemon，不会清空本地 `.rdc` 的持久化恢复索引；如需显式销毁 context 状态，应执行 `rdx context clear`。
-## 验证
-
-```bat
-rdx.bat --non-interactive cli --help
-rdx.bat --non-interactive mcp --ensure-env
-python spec/validate_catalog.py
-python scripts/check_markdown_health.py
+```bash
+bash scripts/smoke_cli.sh
+bash scripts/smoke_cli.sh --rdc "C:/path/sample.rdc" --context cli-smoke
 ```
 
-若需要做源码维护回归，可额外执行 `python cli/run_cli.py --help` 与 `python mcp/run_mcp.py --help`，但它们不再是终端用户上手前置条件。
+The smoke script calls `bin/rdx` directly for `doctor`, `tools list`, `tools search`, the negative MCP route check, and the daemon-backed capture chain. If `--rdc` is omitted, it uses the first `tests/fixtures/*.rdc` fixture when one exists. It writes the same live output to `intermediate/logs/smoke_cli.log`. It does not run a Python smoke runner or a Python command aggregator.
+
+## Install
+
+Release packages are self-contained Windows x64 zips. See [Install](docs/install.md).
+
+## Session State
+
+Use `rdx context status` to read context state and `rdx context update` to update notes, focus, and agent-visible metadata. `--daemon-context <id>` selects the continuous runtime namespace; omitting it uses `default`. The state includes `session_locator`, current capture/session IDs, preview state, and remote lifecycle fields. `remote_handle_consumed` means a remote handle has been bound to a replay session and must not be reused as a free remote connection.
+
+## Preview CLI Contract
+
+`session preview on|status|off` is daemon-backed. `rdx context status` reports preview state and `preview.display`; the preview surface should expose the complete framebuffer（完整 framebuffer）instead of cropping viewport / scissor state.
+
+## Docs
+
+- [Session model](docs/session-model.md)
+- [Agent model](docs/agent-model.md)
+- [Install](docs/install.md)
+- [Agent integration](docs/agent-integration.md)
+- [Stability](docs/stability.md)
+- [Documentation governance](docs/doc-governance.md)
+- [Tools](docs/tools.md)
+- [Scripts](scripts/README.md)

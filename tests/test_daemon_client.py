@@ -201,6 +201,18 @@ def test_daemon_request_timeout_returns_structured_details(monkeypatch, tmp_path
         "capture_file_id": "capf-demo",
         "active_request_count": 1,
     }
+    daemon_client.save_daemon_state(
+        {
+            **state,
+            "active_operation": {"operation": "rd.capture.open_replay", "trace_id": "trace-2", "transport": "cli"},
+            "session_id": "sess-ready",
+            "capture_file_id": "capf-ready",
+            "active_event_id": 147,
+            "active_request_count": 2,
+            "recovery_status": "ready",
+        },
+        context="ctx-demo",
+    )
 
     monkeypatch.setattr(daemon_client, "Client", _FakeClient)
 
@@ -217,7 +229,12 @@ def test_daemon_request_timeout_returns_structured_details(monkeypatch, tmp_path
         assert exc.details["operation"] == "rd.texture.get_data"
         assert exc.details["context_id"] == "ctx-demo"
         assert exc.details["timeout_seconds"] == 0.01
+        assert exc.details["active_request_count"] == 2
         assert exc.details["active_operation"]["operation"] == "rd.capture.open_replay"
-        assert exc.details["daemon_state_excerpt"]["session_id"] == "sess-demo"
+        assert exc.details["active_operation"]["trace_id"] == "trace-2"
+        assert exc.details["daemon_state_excerpt"]["session_id"] == "sess-ready"
+        assert exc.details["daemon_state_excerpt"]["capture_file_id"] == "capf-ready"
+        assert exc.details["daemon_state_excerpt"]["active_event_id"] == 147
+        assert exc.details["daemon_state_excerpt"]["recovery_status"] == "ready"
     else:  # pragma: no cover
         raise AssertionError("expected DaemonRequestTimeout")

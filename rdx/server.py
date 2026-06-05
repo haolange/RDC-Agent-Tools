@@ -1,29 +1,15 @@
-"""RDX server helpers and daemon-backed MCP entrypoint."""
+"""RDX runtime dispatch helpers for the daemon-backed CLI."""
 
 from __future__ import annotations
 
-import inspect
-import json
-import logging
-import os
-import textwrap
-from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional, Sequence
-
-from mcp.server.fastmcp import FastMCP
-from mcp.server.transport_security import TransportSecuritySettings
+from typing import Any, Dict, Optional
 
 from rdx.core.artifact_publisher import ArtifactPublisher
 from rdx.core.contracts import canonical_error
 from rdx.core.errors import map_exception
 from rdx.core.engine import CoreEngine, ExecutionContext
-from rdx.daemon.client import daemon_request
-from rdx.io_utils import safe_json_text
 from rdx.progress import ProgressReporter, ProgressSink
-from rdx.runtime_catalog import load_tool_catalog
-from rdx.timeout_policy import daemon_exec_timeout_s
  
-_CATALOG_TOOLS = load_tool_catalog()
 _core_engine: Optional[CoreEngine] = None
 _PREVIEW_SELF_SYNCED_OPERATIONS = {
     "rd.capture.open_replay",
@@ -57,15 +43,6 @@ def _get_core_engine() -> CoreEngine:
             artifact_publisher=ArtifactPublisher(),
         )
     return _core_engine
-
-
-def _mcp_daemon_context() -> str:
-    return str(os.environ.get("RDX_CONTEXT_ID") or "default").strip() or "default"
-
-
-@asynccontextmanager
-async def _lifespan(_: FastMCP):
-    yield
 
 
 def get_core_engine() -> CoreEngine:
@@ -166,120 +143,5 @@ async def dispatch_operation(
         server_runtime._CURRENT_CONTEXT_ID.reset(context_token)
 
 
-async def _dispatch_tool(tool_name: str, args: Dict[str, Any]) -> str:
-    daemon_args = dict(args or {})
-    chosen_context = _runtime_module().normalize_context_id(daemon_args.get("context_id") or _mcp_daemon_context())
-    try:
-        response = daemon_request(
-            "exec",
-            params={
-                "operation": tool_name,
-                "args": daemon_args,
-                "transport": "mcp",
-                "remote": tool_name.startswith("rd.remote."),
-            },
-            timeout=daemon_exec_timeout_s(tool_name, daemon_args),
-            context=chosen_context,
-        )
-        payload = response.get("result")
-        if isinstance(payload, dict):
-            return safe_json_text(payload)
-        raise RuntimeError("daemon returned invalid MCP payload")
-    except Exception as exc:  # noqa: BLE001
-        payload = canonical_error(
-            result_kind=tool_name,
-            code=str(getattr(exc, "code", "") or "runtime_error"),
-            category=str(getattr(exc, "category", "") or "runtime"),
-            message=str(exc),
-            details=getattr(exc, "details", {}) if isinstance(getattr(exc, "details", {}), dict) else {},
-            transport="mcp",
-        )
-        return safe_json_text(payload)
-
-
-def _build_tool_callable(tool_name: str, param_names: Sequence[str]) -> Any:
-    unique = []
-    for name in param_names:
-        if isinstance(name, str) and name.isidentifier() and name not in unique:
-            unique.append(name)
-    signature = ", ".join(f"{name}: Any = None" for name in unique)
-    if signature:
-        src = textwrap.dedent(
-            f"""
-            async def _tool({signature}):
-                params = locals().copy()
-                return await _dispatch_tool({tool_name!r}, params)
-            """,
-        )
-    else:
-        src = textwrap.dedent(
-            f"""
-            async def _tool():
-                return await _dispatch_tool({tool_name!r}, {{}})
-            """,
-        )
-    namespace: Dict[str, Any] = {"Any": Any, "_dispatch_tool": _dispatch_tool}
-    exec(src, namespace)
-    fn = namespace["_tool"]
-    fn.__name__ = tool_name.replace(".", "_")
-    return fn
-
-
-def _create_mcp() -> FastMCP:
-    kwargs: Dict[str, Any] = {}
-    description = f"RenderDoc MCP tools ({len(_CATALOG_TOOLS)} doc tools)"
-    try:
-        params = set(inspect.signature(FastMCP.__init__).parameters)
-        if "description" in params:
-            kwargs["description"] = description
-        if "lifespan" in params:
-            kwargs["lifespan"] = _lifespan
-        if "host" in params:
-            kwargs["host"] = os.environ.get("RDX_SSE_HOST", "127.0.0.1")
-        if "port" in params:
-            kwargs["port"] = int(os.environ.get("RDX_SSE_PORT", "8765"))
-        if "transport_security" in params:
-            hosts = [h.strip() for h in os.environ.get("RDX_ALLOWED_HOSTS", "").split(",") if h.strip()]
-            origins = [o.strip() for o in os.environ.get("RDX_ALLOWED_ORIGINS", "").split(",") if o.strip()]
-            if hosts or origins:
-                kwargs["transport_security"] = TransportSecuritySettings(
-                    enable_dns_rebinding_protection=True,
-                    allowed_hosts=hosts,
-                    allowed_origins=origins,
-                )
-    except Exception:
-        kwargs["lifespan"] = _lifespan
-    return FastMCP("rdx-mcp", **kwargs)
-
-
-mcp = _create_mcp()
-for tool in _CATALOG_TOOLS:
-    name = str(tool["name"])
-    params = list(tool.get("param_names", []))
-    fn = _build_tool_callable(name, params)
-    fn.__doc__ = str(tool.get("description", ""))
-    mcp.tool(name=name)(fn)
-
-
 def main() -> None:
-    logging.basicConfig(
-        level=os.environ.get("RDX_LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
-    mcp.run(transport="stdio")
-
-
-def main_sse() -> None:
-    logging.basicConfig(
-        level=os.environ.get("RDX_LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
-    mcp.run(transport="sse")
-
-
-def main_streamable_http() -> None:
-    logging.basicConfig(
-        level=os.environ.get("RDX_LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    )
-    mcp.run(transport="streamable-http")
+    raise RuntimeError("rdx-tools no longer exposes an MCP server; use `rdx.bat --json doctor`, `bin/rdx --json doctor`, or `rdx.bat call <rd.*>`.")

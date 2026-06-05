@@ -162,12 +162,15 @@ def _check_session_tool_mentions(root: Path, issues: list[str], tool_names: set[
         return
     for rel in ("README.md", "docs/quickstart.md", "docs/session-model.md", "docs/agent-model.md", "docs/troubleshooting.md"):
         text = _read_text(root, rel)
-        if "rd.session.get_context" not in text:
-            issues.append(f"{rel}: missing required mention `rd.session.get_context`")
+        if "context status" not in text:
+            issues.append(f"{rel}: missing required canonical context command `context status`")
     for rel in ("docs/session-model.md", "docs/agent-model.md", "docs/quickstart.md"):
         text = _read_text(root, rel)
-        if "rd.session.update_context" not in text:
-            issues.append(f"{rel}: missing required mention `rd.session.update_context`")
+        if "context update" not in text:
+            issues.append(f"{rel}: missing required canonical context command `context update`")
+    tools_text = _read_text(root, "docs/tools.md")
+    if "rd.session.get_context" not in tools_text or "rd.session.update_context" not in tools_text:
+        issues.append("docs/tools.md: raw session context tools must remain documented in low-level reference")
 
 
 def _check_remote_consumed_semantics(root: Path, issues: list[str]) -> None:

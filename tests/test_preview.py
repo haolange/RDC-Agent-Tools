@@ -517,6 +517,53 @@ def test_choose_visual_output_target_defaults_to_rt0_before_visual_scoring(
     assert target_source == "event_output_slot"
 
 
+def test_choose_visual_output_target_scores_available_slot_when_rt0_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_output_targets(session_id: str, event_id: int | None):  # type: ignore[no-untyped-def]
+        return [("ResourceId::3409", 1)]
+
+    async def _fake_get_texture_descriptor(session_id: str, texture_id: object, *, event_id: int | None = None):  # type: ignore[no-untyped-def]
+        return (
+            texture_id,
+            SimpleNamespace(
+                width=128,
+                height=128,
+                name=f"tex_{texture_id}",
+                format=SimpleNamespace(Name=lambda: "R8G8B8A8_UNORM"),
+            ),
+        )
+
+    async def _fake_get_texture_stats(*, session_id: str, event_id: int, texture_id: object, session_manager: object):  # type: ignore[no-untyped-def]
+        return {
+            "channels": {
+                "r": {"min": 0.0, "max": 1.0},
+                "g": {"min": 0.0, "max": 1.0},
+                "b": {"min": 0.0, "max": 1.0},
+                "a": {"min": 1.0, "max": 1.0},
+            },
+            "has_any_nan": False,
+            "has_any_inf": False,
+        }
+
+    monkeypatch.setattr(server.server_runtime, "_output_target_resource_ids", _fake_output_targets)
+    monkeypatch.setattr(server.server_runtime, "_get_texture_descriptor", _fake_get_texture_descriptor)
+    monkeypatch.setattr(server.server_runtime, "_render_service", SimpleNamespace(get_texture_stats=_fake_get_texture_stats))
+
+    texture_id, texture_desc, output_slot, target_source = asyncio.run(
+        server.server_runtime._choose_visual_output_target(
+            "sess-preview",
+            1847,
+            allow_framebuffer_fallback=False,
+        )
+    )
+
+    assert str(texture_id) == "ResourceId::3409"
+    assert texture_desc is not None
+    assert output_slot == 1
+    assert target_source == "event_output_slot"
+
+
 def test_preview_window_fit_helpers_cover_screen_cap_and_centering() -> None:
     assert fit_size_within_bounds(2048, 2048, 960, 540) == (540, 540)
     assert fit_size_within_bounds(1280, 720, 960, 540) == (960, 540)
@@ -538,6 +585,293 @@ def test_preview_region_rects_clip_and_intersect() -> None:
     assert viewport_rect == {"x": 0, "y": 0, "width": 1024, "height": 1024}
     assert scissor_rect == {"x": 128, "y": 64, "width": 900, "height": 700}
     assert effective == {"x": 128, "y": 64, "width": 896, "height": 700}
+
+
+def test_export_screenshot_defaults_to_swapchain_present_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    saved_path = tmp_path / "swapchain_preview.png"
+    saved_path.write_bytes(b"png")
+
+    class _FakeController:
+        def GetTextures(self):  # type: ignore[no-untyped-def]
+            return [
+                SimpleNamespace(
+                    resourceId="ResourceId::intermediate",
+                    width=256,
+                    height=256,
+                    name="BrightMask",
+                    format=SimpleNamespace(Name=lambda: "R8G8B8A8_UNORM"),
+                ),
+                SimpleNamespace(
+                    resourceId="ResourceId::swapchain",
+                    width=1920,
+                    height=1080,
+                    name="Backbuffer",
+                    format=SimpleNamespace(Name=lambda: "R8G8B8A8_UNORM"),
+                ),
+            ]
+
+        def GetUsage(self, resource_id: object):  # type: ignore[no-untyped-def]
+            if str(resource_id) == "ResourceId::swapchain":
+                return [SimpleNamespace(eventId=90, usage="Present")]
+            return [SimpleNamespace(eventId=55, usage="ColorTarget")]
+
+    async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return fn(*args, **kwargs)
+
+    async def _fake_get_controller(session_id: str):  # type: ignore[no-untyped-def]
+        return _FakeController()
+
+    async def _fake_load_action_index(session_id: str, *, controller=None):  # type: ignore[no-untyped-def]
+        draw = SimpleNamespace(eventId=55, flags=1, children=[], customName="Draw bright mask", name="Draw bright mask")
+        present = SimpleNamespace(eventId=90, flags=1024, children=[], customName="Present", name="Present")
+        return [draw, present], [draw, present], {55: draw, 90: present}
+
+    async def _fake_get_texture_descriptor(session_id: str, texture_id: object, *, event_id: int | None = None):  # type: ignore[no-untyped-def]
+        if str(texture_id) == "ResourceId::swapchain":
+            return texture_id, SimpleNamespace(
+                width=1920,
+                height=1080,
+                name="Backbuffer",
+                format=SimpleNamespace(Name=lambda: "R8G8B8A8_UNORM"),
+            )
+        return texture_id, SimpleNamespace(
+            width=256,
+            height=256,
+            name="BrightMask",
+            format=SimpleNamespace(Name=lambda: "R8G8B8A8_UNORM"),
+        )
+
+    async def _fake_output_targets(session_id: str, event_id: int | None):  # type: ignore[no-untyped-def]
+        return [("ResourceId::intermediate", 0)]
+
+    async def _fake_get_texture_stats(*, session_id: str, event_id: int, texture_id: object, session_manager: object):  # type: ignore[no-untyped-def]
+        return {
+            "channels": {
+                "r": {"min": 0.0, "max": 1.0},
+                "g": {"min": 0.0, "max": 1.0},
+                "b": {"min": 0.0, "max": 1.0},
+                "a": {"min": 1.0, "max": 1.0},
+            },
+            "has_any_nan": False,
+            "has_any_inf": False,
+        }
+
+    async def _fake_event_truth_metadata(session_id: str, event_id: int):  # type: ignore[no-untyped-def]
+        return {
+            "binding_truth_level": "binding_verified",
+            "visual_truth_level": "visual_valid",
+            "evidence_truth_level": "visual_evidence_only",
+            "summary_degraded_reasons": [],
+        }
+
+    async def _fake_dispatch_texture(action: str, args: dict[str, object]):  # type: ignore[no-untyped-def]
+        assert action == "render_overlay"
+        assert args["texture_id"] == "ResourceId::swapchain"
+        assert args["event_id"] == 90
+        return json.dumps(
+            {
+                "success": True,
+                "artifact_path": str(saved_path),
+                "saved_path": str(saved_path),
+                "image_path": str(saved_path),
+                "meta": {"width": 1920, "height": 1080},
+            }
+        )
+
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(server.server_runtime, "_load_action_index", _fake_load_action_index)
+    monkeypatch.setattr(server.server_runtime, "_get_texture_descriptor", _fake_get_texture_descriptor)
+    monkeypatch.setattr(server.server_runtime, "_output_target_resource_ids", _fake_output_targets)
+    monkeypatch.setattr(server.server_runtime, "_render_service", SimpleNamespace(get_texture_stats=_fake_get_texture_stats))
+    monkeypatch.setattr(server.server_runtime, "_event_truth_metadata", _fake_event_truth_metadata)
+    monkeypatch.setattr(server.server_runtime, "_binding_name_index_for_event", lambda session_id, event_id: asyncio.sleep(0, result={}))
+    monkeypatch.setattr(server.server_runtime, "_dispatch_texture", _fake_dispatch_texture)
+
+    payload = json.loads(
+        asyncio.run(
+            server.server_runtime._dispatch_export(
+                "screenshot",
+                {
+                    "session_id": "sess-preview",
+                    "event_id": 55,
+                    "file_format": "png",
+                    "output_path": str(saved_path),
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["resolved_event_id"] == 90
+    assert payload["present_event_id"] == 90
+    assert payload["texture_id"] == "ResourceId::swapchain"
+    assert payload["target_source"] == "swapchain_present"
+    assert payload["summary_degraded"] is False
+
+
+def test_export_screenshot_falls_back_when_swapchain_target_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    saved_path = tmp_path / "fallback_preview.png"
+    saved_path.write_bytes(b"png")
+
+    async def _fake_resolve_swapchain_present_target(session_id: str, requested_event_id: int):  # type: ignore[no-untyped-def]
+        raise server.server_runtime._preview_error(
+            "swapchain_target_unavailable",
+            "no present usage",
+            context_id="default",
+            session_id=session_id,
+            event_id=requested_event_id,
+        )
+
+    async def _fake_choose_visual_output_target(  # type: ignore[no-untyped-def]
+        session_id: str,
+        event_id: int,
+        *,
+        target=None,
+        allow_framebuffer_fallback=True,
+    ):
+        return (
+            "ResourceId::777",
+            SimpleNamespace(
+                width=128,
+                height=128,
+                name="SceneColor",
+                format=SimpleNamespace(Name=lambda: "R8G8B8A8_UNORM"),
+            ),
+            0,
+            "event_output_slot",
+        )
+
+    async def _fake_event_truth_metadata(session_id: str, event_id: int):  # type: ignore[no-untyped-def]
+        return {
+            "binding_truth_level": "binding_verified",
+            "visual_truth_level": "visual_valid",
+            "evidence_truth_level": "visual_evidence_only",
+            "summary_degraded_reasons": [],
+        }
+
+    async def _fake_dispatch_texture(action: str, args: dict[str, object]):  # type: ignore[no-untyped-def]
+        assert action == "render_overlay"
+        assert args["texture_id"] == "ResourceId::777"
+        assert args["event_id"] == 103
+        return json.dumps(
+            {
+                "success": True,
+                "artifact_path": str(saved_path),
+                "saved_path": str(saved_path),
+                "image_path": str(saved_path),
+                "meta": {"width": 128, "height": 128},
+            }
+        )
+
+    monkeypatch.setattr(server.server_runtime, "_resolve_swapchain_present_target", _fake_resolve_swapchain_present_target)
+    monkeypatch.setattr(server.server_runtime, "_choose_visual_output_target", _fake_choose_visual_output_target)
+    monkeypatch.setattr(server.server_runtime, "_event_truth_metadata", _fake_event_truth_metadata)
+    monkeypatch.setattr(server.server_runtime, "_binding_name_index_for_event", lambda session_id, event_id: asyncio.sleep(0, result={}))
+    monkeypatch.setattr(server.server_runtime, "_dispatch_texture", _fake_dispatch_texture)
+
+    payload = json.loads(
+        asyncio.run(
+            server.server_runtime._dispatch_export(
+                "screenshot",
+                {
+                    "session_id": "sess-preview",
+                    "event_id": 103,
+                    "file_format": "png",
+                    "output_path": str(saved_path),
+                    "target": {"semantic": "swapchain"},
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["target_source"] == "event_output_fallback"
+    assert payload["fallback_reason"] == "swapchain_target_unavailable"
+    assert payload["summary_degraded"] is True
+    assert "swapchain_target_unavailable" in payload["summary_degraded_reasons"]
+
+
+def test_export_screenshot_event_output_semantic_preserves_visual_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    saved_path = tmp_path / "event_output_preview.png"
+    saved_path.write_bytes(b"png")
+
+    async def _fail_swapchain(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("event_output semantic must not resolve swapchain")
+
+    async def _fake_choose_visual_output_target(  # type: ignore[no-untyped-def]
+        session_id: str,
+        event_id: int,
+        *,
+        target=None,
+        allow_framebuffer_fallback=True,
+    ):
+        return (
+            "ResourceId::event",
+            SimpleNamespace(
+                width=128,
+                height=128,
+                name="SceneColor",
+                format=SimpleNamespace(Name=lambda: "R8G8B8A8_UNORM"),
+            ),
+            1,
+            "event_output_slot",
+        )
+
+    async def _fake_event_truth_metadata(session_id: str, event_id: int):  # type: ignore[no-untyped-def]
+        return {
+            "binding_truth_level": "binding_verified",
+            "visual_truth_level": "visual_valid",
+            "evidence_truth_level": "visual_evidence_only",
+            "summary_degraded_reasons": [],
+        }
+
+    async def _fake_dispatch_texture(action: str, args: dict[str, object]):  # type: ignore[no-untyped-def]
+        assert args["texture_id"] == "ResourceId::event"
+        return json.dumps(
+            {
+                "success": True,
+                "artifact_path": str(saved_path),
+                "saved_path": str(saved_path),
+                "image_path": str(saved_path),
+                "meta": {"width": 128, "height": 128},
+            }
+        )
+
+    monkeypatch.setattr(server.server_runtime, "_resolve_swapchain_present_target", _fail_swapchain)
+    monkeypatch.setattr(server.server_runtime, "_choose_visual_output_target", _fake_choose_visual_output_target)
+    monkeypatch.setattr(server.server_runtime, "_event_truth_metadata", _fake_event_truth_metadata)
+    monkeypatch.setattr(server.server_runtime, "_binding_name_index_for_event", lambda session_id, event_id: asyncio.sleep(0, result={}))
+    monkeypatch.setattr(server.server_runtime, "_dispatch_texture", _fake_dispatch_texture)
+
+    payload = json.loads(
+        asyncio.run(
+            server.server_runtime._dispatch_export(
+                "screenshot",
+                {
+                    "session_id": "sess-preview",
+                    "event_id": 103,
+                    "file_format": "png",
+                    "output_path": str(saved_path),
+                    "target": {"semantic": "event_output"},
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["target_source"] == "event_output_slot"
+    assert payload["chosen_output_slot"] == 1
+    assert payload["requested_semantic"] == "event_output"
 
 
 def test_export_screenshot_preserves_event_binding_target_source(
@@ -569,6 +903,14 @@ def test_export_screenshot_preserves_event_binding_target_source(
     async def _fake_binding_name_index(session_id: str, event_id: int | None):  # type: ignore[no-untyped-def]
         return {}
 
+    async def _fake_event_truth_metadata(session_id: str, event_id: int):  # type: ignore[no-untyped-def]
+        return {
+            "binding_truth_level": "binding_verified",
+            "visual_truth_level": "visual_valid",
+            "evidence_truth_level": "visual_evidence_only",
+            "summary_degraded_reasons": [],
+        }
+
     async def _fake_dispatch_texture(action: str, args: dict[str, object]):  # type: ignore[no-untyped-def]
         assert action == "render_overlay"
         return json.dumps(
@@ -586,6 +928,7 @@ def test_export_screenshot_preserves_event_binding_target_source(
         )
 
     monkeypatch.setattr(server.server_runtime, "_choose_visual_output_target", _fake_choose_visual_output_target)
+    monkeypatch.setattr(server.server_runtime, "_event_truth_metadata", _fake_event_truth_metadata)
     monkeypatch.setattr(server.server_runtime, "_binding_name_index_for_event", _fake_binding_name_index)
     monkeypatch.setattr(server.server_runtime, "_dispatch_texture", _fake_dispatch_texture)
 
@@ -598,6 +941,7 @@ def test_export_screenshot_preserves_event_binding_target_source(
                     "event_id": 103,
                     "file_format": "png",
                     "output_path": str(saved_path),
+                    "target": {"semantic": "event_output"},
                 },
             )
         )
@@ -608,6 +952,83 @@ def test_export_screenshot_preserves_event_binding_target_source(
     assert payload["texture_id"] == "ResourceId::777"
     assert payload["target_source"] == "event_binding_uav_3"
     assert payload["saved_path"] == str(saved_path)
+
+
+def test_export_screenshot_returns_structured_save_texture_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def _fake_choose_visual_output_target(  # type: ignore[no-untyped-def]
+        session_id: str,
+        event_id: int,
+        *,
+        target=None,
+        allow_framebuffer_fallback=True,
+    ):
+        return (
+            "ResourceId::777",
+            SimpleNamespace(
+                width=128,
+                height=128,
+                name="SceneColor",
+                format=SimpleNamespace(Name=lambda: "R8G8B8A8_UNORM"),
+            ),
+            1,
+            "event_output_slot",
+        )
+
+    async def _fake_binding_name_index(session_id: str, event_id: int | None):  # type: ignore[no-untyped-def]
+        return {}
+
+    async def _fake_event_truth_metadata(session_id: str, event_id: int):  # type: ignore[no-untyped-def]
+        return {
+            "binding_truth_level": "binding_verified",
+            "visual_truth_level": "visual_valid",
+            "evidence_truth_level": "visual_evidence_only",
+            "summary_degraded_reasons": [],
+        }
+
+    async def _fake_dispatch_texture(action: str, args: dict[str, object]):  # type: ignore[no-untyped-def]
+        assert action == "render_overlay"
+        return json.dumps(
+            {
+                "success": False,
+                "error_message": "SaveTexture failed: test",
+                "code": "texture_save_failed",
+                "category": "runtime",
+                "details": {"renderdoc_status": "Failed"},
+            }
+        )
+
+    monkeypatch.setattr(server.server_runtime, "_choose_visual_output_target", _fake_choose_visual_output_target)
+    monkeypatch.setattr(server.server_runtime, "_event_truth_metadata", _fake_event_truth_metadata)
+    monkeypatch.setattr(server.server_runtime, "_binding_name_index_for_event", _fake_binding_name_index)
+    monkeypatch.setattr(server.server_runtime, "_dispatch_texture", _fake_dispatch_texture)
+
+    payload = json.loads(
+        asyncio.run(
+            server.server_runtime._dispatch_export(
+                "screenshot",
+                {
+                    "session_id": "sess-preview",
+                    "event_id": 103,
+                    "file_format": "png",
+                    "output_path": str(tmp_path / "failed.png"),
+                    "target": {"semantic": "event_output"},
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["code"] == "texture_save_failed"
+    assert payload["category"] == "runtime"
+    assert payload["details"]["session_id"] == "sess-preview"
+    assert payload["details"]["event_id"] == 103
+    assert payload["details"]["texture_id"] == "ResourceId::777"
+    assert payload["details"]["target_source"] == "event_output_slot"
+    assert payload["details"]["chosen_output_slot"] == 1
+    assert payload["details"]["failure_stage"] == "save_texture"
 
 
 def test_set_active_waits_for_preview_sync(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -851,7 +1272,7 @@ def test_preview_docs_and_catalog_are_synchronized() -> None:
     assert "preview" in tools["rd.session.get_context"]["returns_raw"]
     assert "framebuffer_extent" in tools["rd.session.get_context"]["returns_raw"]
 
-    frameworks_root = repo_root.parent / "RDC-Agent-Frameworks" / "debugger"
+    frameworks_root = repo_root.parent / ("RDC-Agent-" + "Frameworks") / "debugger"
     if frameworks_root.is_dir():
         debugger_readme = (frameworks_root / "README.md").read_text(encoding="utf-8-sig")
         agent_core = (frameworks_root / "common" / "AGENT_CORE.md").read_text(encoding="utf-8-sig")

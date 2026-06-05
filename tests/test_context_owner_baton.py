@@ -220,10 +220,9 @@ def test_runtime_mode_truth_declares_runtime_ceiling_only() -> None:
     payload = json.loads((Path(__file__).resolve().parents[1] / "spec" / "runtime_mode_truth.json").read_text(encoding="utf-8"))
     modes = payload["modes"]
     assert modes["local_cli"]["runtime_parallelism_ceiling"] == "multi_context_multi_owner"
-    assert modes["local_mcp"]["runtime_parallelism_ceiling"] == "multi_context_multi_owner"
-    assert modes["remote_daemon"]["runtime_parallelism_ceiling"] == "single_runtime_owner"
-    assert modes["remote_mcp"]["runtime_parallelism_ceiling"] == "single_runtime_owner"
-    assert modes["remote_mcp"]["host_coordination_gate"] == "frameworks_platform_matrix_applies"
+    assert modes["remote_cli"]["runtime_parallelism_ceiling"] == "single_runtime_owner"
+    assert modes["remote_cli"]["host_coordination_gate"] == "frameworks_platform_matrix_applies"
+    assert {mode["entry_mode"] for mode in modes.values()} == {"cli"}
 
 
 def test_docs_and_catalog_distinguish_runtime_ceiling_from_platform_coordination() -> None:

@@ -5,8 +5,6 @@ from __future__ import annotations
 import importlib.util
 
 REQUIRED_DEPENDENCIES: list[tuple[str, str]] = [
-    ("mcp", "mcp.server.fastmcp"),
-    ("mcp", "mcp.server.transport_security"),
     ("pydantic", "pydantic"),
     ("numpy", "numpy"),
     ("Pillow", "PIL"),
@@ -31,6 +29,8 @@ EXCLUDED_BUNDLED_SITE_PACKAGE_PREFIXES: tuple[str, ...] = (
     "pygments-",
     "pip",
     "pip-",
+    "mcp",
+    "mcp-",
     "pyarrow",
     "setuptools",
     "setuptools-",

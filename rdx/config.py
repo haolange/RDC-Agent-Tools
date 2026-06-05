@@ -1,5 +1,5 @@
 """
-RDX-MCP 配置。
+rdx-tools 配置。
 """
 
 from __future__ import annotations

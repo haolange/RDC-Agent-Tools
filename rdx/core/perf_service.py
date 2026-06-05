@@ -1,7 +1,7 @@
-"""RDX-MCP 的 performance counter 采样 service。
+"""rdx-tools 的 performance counter 采样 service。
 
 将 RenderDoc 的 GPU performance counter APIs（枚举、描述、抓取、分析）
-封装为适用于 MCP tool handlers 的 async 接口。
+封装为适用于 CLI/runtime handlers 的 async 接口。
 
 ``renderdoc`` module 采用延迟导入，使其余包可在无该 module 时加载与测试。
 

@@ -77,7 +77,7 @@ def test_catalog_boundaries_remove_legacy_surfaces_and_expand_export_params() ->
 def test_required_directories_exist() -> None:
     required = [
         ROOT / "rdx",
-        ROOT / "mcp",
+        ROOT / "bin",
         ROOT / "cli",
         ROOT / "spec",
         ROOT / "policy",
@@ -94,6 +94,7 @@ def test_required_directories_exist() -> None:
     ]
     for p in required:
         assert p.is_dir(), str(p)
+    assert (ROOT / "bin" / "rdx").is_file()
 
 
 def test_runtime_manifest_declares_bundled_python_and_worker_materialize_flags() -> None:

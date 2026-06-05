@@ -215,12 +215,42 @@ def _bundle_python_runtime(root: Path, out_root: Path, python_home_raw: str, sit
     }
 
 
+def _existing_bundled_python_metadata(out_root: Path) -> dict[str, str]:
+    python_dir = out_root / "python"
+    python_exe = python_dir / "python.exe"
+    if not python_exe.is_file():
+        return {}
+    try:
+        python_version = _probe_python_version(python_dir)
+        tag = _python_tag(python_version)
+    except RuntimeError:
+        return {}
+    metadata = {
+        "python_version": python_version,
+        "python_entry": "python/python.exe",
+        "pythonw_entry": "python/pythonw.exe",
+        "python3_dll": "python/python3.dll",
+        "python_dll": f"python/python{tag}.dll",
+        "stdlib_layout": "python/Lib",
+        "site_packages": "python/Lib/site-packages",
+        "dll_dir": "python/DLLs",
+        "pth_file": f"python/python{tag}._pth",
+    }
+    required = ("python_entry", "python_dll", "stdlib_layout", "site_packages", "pth_file")
+    for key in required:
+        if not (out_root / metadata[key]).exists():
+            return {}
+    return metadata
+
+
 def _iter_manifest_files(out_root: Path) -> Iterable[tuple[Path, bool]]:
     for path in sorted(out_root.rglob("*")):
         if not path.is_file():
             continue
         rel = path.relative_to(out_root).as_posix()
         if rel == "manifest.runtime.json":
+            continue
+        if "__pycache__/" in rel or path.suffix.lower() == ".pyc":
             continue
         if path.suffix.lower() in DENY_SUFFIXES:
             continue
@@ -300,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeError as exc:
             print(f"[pack] {exc}")
             return 1
+    else:
+        bundled_python = _existing_bundled_python_metadata(out_root)
 
     manifest_entries = [
         _manifest_entry(path, out_root, worker_materialize=worker_materialize)

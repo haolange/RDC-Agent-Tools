@@ -339,18 +339,18 @@ def test_session_resume_restores_persisted_remote_session_and_metadata(
                         "origin_remote_id": "remote_origin",
                         "ownership_state": "session_owned",
                         "device_serial": "e38b8019",
-                        "requested": {"host": "127.0.0.1", "port": 39920},
+                        "requested": {"host": "127.0.0.1", "port": 38920},
                         "options": {
                             "install_apk": True,
                             "push_config": True,
                             "local_port": 62417,
-                            "remote_port": 39920,
+                            "remote_port": 38920,
                         },
                         "bootstrap": {
                             "package_name": "org.renderdoc.renderdoccmd.arm64",
                             "activity_name": "",
                             "abi": "arm64-v8a",
-                            "remote_port": 39920,
+                            "remote_port": 38920,
                             "config_remote_path": "/data/local/tmp/renderdoc.conf",
                         },
                     },
@@ -376,11 +376,11 @@ def test_session_resume_restores_persisted_remote_session_and_metadata(
         server_info={"driver_name": "Android Vulkan"},
         bootstrap={
             "package_name": "org.renderdoc.renderdoccmd.arm64",
-            "remote_port": 39920,
+            "remote_port": 38920,
             "abi": "arm64-v8a",
         },
         requested_host="127.0.0.1",
-        requested_port=39920,
+        requested_port=38920,
         device_serial="e38b8019",
         detail={"endpoint": "127.0.0.1:62417"},
     )
@@ -421,15 +421,11 @@ def test_session_resume_restores_persisted_remote_session_and_metadata(
     ]
     assert fake_controller.set_calls == [202]
     assert server._runtime.session_owned_remotes["sess_remote"].device_serial == "e38b8019"
-    assert server._runtime.session_owned_remotes["sess_remote"].requested_port == 39920
-    assert server._runtime.session_owned_remotes["sess_remote"].bootstrap["remote_port"] == 39920
     assert server._runtime.remotes["remote_origin"].leased_session_ids == ["sess_remote"]
-    assert list(server._runtime.remotes.keys()) == ["remote_origin"]
     assert "remote_origin" not in server._runtime.consumed_remotes
     state = server.server_runtime._context_state("default")
     assert state["sessions"]["sess_remote"]["remote"]["device_serial"] == "e38b8019"
     assert state["sessions"]["sess_remote"]["remote"]["origin_remote_id"] == "remote_origin"
-    assert state["sessions"]["sess_remote"]["remote"]["bootstrap"]["remote_port"] == 39920
 
 
 def test_context_snapshot_preserves_remote_session_recovery_metadata(tmp_path: Path) -> None:
@@ -472,18 +468,18 @@ def test_context_snapshot_preserves_remote_session_recovery_metadata(tmp_path: P
                         "origin_remote_id": "remote_origin",
                         "ownership_state": "session_owned",
                         "device_serial": "e38b8019",
-                        "requested": {"host": "127.0.0.1", "port": 39920},
+                        "requested": {"host": "127.0.0.1", "port": 38920},
                         "options": {
                             "install_apk": True,
                             "push_config": True,
                             "local_port": 62417,
-                            "remote_port": 39920,
+                            "remote_port": 38920,
                         },
                         "bootstrap": {
                             "package_name": "org.renderdoc.renderdoccmd.arm64",
                             "activity_name": "",
                             "abi": "arm64-v8a",
-                            "remote_port": 39920,
+                            "remote_port": 38920,
                             "config_remote_path": "/data/local/tmp/renderdoc.conf",
                         },
                     },

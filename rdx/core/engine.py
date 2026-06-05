@@ -1,4 +1,4 @@
-"""Unified execution engine shared by MCP, CLI, and daemon."""
+"""Unified execution engine shared by CLI and daemon."""
 
 from __future__ import annotations
 

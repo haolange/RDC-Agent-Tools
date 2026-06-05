@@ -1,5 +1,5 @@
 """
-RDX-MCP 的内容寻址 artifact 存储（CAS）。
+rdx-tools 的内容寻址 artifact 存储（CAS）。
 
 使用 SHA256 hash 作为 key 存储文件（images、shader dumps、readback data 等），
 磁盘布局类似 git object storage：

@@ -8,10 +8,12 @@ from rdx.timeout_policy import (
     DAEMON_RESPONSE_BUFFER_S,
     DEFAULT_DAEMON_REQUEST_TIMEOUT_S,
     HEAVY_DAEMON_REQUEST_TIMEOUT_S,
+    LOCAL_OPEN_FILE_TIMEOUT_S,
     LOCAL_OPEN_REPLAY_TIMEOUT_S,
     REMOTE_CONNECT_DAEMON_BUFFER_S,
     REMOTE_CONNECT_DEFAULT_TIMEOUT_MS,
     REMOTE_OPEN_REPLAY_TIMEOUT_S,
+    SESSION_CONTEXT_TIMEOUT_S,
     daemon_exec_timeout_s,
     worker_exec_timeout_s,
 )
@@ -58,6 +60,19 @@ def test_daemon_exec_timeout_uses_medium_window_for_local_open_replay() -> None:
     assert timeout_s == LOCAL_OPEN_REPLAY_TIMEOUT_S + DAEMON_RESPONSE_BUFFER_S
 
 
+def test_daemon_exec_timeout_uses_open_file_window() -> None:
+    assert daemon_exec_timeout_s("rd.capture.open_file", {"file_path": "demo.rdc"}) == (
+        LOCAL_OPEN_FILE_TIMEOUT_S + DAEMON_RESPONSE_BUFFER_S
+    )
+    assert worker_exec_timeout_s("rd.capture.open_file", {"file_path": "demo.rdc"}) == LOCAL_OPEN_FILE_TIMEOUT_S
+
+
+def test_daemon_exec_timeout_uses_session_context_window() -> None:
+    assert daemon_exec_timeout_s("rd.session.get_context", {}) == (
+        SESSION_CONTEXT_TIMEOUT_S + DAEMON_RESPONSE_BUFFER_S
+    )
+
+
 def test_worker_exec_timeout_uses_operation_window_without_transport_buffer() -> None:
     assert worker_exec_timeout_s("rd.event.get_actions", {"session_id": "sess_demo"}) == HEAVY_DAEMON_REQUEST_TIMEOUT_S
     assert worker_exec_timeout_s("rd.core.get_version", {}) == DEFAULT_DAEMON_REQUEST_TIMEOUT_S
@@ -74,6 +89,7 @@ def test_cli_daemon_exec_passes_policy_timeout(monkeypatch) -> None:
         return {"ok": True, "result": {"ok": True}}
 
     monkeypatch.setattr(cli, "daemon_request", _fake_daemon_request)
+    monkeypatch.setattr(cli, "_ensure_daemon_state", lambda context: {"context_id": context})
 
     payload = cli._daemon_exec(
         "rd.remote.connect",
@@ -85,27 +101,6 @@ def test_cli_daemon_exec_passes_policy_timeout(monkeypatch) -> None:
     assert captured["method"] == "exec"
     assert captured["timeout"] == 120 + REMOTE_CONNECT_DAEMON_BUFFER_S
     assert captured["context"] == "ctx-demo"
-
-
-def test_server_dispatch_tool_uses_policy_timeout_for_daemon_backed_mcp(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    def _fake_daemon_request(method: str, *, params=None, timeout=0.0, state=None, context="default"):
-        captured["method"] = method
-        captured["params"] = params
-        captured["timeout"] = timeout
-        captured["context"] = context
-        return {"ok": True, "result": {"ok": True, "data": {"remote_id": "remote_demo"}}}
-
-    monkeypatch.setattr(server, "daemon_request", _fake_daemon_request)
-    monkeypatch.setattr(server, "_mcp_daemon_context", lambda: "mcp-ctx")
-
-    payload = json.loads(asyncio.run(server._dispatch_tool("rd.remote.connect", {"host": "127.0.0.1"})))
-
-    assert payload["ok"] is True
-    assert captured["method"] == "exec"
-    assert captured["timeout"] == 200 + REMOTE_CONNECT_DAEMON_BUFFER_S
-    assert captured["context"] == "mcp-ctx"
 
 
 def test_dispatch_remote_connect_uses_default_timeout_when_missing(monkeypatch) -> None:

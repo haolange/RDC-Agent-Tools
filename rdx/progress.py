@@ -1,4 +1,4 @@
-"""Structured progress reporting shared by daemon, MCP, and runtime handlers."""
+"""Structured progress reporting shared by daemon and runtime handlers."""
 
 from __future__ import annotations
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -184,7 +183,6 @@ def _install_common_env(monkeypatch: pytest.MonkeyPatch, controller: _FakeContro
     fake_rd = SimpleNamespace(
         ActionFlags=_FakeActionFlags,
         ShaderStage=_FakeShaderStage,
-        ResourceId=lambda: "ResourceId::0",
     )
     monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
     monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
@@ -501,49 +499,6 @@ def test_pipeline_get_shader_returns_runtime_error_when_stage_is_unbound(monkeyp
     assert payload["details"]["stage"] == "PS"
 
 
-def test_texture_inference_does_not_fallback_to_first_capture_texture(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _OutputlessPipe(_FakePipe):
-        def GetOutputTargets(self) -> list[object]:
-            return []
-
-    class _OutputlessController(_FakeController):
-        def GetPipelineState(self) -> _OutputlessPipe:
-            return _OutputlessPipe(self.current_event)
-
-    controller = _OutputlessController(
-        roots=[
-            _FakeAction(101, flags=_FakeActionFlags.Drawcall, outputs=[]),
-        ],
-        resources=[
-            SimpleNamespace(resourceId="ResourceId::first", name="first_texture"),
-        ],
-    )
-    _install_common_env(monkeypatch, controller)
-    _seed_capture()
-    _seed_session(101)
-
-    with pytest.raises(ValueError, match="No event-bound output render target"):
-        asyncio.run(
-            server.server_runtime._resolve_texture_id(
-                "sess_demo",
-                None,
-                event_id=101,
-            )
-        )
-
-
-def test_exported_image_truth_stats_detects_all_zero_png(tmp_path: Path) -> None:
-    Image = pytest.importorskip("PIL.Image")
-    image_path = tmp_path / "black.png"
-    Image.new("RGBA", (4, 3), (0, 0, 0, 0)).save(image_path)
-
-    stats = server.server_runtime._exported_image_truth_stats(image_path)
-
-    assert stats["inspectable"] is True
-    assert stats["all_zero"] is True
-    assert stats["size"] == [4, 3]
-
-
 def test_resource_usage_and_history_expose_canonical_and_raw_event_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = _FakeController(
         roots=[
@@ -607,6 +562,20 @@ def test_capture_close_file_rejects_unknown_handle() -> None:
     payload = json.loads(asyncio.run(server._dispatch_capture("close_file", {"capture_file_id": "capf_missing"})))
     assert payload["success"] is False
     assert payload["error_message"] == "Unknown capture_file_id: capf_missing"
+
+
+def test_capture_get_thumbnail_returns_unavailable_error() -> None:
+    _seed_capture()
+
+    payload = json.loads(
+        asyncio.run(server._dispatch_capture("get_thumbnail", {"capture_file_id": "capf_demo", "max_size_px": 640}))
+    )
+
+    assert payload["success"] is False
+    assert payload["code"] == "thumbnail_unavailable"
+    assert payload["category"] == "runtime"
+    assert payload["details"]["capture_file_id"] == "capf_demo"
+    assert payload["details"]["max_size_px"] == 640
 
 
 
@@ -747,9 +716,18 @@ def test_export_screenshot_forwards_requested_event(monkeypatch: pytest.MonkeyPa
             }
         )
 
+    async def _fake_event_truth_metadata(session_id: str, event_id: int) -> dict[str, object]:
+        return {
+            "binding_truth_level": "binding_verified",
+            "visual_truth_level": "visual_valid",
+            "evidence_truth_level": "visual_evidence_only",
+            "summary_degraded_reasons": [],
+        }
+
     monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
     monkeypatch.setattr(server.server_runtime, "_output_target_resource_ids", _fake_output_target_resource_ids)
     monkeypatch.setattr(server.server_runtime, "_get_texture_descriptor", _fake_get_texture_descriptor)
+    monkeypatch.setattr(server.server_runtime, "_event_truth_metadata", _fake_event_truth_metadata)
     monkeypatch.setattr(server.server_runtime, "_binding_name_index_for_event", lambda session_id, event_id: asyncio.sleep(0, result={}))
     monkeypatch.setattr(server.server_runtime, "_dispatch_texture", _fake_dispatch_texture)
     monkeypatch.setattr(server.server_runtime, "_recommend_formats_for_texture", lambda texture_desc, name_info, for_screenshot=False: ["png"])

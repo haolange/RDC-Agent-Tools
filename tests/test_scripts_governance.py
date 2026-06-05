@@ -9,19 +9,13 @@ SUPPORTED_SCRIPTS = (
     "scripts/README.md",
     "scripts/check_markdown_health.py",
     "scripts/cleanup_workspace.py",
-    "scripts/generate_release_checksums.py",
+    "scripts/package_release.py",
     "scripts/package_runtime.py",
-    "scripts/preview_geometry_smoke.py",
-    "scripts/rdx_bat_command_smoke.py",
+    "scripts/rdx_install.ps1",
     "scripts/rdx_bat_launcher.ps1",
     "scripts/release_gate.py",
-    "scripts/smoke_report_aggregator.py",
-    "scripts/tool_contract_check.py",
-    "scripts/tool_contract_remote_smoke.py",
-)
-
-INTERNAL_SCRIPT_HELPERS = (
-    "scripts/_shared.py",
+    "scripts/smoke_cli.sh",
+    "scripts/verify_release_package.py",
 )
 
 DELETED_ENTRIES = (
@@ -29,8 +23,6 @@ DELETED_ENTRIES = (
     "scripts/build_offline_replay_detailed_report.py",
     "scripts/native_smoke.py",
     "scripts/run_smoke_196_dual_sample.py",
-    "whitehair_remote_regression.py",
-    "whitehair_pybind_probe.py",
     "scripts/arg_test.ps1",
     "docs/whitehair-android-remote-retrospective.md",
 )
@@ -43,7 +35,6 @@ FORMAL_REFERENCES = (
     "docs/doc-governance.md",
     "docs/troubleshooting.md",
     *SUPPORTED_SCRIPTS,
-    *INTERNAL_SCRIPT_HELPERS,
 )
 
 FORBIDDEN_SNIPPETS = (
@@ -54,12 +45,12 @@ FORBIDDEN_SNIPPETS = (
 
 
 def test_supported_scripts_exist() -> None:
-    for rel in (*SUPPORTED_SCRIPTS, *INTERNAL_SCRIPT_HELPERS):
+    for rel in SUPPORTED_SCRIPTS:
         assert (ROOT / rel).is_file(), rel
 
 
 def test_supported_scripts_do_not_embed_machine_local_defaults() -> None:
-    for rel in (*SUPPORTED_SCRIPTS, *INTERNAL_SCRIPT_HELPERS):
+    for rel in SUPPORTED_SCRIPTS:
         text = (ROOT / rel).read_text(encoding="utf-8-sig")
         lower_text = text.lower()
         assert "path.home()" not in text, rel

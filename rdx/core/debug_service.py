@@ -1,5 +1,5 @@
 """
-RDX-MCP 的 shader debugging service。
+rdx-tools 的 shader debugging service。
 
 将 RenderDoc 的 pixel、vertex、compute-thread shader debugging APIs
 封装为 async 接口。该 service 采用延迟导入 ``renderdoc`` module，

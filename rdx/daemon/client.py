@@ -441,6 +441,11 @@ def daemon_request(
                     break
             else:
                 operation = str((params or {}).get("operation") or method).strip()
+                try:
+                    latest_state = load_daemon_state(context=context)
+                except Exception:
+                    latest_state = {}
+                diagnostic_state = latest_state or st
                 raise DaemonRequestTimeout(
                     f"Timed out waiting for daemon response to {method}",
                     details={
@@ -448,9 +453,9 @@ def daemon_request(
                         "failed_step": "daemon_request",
                         "context_id": _normalize_context(context),
                         "timeout_seconds": float(timeout),
-                        "active_request_count": int(st.get("active_request_count") or 0),
-                        "active_operation": _active_operation_excerpt(st),
-                        "daemon_state_excerpt": _daemon_state_excerpt(st),
+                        "active_request_count": int(diagnostic_state.get("active_request_count") or 0),
+                        "active_operation": _active_operation_excerpt(diagnostic_state),
+                        "daemon_state_excerpt": _daemon_state_excerpt(diagnostic_state),
                         "recovery_hint": "Run `rdx context clear` or `rd.core.shutdown` on the same context before retrying.",
                     },
                 )

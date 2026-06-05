@@ -24,7 +24,7 @@ def test_validate_bundled_python_layout_reports_complete_bundle(tmp_path: Path, 
     _write(bin_root / "python" / "Lib" / "os.py", "print('os')\n")
     _write(bin_root / "python" / "Lib" / "site.py", "print('site')\n")
     _write(bin_root / "python" / "Lib" / "encodings" / "__init__.py", "# encodings\n")
-    _write(bin_root / "python" / "Lib" / "site-packages" / "mcp.py", "# mcp\n")
+    _write(bin_root / "python" / "Lib" / "site-packages" / "pydantic.py", "# pydantic\n")
     _write(bin_root / "python" / "DLLs" / "_socket.pyd", b"socket")
     _write(
         bin_root / "manifest.runtime.json",

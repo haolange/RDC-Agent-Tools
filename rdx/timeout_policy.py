@@ -1,4 +1,4 @@
-﻿"""Timeout policy helpers shared by CLI, MCP, and contract harnesses."""
+﻿"""Timeout policy helpers shared by CLI and contract harnesses."""
 
 from __future__ import annotations
 

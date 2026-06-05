@@ -1,5 +1,5 @@
 """
-RDX-MCP 的 GPU worker 调度器。
+rdx-tools 的 GPU worker 调度器。
 
 将 replay worker slots 作为稀缺资源管理。每个 slot 表示对 GPU replay
 context（本地或远程）的独占访问。调度器对每种 backend 使用

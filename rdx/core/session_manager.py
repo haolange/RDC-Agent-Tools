@@ -358,23 +358,6 @@ class SessionManager:
         if state.remote_server is None:
             raise SessionError(code="no_remote_server", message="Remote session has no active server connection")
         remote_rdc_path = await self._offload(state.remote_server.CopyCaptureToRemote, rdc_path, None)
-        if not str(remote_rdc_path or "").strip():
-            raise SessionError(
-                code="remote_capture_copy_failed",
-                message="Remote server did not return a copied capture path",
-                details={
-                    "source_layer": "renderdoc_remote",
-                    "operation": "remote.CopyCaptureToRemote",
-                    "backend_type": "remote",
-                    "capture_context": {
-                        "session_id": state.session_id,
-                        "capture_path": str(rdc_path),
-                        "remote_capture_path": str(remote_rdc_path or ""),
-                    },
-                    "classification": "remote_replay_runtime",
-                    "fix_hint": "Verify the remote endpoint can receive the capture before calling remote.OpenCapture.",
-                },
-            )
         status, controller = await self._offload(
             state.remote_server.OpenCapture,
             0,

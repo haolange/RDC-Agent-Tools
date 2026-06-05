@@ -18,12 +18,12 @@ if str(SCRIPT_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPT_ROOT))
 
 from rdx.python_runtime import validate_bundled_python_layout
-from scripts._shared import load_json, run_subprocess, tools_root, write_text
+from scripts._shared import run_subprocess, tools_root, write_text
 
 
 REQUIRED_DIRS = [
     "rdx",
-    "mcp",
+    "bin",
     "cli",
     "spec",
     "policy",
@@ -47,16 +47,7 @@ REQUIRED_FILES = [
 FIXTURE_DIR = Path("tests/fixtures")
 FIXTURE_SUFFIXES = {".rdc"}
 
-CURRENT_REPORTS = [
-    "intermediate/logs/rdx_bat_command_smoke.md",
-    "intermediate/logs/tool_contract_report.md",
-    "intermediate/logs/rdx_smoke_issues_blockers.md",
-    "intermediate/logs/rdx_smoke_detailed_report.md",
-]
-CURRENT_TRUTH_REPORTS = [
-    "intermediate/logs/rdx_bat_command_smoke.json",
-    "intermediate/logs/tool_contract_report.json",
-]
+BASH_SMOKE_LOG = "intermediate/logs/smoke_cli.log"
 
 BANNED_SUFFIXES = {".pdb", ".lib", ".exp", ".ilk", ".h"}
 TEXT_SCAN_SUFFIXES = {
@@ -82,12 +73,17 @@ SCAN_SKIP_PREFIXES = {
 }
 USER_DOCS = [
     "README.md",
+    "docs/install.md",
     "docs/quickstart.md",
+    "docs/agent-integration.md",
     "docs/configuration.md",
     "docs/troubleshooting.md",
     "docs/compatibility-notes.md",
+    "docs/stability.md",
+    "docs/release-notes.md",
 ]
 USER_PATH_FORBIDDEN_RULES = (
+    re.compile(r"\buv\.lock\b", re.IGNORECASE),
     re.compile(r"\buv\s+sync\b", re.IGNORECASE),
     re.compile(r"python\s+-m\s+venv", re.IGNORECASE),
     re.compile(r"pip\s+install", re.IGNORECASE),
@@ -135,6 +131,21 @@ def _run(cmd: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> tup
 
 def _run_launcher(args: list[str], cwd: Path) -> tuple[bool, str]:
     return _run([_cmd_exe(), "/c", "rdx.bat", *args], cwd, env=_launcher_env())
+
+
+def _run_launcher_expect_error(args: list[str], cwd: Path, *, expected_code: str) -> tuple[bool, str]:
+    code, out, err = run_subprocess([_cmd_exe(), "/c", "rdx.bat", *args], cwd=cwd, env=_launcher_env())
+    detail = ((out or "") + (err or "")).strip()
+    try:
+        from scripts._shared import extract_json_payload
+
+        payload = extract_json_payload(detail)
+    except Exception:
+        payload = {}
+    actual_code = str(((payload or {}).get("error") or {}).get("code") or "")
+    if code != 0 and actual_code == expected_code:
+        return True, detail
+    return False, f"expected non-zero `{expected_code}`, got exit={code} code={actual_code}\n{detail}"
 
 
 def _match_line(text: str, rule: ScanRule, *, compiled: re.Pattern[str] | None = None) -> bool:
@@ -275,59 +286,64 @@ def _has_bundled_fixture(root: Path) -> bool:
     return False
 
 
-def _check_smoke_truth(root: Path) -> tuple[bool, str]:
-    command_payload = load_json(root / CURRENT_TRUTH_REPORTS[0])
-    if not command_payload:
-        return False, f"invalid smoke truth payload: {root / CURRENT_TRUTH_REPORTS[0]}"
-    tool_payload = load_json(root / CURRENT_TRUTH_REPORTS[1])
-    if not tool_payload:
-        return False, f"invalid smoke truth payload: {root / CURRENT_TRUTH_REPORTS[1]}"
-
-    command_summary = command_payload.get("summary")
-    if not isinstance(command_summary, dict):
-        return False, "invalid rdx_bat_command_smoke.json summary"
-    command_blockers = int(command_summary.get("blocker", 0))
-    if command_blockers > 0:
-        return False, f"command smoke still reports blocker={command_blockers}"
-
-    for transport in ("mcp", "daemon"):
-        transport_payload = tool_payload.get("transports", {}).get(transport, {})
-        if not isinstance(transport_payload, dict):
-            return False, f"missing tool contract transport payload: {transport}"
-        fatal_error = str(transport_payload.get("fatal_error") or "").strip()
-        if fatal_error:
-            return False, f"{transport} tool contract fatal_error: {fatal_error}"
-        summary = transport_payload.get("summary")
-        if not isinstance(summary, dict):
-            return False, f"missing tool contract summary: {transport}"
-        blockers = int(summary.get("blocker", 0))
-        if blockers > 0:
-            return False, f"{transport} tool contract still reports blocker={blockers}"
-
-    return True, "smoke truth reports are current and clean"
-
-
 def _check_reports(root: Path, *, require_smoke_reports: bool) -> tuple[bool, str]:
-    required_artifacts = CURRENT_REPORTS + CURRENT_TRUTH_REPORTS
-    missing = [rel for rel in required_artifacts if not (root / rel).is_file()]
-    if not missing:
+    log_path = root / BASH_SMOKE_LOG
+    if log_path.is_file():
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        if "[smoke] PASS" in text:
+            return True, "bash CLI smoke log is present and passed"
         if require_smoke_reports or _has_bundled_fixture(root):
-            return _check_smoke_truth(root)
-        return True, "using current smoke reports"
-
-    present = [rel for rel in required_artifacts if rel not in missing]
-    if present:
-        if require_smoke_reports or _has_bundled_fixture(root):
-            return False, f"incomplete smoke reports: missing {', '.join(missing)}"
-        return True, "partial smoke reports ignored in clean checkout: full smoke is optional without bundled fixtures"
+            return False, f"bash CLI smoke log did not contain [smoke] PASS: {BASH_SMOKE_LOG}"
+        return True, "bash CLI smoke log present but not marked passed; full smoke is optional without bundled fixtures"
 
     if require_smoke_reports or _has_bundled_fixture(root):
-        return False, f"missing current reports: {', '.join(missing)}"
+        return False, f"missing bash CLI smoke log: {BASH_SMOKE_LOG}"
 
     return True, (
-        "smoke reports optional in clean checkout: no bundled first-party .rdc fixture; "
-        "run release smoke with explicit sample inputs before tagging a release"
+        "bash CLI smoke optional in clean checkout: no bundled first-party .rdc fixture; "
+        "run bash scripts/smoke_cli.sh with explicit sample inputs before tagging a release"
     )
+
+
+def _find_release_package(root: Path, raw_package: str) -> Path | None:
+    if raw_package:
+        candidate = Path(raw_package)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        return candidate.resolve()
+    dist = root / "dist"
+    if not dist.is_dir():
+        return None
+    packages = sorted(dist.glob("rdx-tools-*-windows-x64.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return packages[0].resolve() if packages else None
+
+
+def _check_release_package(root: Path, *, raw_package: str, required: bool) -> tuple[bool, str]:
+    package_path = _find_release_package(root, raw_package)
+    if package_path is None:
+        if required:
+            return False, "missing release package under dist/rdx-tools-*-windows-x64.zip"
+        return True, "release package check skipped; pass --require-release-package for GA"
+    if not package_path.is_file():
+        return False, f"release package not found: {package_path}"
+    checksums = package_path.parent / "SHA256SUMS"
+    if not checksums.is_file():
+        return False, f"missing SHA256SUMS next to package: {checksums}"
+    checksum_text = checksums.read_text(encoding="utf-8", errors="replace")
+    if package_path.name not in checksum_text:
+        return False, f"SHA256SUMS does not list {package_path.name}"
+    verify_cmd = [
+        sys.executable,
+        "scripts/verify_release_package.py",
+        "--zip",
+        str(package_path),
+    ]
+    if required:
+        verify_cmd.append("--require-fixture-smoke")
+    ok, detail = _run(verify_cmd, cwd=root)
+    if not ok:
+        return False, detail
+    return True, f"verified release package: {package_path.name}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -336,7 +352,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--require-smoke-reports",
         action="store_true",
-        help="Fail unless the current smoke reports are present.",
+        help="Fail unless the bash CLI smoke log is present and marked passed.",
+    )
+    parser.add_argument(
+        "--require-release-package",
+        action="store_true",
+        help="Fail unless a verified rdx-tools Windows x64 release package exists.",
+    )
+    parser.add_argument(
+        "--release-package",
+        default="",
+        help="Explicit release zip path to verify.",
     )
     args = parser.parse_args(argv)
 
@@ -367,20 +393,73 @@ def main(argv: list[str] | None = None) -> int:
 
     ok_bat_help, bat_help = _run_launcher(["--help"], cwd=root)
     results.append(("entry:rdx.bat --help", ok_bat_help, bat_help))
-    ok_bat_cli_help, bat_cli_help = _run_launcher(["--non-interactive", "cli", "--help"], cwd=root)
-    results.append(("entry:rdx.bat --non-interactive cli --help", ok_bat_cli_help, bat_cli_help))
-    ok_bat_mcp_env, bat_mcp_env = _run_launcher(["--non-interactive", "mcp", "--ensure-env"], cwd=root)
-    results.append(("entry:rdx.bat --non-interactive mcp --ensure-env", ok_bat_mcp_env, bat_mcp_env))
-
-    ok_mcp_help, mcp_help = _run([sys.executable, "mcp/run_mcp.py", "--help"], cwd=root)
-    results.append(("entry:dev-python mcp/run_mcp.py --help", ok_mcp_help, mcp_help))
+    ok_bat_doctor, bat_doctor = _run_launcher(["--json", "doctor"], cwd=root)
+    results.append(("entry:rdx.bat --json doctor", ok_bat_doctor, bat_doctor))
+    ok_bat_noninteractive_doctor, bat_noninteractive_doctor = _run_launcher(["--non-interactive", "--json", "doctor"], cwd=root)
+    results.append(("entry:rdx.bat --non-interactive --json doctor", ok_bat_noninteractive_doctor, bat_noninteractive_doctor))
+    ok_bat_version, bat_version = _run_launcher(["--version"], cwd=root)
+    results.append(("entry:rdx.bat --version", ok_bat_version, bat_version))
+    ok_bat_version_json, bat_version_json = _run_launcher(["version", "--json"], cwd=root)
+    results.append(("entry:rdx.bat version --json", ok_bat_version_json, bat_version_json))
+    ok_bat_completion, bat_completion = _run_launcher(["completion", "powershell"], cwd=root)
+    results.append(("entry:rdx.bat completion powershell", ok_bat_completion, bat_completion))
+    ok_context_status, context_status = _run_launcher(["context", "status", "--json"], cwd=root)
+    results.append(("entry:rdx.bat context status --json", ok_context_status, context_status))
+    ok_context_list, context_list = _run_launcher(["context", "list", "--json"], cwd=root)
+    results.append(("entry:rdx.bat context list --json", ok_context_list, context_list))
+    ok_context_update, context_update = _run_launcher(
+        ["--daemon-context", "release-gate-context", "context", "update", "--key", "notes", "--value", "release-gate", "--json"],
+        cwd=root,
+    )
+    results.append(("entry:rdx.bat context update --json", ok_context_update, context_update))
+    ok_context_clear, context_clear = _run_launcher(
+        ["--daemon-context", "release-gate-context", "context", "clear", "--json"],
+        cwd=root,
+    )
+    results.append(("entry:rdx.bat context clear --json", ok_context_clear, context_clear))
+    ok_vfs_tsv, vfs_tsv = _run_launcher(["vfs", "ls", "--path", "/", "--format", "tsv"], cwd=root)
+    results.append(("entry:rdx.bat vfs ls --format tsv", ok_vfs_tsv, vfs_tsv))
+    ok_vfs_bad_tsv, vfs_bad_tsv = _run_launcher_expect_error(
+        ["vfs", "tree", "--path", "/", "--format", "tsv"],
+        cwd=root,
+        expected_code="projection_not_supported",
+    )
+    results.append(("negative:vfs tree tsv projection", ok_vfs_bad_tsv, vfs_bad_tsv))
+    ok_call_bad_tsv, call_bad_tsv = _run_launcher_expect_error(
+        ["call", "rd.session.get_context", "--format", "tsv"],
+        cwd=root,
+        expected_code="tabular_projection_missing",
+    )
+    results.append(("negative:call context tsv projection", ok_call_bad_tsv, call_bad_tsv))
+    ok_diff_no_session, diff_no_session = _run_launcher_expect_error(
+        ["--daemon-context", "release-gate-empty", "diff", "pipeline", "--event-a", "1", "--event-b", "2"],
+        cwd=root,
+        expected_code="session_required",
+    )
+    results.append(("negative:diff pipeline no session", ok_diff_no_session, diff_no_session))
+    ok_assert_no_session, assert_no_session = _run_launcher_expect_error(
+        ["--daemon-context", "release-gate-empty", "assert", "pipeline", "--event-a", "1", "--event-b", "2"],
+        cwd=root,
+        expected_code="session_required",
+    )
+    results.append(("negative:assert pipeline no session", ok_assert_no_session, assert_no_session))
     ok_cli_help, cli_help = _run([sys.executable, "cli/run_cli.py", "--help"], cwd=root)
     results.append(("entry:dev-python cli/run_cli.py --help", ok_cli_help, cli_help))
+    ok_cli_doctor, cli_doctor = _run([sys.executable, "cli/run_cli.py", "--json", "doctor"], cwd=root)
+    results.append(("entry:dev-python cli/run_cli.py --json doctor", ok_cli_doctor, cli_doctor))
+    ok_catalog, catalog_detail = _run([sys.executable, "spec/validate_catalog.py"], cwd=root)
+    results.append(("spec:catalog-validation", ok_catalog, catalog_detail))
     ok_md_health, md_health = _run([sys.executable, "scripts/check_markdown_health.py"], cwd=root)
     results.append(("docs:markdown-health", ok_md_health, md_health))
 
     ok_reports, report_detail = _check_reports(root, require_smoke_reports=bool(args.require_smoke_reports))
     results.append(("reports:smoke-suite", ok_reports, report_detail))
+    ok_package, package_detail = _check_release_package(
+        root,
+        raw_package=str(args.release_package or ""),
+        required=bool(args.require_release_package),
+    )
+    results.append(("release:package", ok_package, package_detail))
 
     ok_all = all(item[1] for item in results)
 
