@@ -37,6 +37,7 @@ Compatibility policy:
 
 - 1.x releases may add commands, fields, diagnostics, and tools.
 - 1.x releases must not remove published commands or change the canonical JSON envelope semantics.
+- Tool-specific JSON `data` payloads may add fields such as shader `edit_plan` when they make agent usage safer without changing existing fields.
 - JSON is the canonical agent protocol.
 - TSV is a stable tabular projection only where a command documents table output, such as `vfs ls`.
 - `--daemon-context <id>` selects a continuous runtime namespace; omitting it uses `default`.

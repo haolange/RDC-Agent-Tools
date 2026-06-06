@@ -9357,6 +9357,73 @@ def _shader_raw_bytes(reflection: Any) -> bytes:
         return b""
 
 
+def _shader_edit_plan(
+    *,
+    source_encoding: str = "",
+    disassembly_target: str = "",
+    source: str = "",
+    source_available: bool = True,
+) -> Dict[str, Any]:
+    plan = PatchEngine._edit_plan_for_source(
+        encoding_name=str(source_encoding or ""),
+        disassembly_target=str(disassembly_target or ""),
+        source=str(source or ""),
+    )
+    if source_available:
+        return plan
+    encoding_key = str(source_encoding or "").strip().lower().replace("_", "")
+    if encoding_key in {"dxil", "dxbc"}:
+        plan["input_kind"] = "renderdoc_disassembly"
+        plan["recommended_next_tool"] = "rd.shader.get_disassembly"
+        plan["fallback_tools"] = ["rd.shader.get_disassembly", "rd.shader.extract_binary"]
+        plan["blocked_reason"] = (
+            f"{encoding_key.upper()} debug source is unavailable. "
+            "Use rd.shader.get_disassembly for read-only inspection and "
+            "rd.shader.extract_binary for the raw container; do not pass DXIL/DXBC "
+            "disassembly text to rd.shader.edit_and_replace."
+        )
+        return plan
+    if encoding_key in {"spirv", "spirvasm", "openglspirv", "openglspirvasm"}:
+        plan["input_kind"] = "text_ir"
+        plan["can_edit_text"] = True
+        plan["can_build"] = True
+        plan["can_replace"] = True
+        plan["allowed_edit_inputs"] = ["source_text", "diff_text", "ops"]
+        plan["allowed_ops"] = ["force_full_precision"]
+        plan["build_input_kind"] = "binary_spirv" if encoding_key in {"spirv", "openglspirv"} else "text"
+        if encoding_key in {"spirv", "openglspirv"}:
+            plan["requires_toolchain"] = ["spirv-as"]
+        plan["recommended_next_tool"] = "rd.shader.get_disassembly"
+        plan["fallback_tools"] = ["rd.shader.get_disassembly"]
+        return plan
+    plan["input_kind"] = "unsupported"
+    plan["recommended_next_tool"] = "rd.shader.get_disassembly"
+    plan["fallback_tools"] = ["rd.shader.get_disassembly", "rd.shader.extract_binary"]
+    return plan
+
+
+def _shader_source_fallback_args(
+    *,
+    session_id: str,
+    event_id: int,
+    stage: str,
+    shader_id: str,
+    source_encoding: str,
+) -> Dict[str, Any]:
+    encoding_key = str(source_encoding or "").strip().lower().replace("_", "")
+    args: Dict[str, Any] = {
+        "session_id": session_id,
+        "event_id": int(event_id),
+        "stage": stage.upper(),
+        "shader_id": shader_id,
+        "target": "auto",
+    }
+    if encoding_key in {"spirv", "spirvasm", "openglspirv", "openglspirvasm"}:
+        args["target"] = "SPIR-V ASM"
+        args["source_encoding"] = "spirvasm"
+    return args
+
+
 def _replacement_metadata_entries(session_id: str) -> List[Dict[str, Any]]:
     entries = _runtime.shader_replacements.get(session_id, [])
     if not isinstance(entries, list):
@@ -9890,6 +9957,11 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         supported_encodings = list(await _offload(controller.GetTargetShaderEncodings) or [])
         supported_encoding_names = [_shader_encoding_name(item) for item in supported_encodings]
         replacement_supported, replacement_reason = _session_replace_capability(session_id, controller)
+        edit_plan = _shader_edit_plan(
+            source_encoding=requested_encoding_name,
+            source=source,
+            source_available=True,
+        )
         if requested_encoding is None:
             return _err(
                 f"Unsupported shader source encoding: {requested_encoding_name}",
@@ -9900,6 +9972,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     "supported_source_encodings": supported_encoding_names,
                     "runtime_replacement_supported": bool(replacement_supported),
                     "runtime_replacement_reason": replacement_reason,
+                    "edit_plan": edit_plan,
                 },
             )
         if requested_encoding not in supported_encodings:
@@ -9912,6 +9985,23 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     "supported_source_encodings": supported_encoding_names,
                     "runtime_replacement_supported": bool(replacement_supported),
                     "runtime_replacement_reason": replacement_reason,
+                    "edit_plan": edit_plan,
+                },
+            )
+        if requested_encoding_name in {"dxil", "dxbc"}:
+            return _err(
+                f"{requested_encoding_name.upper()} compile requires a binary container input, not source text.",
+                code="shader_compile_encoding_unsupported",
+                category="validation",
+                details={
+                    "requested_source_encoding": requested_encoding_name,
+                    "supported_source_encodings": supported_encoding_names,
+                    "runtime_replacement_supported": bool(replacement_supported),
+                    "runtime_replacement_reason": replacement_reason,
+                    "edit_plan": edit_plan,
+                    "failure_stage": "validate_compile_input",
+                    "failure_reason": "binary_container_text_input_unsupported",
+                    "recommended_next_tool": "rd.shader.extract_binary",
                 },
             )
         compile_flags = rd.ShaderCompileFlags()
@@ -9936,6 +10026,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     "supported_source_encodings": supported_encoding_names,
                     "runtime_replacement_supported": bool(replacement_supported),
                     "runtime_replacement_reason": replacement_reason,
+                    "edit_plan": edit_plan,
                 },
             )
         result: Dict[str, Any] = {
@@ -9949,6 +10040,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             "runtime_replacement_reason": replacement_reason,
             "messages": str(messages or ""),
             "compiler_messages": str(messages or ""),
+            "edit_plan": edit_plan,
         }
         try:
             entry_points = await _offload(controller.GetShaderEntryPoints, shader_id)
@@ -10730,6 +10822,13 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 preserve_outputs=preserve_outputs,
             ),
         }
+        edit_plan = _shader_edit_plan(
+            source_encoding=str(patch_result.encoding or ""),
+            disassembly_target=str(patch_result.disassembly_target or ""),
+            source=str(patch_result.source_before_text or ""),
+            source_available=bool(patch_result.source_before_text),
+        )
+        replacement["edit_plan"] = edit_plan
         artifacts: List[Dict[str, Any]] = []
         if emit_patch_artifacts or patch_output_dir:
             base_stem = f"shader_patch_ev{int(event_id)}_{stage}_{patch_spec.patch_id}"
@@ -10836,6 +10935,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             status=replacement["status"],
             resolved_event_id=int(event_id),
             messages=replacement["messages"],
+            edit_plan=edit_plan,
             replacement=replacement,
             artifacts=artifacts,
         )
@@ -10904,23 +11004,28 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
     if action == "get_source":
         requested_shader_id = str(args.get("shader_id", "")).strip()
         try:
-            stage_name, resolved_shader_id, _ = await _resolve_shader_binding(
+            stage_name, resolved_shader_id, reflection = await _resolve_shader_binding(
                 shader_id=requested_shader_id,
                 stage_name=args.get("stage"),
                 require_reflection=False,
             )
         except CoreError as exc:
             return _err(exc.message, code=exc.code, category=exc.category, details=dict(exc.details))
+        source_encoding = _shader_encoding_name(getattr(reflection, "encoding", "")) if reflection is not None else ""
+        edit_plan = _shader_edit_plan(
+            source_encoding=source_encoding,
+            source_available=False,
+        )
+        fallback_args = _shader_source_fallback_args(
+            session_id=session_id,
+            event_id=int(event_id),
+            stage=stage_name,
+            shader_id=resolved_shader_id,
+            source_encoding=source_encoding,
+        )
         fallback = {
             "tool": "rd.shader.get_disassembly",
-            "args": {
-                "session_id": session_id,
-                "event_id": int(event_id),
-                "stage": stage_name.upper(),
-                "shader_id": resolved_shader_id,
-                "target": "SPIR-V ASM",
-                "source_encoding": "spirvasm",
-            },
+            "args": fallback_args,
             "reason": "original shader source is unavailable from capture debug information",
         }
         return _ok(
@@ -10930,6 +11035,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             fallback=fallback,
             fallback_tool="rd.shader.get_disassembly",
             fallback_args=fallback["args"],
+            edit_plan=edit_plan,
             failure_stage="source_lookup",
             failure_reason="source_debug_info_unavailable",
             shader_id=resolved_shader_id,
@@ -11063,12 +11169,19 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             source_encoding_name = _shader_encoding_name(resolved_encoding)
             if PatchEngine._is_raw_spirv_asm_request(requested_target, requested_encoding) or bool(is_raw_spirv_asm):
                 source_encoding_name = "spirvasm"
+            edit_plan = _shader_edit_plan(
+                source_encoding=source_encoding_name,
+                disassembly_target=str(resolved_target or ""),
+                source=str(text or ""),
+                source_available=bool(text),
+            )
             if not text:
                 return _ok(
                     disassembly="",
                     target=str(resolved_target or ""),
                     source_encoding=source_encoding_name,
                     is_raw_spirv_asm=bool(is_raw_spirv_asm),
+                    edit_plan=edit_plan,
                     shader_id=shader_id,
                     resolved_event_id=int(event_id),
                     source_hash="",
@@ -11078,6 +11191,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 target=str(resolved_target or ""),
                 source_encoding=source_encoding_name,
                 is_raw_spirv_asm=bool(is_raw_spirv_asm),
+                edit_plan=edit_plan,
                 shader_id=shader_id,
                 resolved_event_id=int(event_id),
                 source_hash=hashlib.sha256(str(text).encode("utf-8")).hexdigest(),

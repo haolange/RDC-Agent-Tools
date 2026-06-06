@@ -39,6 +39,22 @@ class _SupportedController:
         return None
 
 
+class _EncodingPipe(_FakePipe):
+    def __init__(self, encoding: object) -> None:
+        self.encoding = encoding
+
+    def GetShaderReflection(self, stage: object) -> SimpleNamespace:
+        return SimpleNamespace(entryPoint="main", encoding=self.encoding)
+
+
+class _EncodingController(_SupportedController):
+    def __init__(self, encoding: object) -> None:
+        self.encoding = encoding
+
+    def GetPipelineState(self) -> _EncodingPipe:
+        return _EncodingPipe(self.encoding)
+
+
 class _UnsupportedController:
     def GetPipelineState(self) -> _FakePipe:
         return _FakePipe()
@@ -553,7 +569,7 @@ def test_edit_and_replace_preserves_patch_engine_error_details(monkeypatch: pyte
 
 
 def test_get_source_reports_ir_fallback_when_debug_source_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_shader_replace_env(monkeypatch, _SupportedController())
+    _install_shader_replace_env(monkeypatch, _EncodingController("SPIRV"))
     server.server_runtime._session_manager = _FakeSessionManager()
 
     payload = json.loads(
@@ -578,6 +594,38 @@ def test_get_source_reports_ir_fallback_when_debug_source_unavailable(monkeypatc
     assert payload["fallback_args"]["target"] == "SPIR-V ASM"
     assert payload["fallback_args"]["source_encoding"] == "spirvasm"
     assert payload["fallback_args"]["shader_id"] == "ResourceId::77"
+    assert payload["edit_plan"]["input_kind"] == "text_ir"
+    assert payload["edit_plan"]["recommended_next_tool"] == "rd.shader.get_disassembly"
+    assert payload["edit_plan"]["allowed_ops"] == ["force_full_precision"]
+
+
+def test_get_source_reports_dxil_readonly_fallback_when_debug_source_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_shader_replace_env(monkeypatch, _EncodingController("DXIL"))
+    server.server_runtime._session_manager = _FakeSessionManager()
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "get_source",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 101,
+                    "shader_id": "ResourceId::77",
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["source_available"] is False
+    assert payload["fallback_tool"] == "rd.shader.get_disassembly"
+    assert payload["fallback_args"]["target"] == "auto"
+    assert "source_encoding" not in payload["fallback_args"]
+    assert payload["edit_plan"]["shader_format"]["container"] == "dxil"
+    assert payload["edit_plan"]["input_kind"] == "renderdoc_disassembly"
+    assert payload["edit_plan"]["can_replace"] is False
+    assert payload["edit_plan"]["allowed_edit_inputs"] == []
+    assert "rd.shader.extract_binary" in payload["edit_plan"]["fallback_tools"]
 
 
 def test_remote_replacement_validation_uses_live_outputs_without_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1416,6 +1464,51 @@ def test_patch_engine_does_not_replace_when_compiler_reports_fatal_diagnostics(
     assert controller.free_calls == ["ResourceId::99"]
 
 
+def test_patch_engine_rejects_dxil_disassembly_before_build_or_replace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderCompileFlags=_FakeShaderCompileFlags,
+        ShaderCompileFlag=_FakeShaderCompileFlag,
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(patch_engine_mod, "_to_rd_stage", lambda stage: "ps")
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_get_best_encoding",
+        staticmethod(lambda controller, session_id: ("DXIL", "DXIL")),
+    )
+
+    controller = _PatchEngineController()
+    session_manager = _PatchEngineSessionManager(controller)
+    engine = patch_engine_mod.PatchEngine()
+
+    result = asyncio.run(
+        engine.apply_patch(
+            session_id="sess_demo",
+            event_id=314,
+            stage=ShaderStage.PS,
+            session_manager=session_manager,
+            patch_spec=PatchSpec(
+                patch_id="repl_demo",
+                target_event_id=314,
+                target_stage=ShaderStage.PS,
+                target_shader_id="ResourceId::77",
+                source_text="// edited DXIL disassembly",
+            ),
+        )
+    )
+
+    assert result.success is False
+    assert result.error_code == "shader_replace_backend_unsupported"
+    assert result.error_details["failure_stage"] == "validate_edit_plan"
+    assert result.error_details["replacement_attempted"] is False
+    assert result.error_details["edit_plan"]["shader_format"]["container"] == "dxil"
+    assert controller.build_calls == []
+    assert controller.replace_calls == []
+
+
 def test_revert_patch_rebinds_target_event(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_rd = SimpleNamespace(
         ResourceId=lambda: "ResourceId::0",
@@ -1484,3 +1577,40 @@ def test_get_disassembly_reports_raw_spirv_metadata(monkeypatch: pytest.MonkeyPa
     assert payload["source_encoding"] == "spirvasm"
     assert payload["is_raw_spirv_asm"] is True
     assert payload["source_hash"]
+    assert payload["edit_plan"]["input_kind"] == "text_ir"
+    assert payload["edit_plan"]["can_replace"] is True
+    assert payload["edit_plan"]["allowed_ops"] == ["force_full_precision"]
+
+
+def test_get_disassembly_reports_dxil_readonly_edit_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_shader_replace_env(monkeypatch, _EncodingController("DXIL"))
+    server.server_runtime._session_manager = _FakeSessionManager()
+
+    monkeypatch.setattr(
+        patch_engine_mod.PatchEngine,
+        "_resolve_source",
+        classmethod(lambda cls, controller, pipe, refl, stage, session_id, **kwargs: ("// DXIL disassembly\n", "DXIL", "DXIL", False)),
+    )
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "get_disassembly",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 101,
+                    "stage": "ps",
+                    "target": "auto",
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["target"] == "DXIL"
+    assert payload["source_encoding"] == "dxil"
+    assert payload["edit_plan"]["shader_format"]["container"] == "dxil"
+    assert payload["edit_plan"]["input_kind"] == "renderdoc_disassembly"
+    assert payload["edit_plan"]["can_edit_text"] is False
+    assert payload["edit_plan"]["can_replace"] is False
+    assert payload["edit_plan"]["recommended_next_tool"] == "rd.shader.extract_binary"

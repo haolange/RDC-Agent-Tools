@@ -352,6 +352,48 @@ class PatchEngine:
                 source.encode("utf-8"),
             ).hexdigest()
             encoding_name = self._encoding_name(encoding)
+            edit_plan = self._edit_plan_for_source(
+                encoding_name=encoding_name,
+                disassembly_target=str(disasm_target),
+                source=source,
+            )
+            if not bool(edit_plan.get("can_replace")):
+                requested_ops = [str(getattr(op, "op", "") or "") for op in patch_spec.ops]
+                op_requested = next((op for op in requested_ops if op), "")
+                code = (
+                    "shader_patch_op_unsupported_for_encoding"
+                    if op_requested
+                    else "shader_replace_backend_unsupported"
+                )
+                reason = str(edit_plan.get("blocked_reason") or "shader source encoding is not safely replaceable")
+                return PatchResult(
+                    patch_id=patch_spec.patch_id,
+                    original_shader_hash=original_hash,
+                    success=False,
+                    error_message=reason,
+                    error_code=code,
+                    error_category="validation",
+                    error_details={
+                        "event_id": int(event_id),
+                        "stage": stage.value.upper(),
+                        "session_id": str(session_id),
+                        "shader_id": _shader_id_str(shader_id),
+                        "encoding": encoding_name,
+                        "disassembly_target": str(disasm_target),
+                        "edit_plan": edit_plan,
+                        "op": op_requested,
+                        "agent_text_edit_inputs": ["source_text", "diff_text"],
+                        "failure_stage": "validate_edit_plan",
+                        "failure_reason": "source_encoding_not_safely_replaceable",
+                        "replacement_attempted": False,
+                        "context_preserved": True,
+                    },
+                    source_before_text=source,
+                    source_after_text=source,
+                    disassembly_target=str(disasm_target),
+                    encoding=encoding_name,
+                    entry_point=str(getattr(refl, "entryPoint", "") or "main"),
+                )
             messages: List[str] = []
             if patch_spec.expected_source_hash and patch_spec.expected_source_hash != original_hash:
                 return PatchResult(
@@ -431,6 +473,36 @@ class PatchEngine:
                                 "agent_text_edit_inputs": ["source_text", "diff_text"],
                                 "failure_stage": "validate_patch_ops",
                                 "failure_reason": "unsupported_patch_op",
+                            },
+                            source_before_text=source,
+                            source_after_text=source,
+                            disassembly_target=str(disasm_target),
+                            encoding=encoding_name,
+                                entry_point=str(getattr(refl, "entryPoint", "") or "main"),
+                            )
+                    missing_guard_expr = op.op == "insert_guard" and not str(op.guard_expr or "").strip()
+                    if op.op not in set(edit_plan.get("allowed_ops") or []) and not missing_guard_expr:
+                        return PatchResult(
+                            patch_id=patch_spec.patch_id,
+                            original_shader_hash=original_hash,
+                            success=False,
+                            error_message=(
+                                f"{op.op} is not supported for shader source encoding "
+                                f"'{encoding_name}'."
+                            ),
+                            error_code="shader_patch_op_unsupported_for_encoding",
+                            error_category="validation",
+                            error_details={
+                                "op": str(op.op),
+                                "encoding": encoding_name,
+                                "disassembly_target": str(disasm_target),
+                                "edit_plan": edit_plan,
+                                "supported_ops": list(edit_plan.get("allowed_ops") or []),
+                                "agent_text_edit_inputs": ["source_text", "diff_text"],
+                                "failure_stage": "validate_patch_ops",
+                                "failure_reason": "unsupported_patch_op_for_encoding",
+                                "replacement_attempted": False,
+                                "context_preserved": True,
                             },
                             source_before_text=source,
                             source_after_text=source,
@@ -1354,6 +1426,99 @@ class PatchEngine:
         if normalized in {"spirv", "openglspirv"} and cls._looks_like_raw_spirv_asm(source):
             return cls._assemble_spirv_asm(source)
         return str(source or "").encode("utf-8")
+
+    @classmethod
+    def _edit_plan_for_source(
+        cls,
+        *,
+        encoding_name: str,
+        disassembly_target: str = "",
+        source: str = "",
+    ) -> Dict[str, Any]:
+        normalized = str(encoding_name or "").strip().lower().replace("_", "")
+        target = str(disassembly_target or "").strip()
+        target_key = target.lower()
+        is_spirv_asm = normalized in {"spirvasm", "openglspirvasm"} or cls._looks_like_raw_spirv_asm(source)
+        if normalized in {"hlsl", "glsl"}:
+            return {
+                "shader_format": {
+                    "source_encoding": normalized,
+                    "container": normalized,
+                    "disassembly_target": target,
+                },
+                "input_kind": "debug_source",
+                "can_edit_text": True,
+                "can_build": True,
+                "can_replace": True,
+                "requires_toolchain": [],
+                "build_input_kind": "text",
+                "allowed_edit_inputs": ["source_text", "diff_text", "ops"],
+                "allowed_ops": ["force_full_precision", "insert_guard"],
+                "recommended_next_tool": "rd.shader.edit_and_replace",
+                "blocked_reason": "",
+            }
+        if is_spirv_asm:
+            requires = ["spirv-as"] if normalized in {"spirv", "openglspirv"} else []
+            return {
+                "shader_format": {
+                    "source_encoding": normalized or "spirvasm",
+                    "container": "spirv",
+                    "disassembly_target": target,
+                },
+                "input_kind": "text_ir",
+                "can_edit_text": True,
+                "can_build": True,
+                "can_replace": True,
+                "requires_toolchain": requires,
+                "build_input_kind": "binary_spirv" if requires else "text",
+                "allowed_edit_inputs": ["source_text", "diff_text", "ops"],
+                "allowed_ops": ["force_full_precision"],
+                "recommended_next_tool": "rd.shader.edit_and_replace",
+                "blocked_reason": "",
+            }
+        if normalized in {"dxil", "dxbc"} or "dxil" in target_key or "dxbc" in target_key:
+            container = "dxil" if normalized == "dxil" or "dxil" in target_key else "dxbc"
+            return {
+                "shader_format": {
+                    "source_encoding": normalized or container,
+                    "container": container,
+                    "disassembly_target": target,
+                },
+                "input_kind": "renderdoc_disassembly",
+                "can_edit_text": False,
+                "can_build": False,
+                "can_replace": False,
+                "requires_toolchain": [],
+                "build_input_kind": "unsupported",
+                "allowed_edit_inputs": [],
+                "allowed_ops": [],
+                "recommended_next_tool": "rd.shader.extract_binary",
+                "blocked_reason": (
+                    f"{container.upper()} disassembly is read-only in rdx-tools. "
+                    "Use debug HLSL source when available, or inspect the binary with "
+                    "rd.shader.extract_binary; do not pass disassembly text to edit_and_replace."
+                ),
+            }
+        return {
+            "shader_format": {
+                "source_encoding": normalized,
+                "container": normalized or "unknown",
+                "disassembly_target": target,
+            },
+            "input_kind": "unsupported",
+            "can_edit_text": False,
+            "can_build": False,
+            "can_replace": False,
+            "requires_toolchain": [],
+            "build_input_kind": "unsupported",
+            "allowed_edit_inputs": [],
+            "allowed_ops": [],
+            "recommended_next_tool": "rd.shader.get_source",
+            "blocked_reason": (
+                f"Shader source encoding '{encoding_name}' is not safely editable by "
+                "rd.shader.edit_and_replace."
+            ),
+        }
 
     @staticmethod
     def _assemble_spirv_asm(source: str) -> bytes:
