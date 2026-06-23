@@ -46,6 +46,7 @@ def _mock_release_gate_basics(monkeypatch, root: Path) -> None:  # type: ignore[
         lambda root: (True, "user docs command ok"),
     )
     monkeypatch.setattr(release_gate, "_check_catalog_public_surface", lambda root: (True, "catalog ok"))
+    monkeypatch.setattr(release_gate, "_check_tool_reference_fresh", lambda root: (True, "tool ref ok"))
     monkeypatch.setattr(release_gate, "_check_no_mcp_public_surface", lambda root: (True, "mcp ok"))
 
 

@@ -19,6 +19,8 @@ rdx --daemon-context task-123 --json doctor
 rdx --daemon-context task-123 context status --json
 rdx --daemon-context task-123 capture open --file "C:\captures\case.rdc"
 rdx --daemon-context task-123 vfs tree --path / --depth 2 --format json
+rdx --daemon-context task-123 event list --format tsv
+rdx --daemon-context task-123 pipeline show --event-id 42 --format json
 rdx --daemon-context task-123 context update --key notes --value "triaged" --json
 rdx --daemon-context task-123 context clear --json
 rdx --daemon-context task-123 daemon stop
@@ -38,3 +40,5 @@ bash scripts/smoke_cli.sh
 
 `rdx-tools` is CLI-only. Agents should integrate through shell commands and the canonical JSON envelope.
 
+
+The generated reader-facing tool list is [Tool reference](tool-reference.md). The task-level SOP is [rdx-native agent playbook](rdx-native-agent-playbook.md).

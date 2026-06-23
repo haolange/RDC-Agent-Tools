@@ -1,5 +1,7 @@
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding=$false)]
 param(
+    [Alias('out')]
+    [string]$PassthroughOut,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Arguments
 )
@@ -7,6 +9,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+if ($PSBoundParameters.ContainsKey('PassthroughOut')) {
+    $script:Arguments = @($script:Arguments) + @('--out', [string]$PassthroughOut)
+}
+
 
 $script:RETURN_OK = 0
 $script:RETURN_ARGS_ERROR = 2

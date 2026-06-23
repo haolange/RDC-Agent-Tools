@@ -16,6 +16,29 @@ def test_build_parser_accepts_vfs_tree_command() -> None:
     assert args.depth == 3
 
 
+def test_build_parser_accepts_facade_commands() -> None:
+    parser = rdx_cli._build_parser()
+
+    event_list = parser.parse_args(["event", "list", "--format", "tsv"])
+    event_show = parser.parse_args(["event", "show", "--event-id", "7"])
+    pipeline_section = parser.parse_args(["pipeline", "section", "--event-id", "7", "--stage", "ps"])
+    shader_constants = parser.parse_args(["shader", "constants", "--stage", "ps", "--slot", "0"])
+    export_texture = parser.parse_args(["export", "texture", "--resource-id", "tex1", "--out", "tex.png"])
+    pixel_history = parser.parse_args(["pixel", "history", "--resource-id", "tex1", "--x", "1", "--y", "2"])
+    resource_usage = parser.parse_args(["resource", "usage", "--resource-id", "buf1"])
+
+    assert event_list.command == "event"
+    assert event_list.event_cmd == "list"
+    assert event_list.format == "tsv"
+    assert event_show.event_id == 7
+    assert pipeline_section.stage == "ps"
+    assert shader_constants.slot == 0
+    assert export_texture.resource_id == "tex1"
+    assert pixel_history.x == 1
+    assert pixel_history.y == 2
+    assert resource_usage.resource_cmd == "usage"
+
+
 def test_build_parser_accepts_cli_first_doctor_and_tools() -> None:
     parser = rdx_cli._build_parser()
 
@@ -371,3 +394,106 @@ def test_pipeline_diff_and_assert_without_session_return_session_required(monkey
     assert captured[0]["error"]["code"] == "session_required"
     assert captured[0]["error"]["details"]["context_id"] == "ctx-agent"
     assert captured[1]["error"]["code"] == "session_required"
+
+
+def test_facade_commands_dispatch_to_canonical_tools(monkeypatch) -> None:
+    parser = rdx_cli._build_parser()
+    seen: list[tuple[str, dict[str, object], str]] = []
+    captured: list[dict] = []
+
+    def _fake_daemon_exec(operation: str, args: dict[str, object], *, remote: bool = False, context: str = "default"):  # type: ignore[no-untyped-def]
+        seen.append((operation, dict(args), context))
+        return {"ok": True, "result_kind": operation, "data": {"operation": operation}, "artifacts": [], "error": None, "meta": {}, "projections": {}}
+
+    monkeypatch.setattr(rdx_cli, "_daemon_exec", _fake_daemon_exec)
+    monkeypatch.setattr(rdx_cli, "_print_json", lambda payload: captured.append(payload))
+
+    cases = [
+        (["event", "list"], "rd.event.get_actions", {"session_id": "sess_demo"}),
+        (["event", "show", "--event-id", "7"], "rd.event.get_action_details", {"session_id": "sess_demo", "event_id": 7}),
+        (["pipeline", "show", "--event-id", "7"], "rd.pipeline.get_state_summary", {"session_id": "sess_demo", "event_id": 7, "context_id": "ctx-agent"}),
+        (["pipeline", "section", "--event-id", "7", "--stage", "ps"], "rd.pipeline.get_stage_state", {"session_id": "sess_demo", "event_id": 7, "stage": "ps"}),
+        (["shader", "source", "--event-id", "7", "--stage", "ps"], "rd.shader.get_source", {"session_id": "sess_demo", "event_id": 7, "stage": "ps"}),
+        (["shader", "disasm", "--event-id", "7", "--stage", "ps"], "rd.shader.get_disassembly", {"session_id": "sess_demo", "event_id": 7, "stage": "ps"}),
+        (["shader", "constants", "--event-id", "7", "--stage", "ps", "--slot", "0"], "rd.shader.get_constant_buffer_contents", {"session_id": "sess_demo", "event_id": 7, "stage": "ps", "slot": 0}),
+        (["export", "screenshot", "--event-id", "7", "--out", "shot.png"], "rd.export.screenshot", {"session_id": "sess_demo", "event_id": 7}),
+        (["export", "texture", "--resource-id", "tex1", "--out", "tex.png"], "rd.export.texture", {"session_id": "sess_demo", "texture_id": "tex1"}),
+        (["export", "buffer", "--resource-id", "buf1", "--out", "buf.bin"], "rd.export.buffer", {"session_id": "sess_demo", "buffer_id": "buf1"}),
+        (["export", "mesh", "--event-id", "7", "--out", "mesh.obj"], "rd.export.mesh", {"session_id": "sess_demo", "event_id": 7}),
+        (["pixel", "value", "--event-id", "7", "--resource-id", "tex1", "--x", "1", "--y", "2"], "rd.texture.get_pixel_value", {"session_id": "sess_demo", "event_id": 7, "texture_id": "tex1", "x": 1, "y": 2}),
+        (["pixel", "history", "--event-id", "7", "--resource-id", "tex1", "--x", "1", "--y", "2"], "rd.texture.get_pixel_history", {"session_id": "sess_demo", "event_id": 7, "texture_id": "tex1", "x": 1, "y": 2}),
+        (["resource", "list"], "rd.resource.list_all", {"session_id": "sess_demo"}),
+        (["resource", "show", "--resource-id", "tex1"], "rd.resource.get_details", {"session_id": "sess_demo", "resource_id": "tex1"}),
+        (["resource", "usage", "--resource-id", "tex1"], "rd.resource.get_usage", {"session_id": "sess_demo", "resource_id": "tex1"}),
+    ]
+
+    for argv, expected_operation, expected_subset in cases:
+        args = parser.parse_args(["--daemon-context", "ctx-agent", *argv, "--session-id", "sess_demo"])
+        exit_code = asyncio.run(rdx_cli._main_async(args))
+        assert exit_code == rdx_cli.EXIT_OK
+        operation, call_args, context = seen[-1]
+        assert operation == expected_operation
+        assert context == "ctx-agent"
+        for key, value in expected_subset.items():
+            assert call_args[key] == value
+        if expected_operation.startswith("rd.export."):
+            assert "output_path" in call_args
+
+    assert len(captured) == len(cases)
+
+
+def test_facade_list_tsv_requests_and_renders_projection(monkeypatch, capsys) -> None:
+    parser = rdx_cli._build_parser()
+
+    def _fake_daemon_exec(operation: str, args: dict[str, object], *, remote: bool = False, context: str = "default"):  # type: ignore[no-untyped-def]
+        assert operation == "rd.event.get_actions"
+        assert args["projection"] == {"kind": "tabular", "include_tsv_text": True}
+        return {
+            "ok": True,
+            "result_kind": operation,
+            "data": {"actions": []},
+            "artifacts": [],
+            "error": None,
+            "meta": {},
+            "projections": {"tabular": {"columns": ["event_id", "name"], "rows": [[7, "draw"]], "tsv_text": "event_id\tname\n7\tdraw"}},
+        }
+
+    monkeypatch.setattr(rdx_cli, "_daemon_exec", _fake_daemon_exec)
+    args = parser.parse_args(["event", "list", "--session-id", "sess_demo", "--format", "tsv"])
+
+    exit_code = asyncio.run(rdx_cli._main_async(args))
+
+    assert exit_code == rdx_cli.EXIT_OK
+    assert "event_id	name" in capsys.readouterr().out
+
+
+def test_facade_nested_tsv_returns_projection_not_supported(monkeypatch) -> None:
+    parser = rdx_cli._build_parser()
+    captured: list[dict] = []
+
+    def _unexpected_daemon_exec(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("nested TSV facade should fail before daemon dispatch")
+
+    monkeypatch.setattr(rdx_cli, "_daemon_exec", _unexpected_daemon_exec)
+    monkeypatch.setattr(rdx_cli, "_print_json", lambda payload: captured.append(payload))
+    args = parser.parse_args(["pipeline", "show", "--session-id", "sess_demo", "--format", "tsv"])
+
+    exit_code = asyncio.run(rdx_cli._main_async(args))
+
+    assert exit_code == rdx_cli.EXIT_RUNTIME_ERR
+    assert captured[0]["error"]["code"] == "projection_not_supported"
+
+
+def test_facade_without_session_returns_session_required(monkeypatch) -> None:
+    parser = rdx_cli._build_parser()
+    captured: list[dict] = []
+
+    monkeypatch.setattr(rdx_cli, "_default_session_id", lambda value, context="default": (_ for _ in ()).throw(RuntimeError("No session_id available.")))
+    monkeypatch.setattr(rdx_cli, "_print_json", lambda payload: captured.append(payload))
+    args = parser.parse_args(["event", "list"])
+
+    exit_code = asyncio.run(rdx_cli._main_async(args))
+
+    assert exit_code == rdx_cli.EXIT_RUNTIME_ERR
+    assert captured[0]["result_kind"] == "rdx.event.list"
+    assert captured[0]["error"]["code"] == "session_required"

@@ -13,3 +13,5 @@ For shader edits, always read `edit_plan` from `rd.shader.get_source`, `rd.shade
 `source_target` names the representation returned by RenderDoc, such as `SPIR-V ASM` or `DXIL`. `source_encoding` names how replacement input will be interpreted by the replay backend. These are related but not interchangeable; use the values from `edit_plan` and returned tool payloads.
 
 Agents use `rd.session.open_preview` through CLI commands when a human observer needs the preview window. `preview.display` is the stable state surface for window and framebuffer geometry.
+
+For the task-level rdx-native SOP, use [rdx-native agent playbook](rdx-native-agent-playbook.md). For exact catalog coverage, use [Tool reference](tool-reference.md), generated from `spec/tool_catalog.json`.

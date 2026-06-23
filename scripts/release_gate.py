@@ -21,6 +21,7 @@ if str(SCRIPT_ROOT) not in sys.path:
 from rdx.python_runtime import validate_bundled_python_layout
 from scripts import package_release as release_packager
 from scripts._shared import run_subprocess, tools_root, write_text
+from scripts.generate_tool_reference import generate_tool_reference
 
 
 REQUIRED_DIRS = [
@@ -43,6 +44,9 @@ REQUIRED_DIRS = [
 REQUIRED_FILES = [
     "pyproject.toml",
     "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md",
+    "docs/rdx-native-agent-playbook.md",
+    "docs/tool-reference.md",
 ]
 
 BASH_SMOKE_LOG = "intermediate/logs/smoke_cli.log"
@@ -87,7 +91,7 @@ USER_DOCS = [
     "docs/agent-integration.md",
     "docs/configuration.md",
     "docs/troubleshooting.md",
-    "docs/compatibility-notes.md",
+    "docs/public-contract.md",
     "docs/stability.md",
     "docs/release-notes.md",
 ]
@@ -337,7 +341,7 @@ def _check_catalog_public_surface(root: Path) -> tuple[bool, str]:
     names = {str(item.get("name") or "").strip() for item in tools if isinstance(item, dict)}
     removed = sorted(REMOVED_CATALOG_TOOLS & names)
     if removed:
-        return False, f"removed compatibility aliases still in active catalog: {removed}"
+        return False, f"removed aliases still in active catalog: {removed}"
     declared_count = int(payload.get("tool_count") or len(tools))
     if declared_count != len(tools):
         return False, f"catalog tool_count mismatch: declared={declared_count} actual={len(tools)}"
@@ -345,8 +349,25 @@ def _check_catalog_public_surface(root: Path) -> tuple[bool, str]:
         return False, f"expected 194 active tools after alias convergence, got {len(tools)}"
     catalog_text = json.dumps(payload, ensure_ascii=False)
     if "\u517c\u5bb9\u5de5\u5177" in catalog_text:
-        return False, "active catalog contains removed compatibility-tool wording"
-    return True, "active catalog has 194 tools and no removed compatibility aliases"
+        return False, "active catalog contains removed alias-tool wording"
+    return True, "active catalog has 194 tools and no removed aliases"
+
+
+def _check_tool_reference_fresh(root: Path) -> tuple[bool, str]:
+    catalog_path = root / "spec" / "tool_catalog.json"
+    doc_path = root / "docs" / "tool-reference.md"
+    if not catalog_path.is_file():
+        return False, f"missing catalog: {catalog_path}"
+    if not doc_path.is_file():
+        return False, f"missing tool reference: {doc_path}"
+    try:
+        expected = generate_tool_reference(catalog_path)
+        current = doc_path.read_text(encoding="utf-8-sig")
+    except Exception as exc:
+        return False, f"tool reference freshness check failed: {exc}"
+    if current != expected:
+        return False, "docs/tool-reference.md is stale; run python scripts/generate_tool_reference.py"
+    return True, "docs/tool-reference.md matches spec/tool_catalog.json"
 
 
 def _check_no_mcp_public_surface(root: Path) -> tuple[bool, str]:
@@ -526,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
     results.append(("docs:public-command-examples", ok_docs_command, docs_command_detail))
     ok_catalog_surface, catalog_surface_detail = _check_catalog_public_surface(root)
     results.append(("catalog:public-surface", ok_catalog_surface, catalog_surface_detail))
+    ok_tool_ref, tool_ref_detail = _check_tool_reference_fresh(root)
+    results.append(("docs:tool-reference-fresh", ok_tool_ref, tool_ref_detail))
     ok_mcp_surface, mcp_surface_detail = _check_no_mcp_public_surface(root)
     results.append(("mcp:no-public-entrypoint", ok_mcp_surface, mcp_surface_detail))
 

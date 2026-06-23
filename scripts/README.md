@@ -6,6 +6,7 @@ Common checks:
 
 ```bat
 python scripts/check_markdown_health.py
+python scripts/generate_tool_reference.py --check
 python scripts/package_release.py
 python scripts/release_gate.py --require-smoke-reports --require-release-package
 ```
@@ -17,7 +18,7 @@ bash scripts/smoke_cli.sh
 bash scripts/smoke_cli.sh --rdc "C:/path/sample.rdc" --context cli-smoke
 ```
 
-`smoke_cli.sh` directly invokes `bin/rdx` for `doctor`, tool discovery, and, when `--rdc` is passed, the capture/session chain. It does not delegate command orchestration to Python. The release gate checks `intermediate/logs/smoke_cli.log` only when smoke reports are required, and it does not consume Python smoke JSON reports.
+`smoke_cli.sh` directly invokes `bin/rdx` for `doctor`, tool discovery, and, when `--rdc` is passed, the capture/session chain. The release gate checks `intermediate/logs/smoke_cli.log` only when smoke reports are required.
 
 `preview_geometry_smoke.py` validates preview window geometry and should stay aligned with CLI preview behavior.
 

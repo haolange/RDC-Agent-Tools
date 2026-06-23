@@ -1,0 +1,310 @@
+﻿# Tool Reference
+
+This file is generated from `spec/tool_catalog.json`. Do not edit it by hand; run `python scripts/generate_tool_reference.py`.
+
+- Tool count: 194
+- Group count: 17
+- Canonical transport: `rdx call <rd.*> --format json`
+- Human facade: `rdx event|pipeline|shader|export|pixel|resource ...` maps to the same canonical tools
+- Scope: Windows x64 local replay plus remote Android replay
+
+## Groups
+
+| Group | Tools |
+| --- | ---: |
+| 3.1，核心与环境管理 (Core & Environment) | 14 |
+| 3.2，捕获文件与 Replay Session (Capture & Replay) | 13 |
+| 3.3，事件导航与 API 检查 (Event Navigation & API Inspection) | 12 |
+| 3.4，管线状态查询 (Pipeline State Inspection) | 25 |
+| 3.5，资源探查 (Resource Inspection & History) | 12 |
+| 3.6，纹理数据访问与分析 (Texture Data Access & Analysis) | 11 |
+| 3.7，缓冲区与网格数据访问 (Buffer & Mesh Data Access) | 9 |
+| 3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement) | 13 |
+| 3.9，Shader Debugger 与像素/顶点级调试 (Shader Debugging) | 13 |
+| 3.10，性能与高级分析 (Performance & Advanced Analysis) | 6 |
+| 3.11，导出、报告与可复现打包 (Export & Reporting) | 12 |
+| 3.12，远程连接与自动化抓帧 (Remote Capture & Target Control) | 12 |
+| 3.14，诊断工具 (Diagnostics, Heuristic Checks) | 11 |
+| 3.15，专家级宏工作流 (Expert Macro Workflows) | 10 |
+| 3.16，通用辅助工具 (Utilities, Optional) | 6 |
+| 3.17，上下文快照工具 (Context Snapshot Tools) | 11 |
+| 3.18，VFS 导航工具 (VFS Navigation Tools) | 4 |
+
+## 3.1，核心与环境管理 (Core & Environment)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.core.init | 初始化 RenderDoc Replay/Remote 运行时；建立对象池与临时目录；必须在首次使用前调用一次。 | global_env (dict, 可选): 全局配置，例如 {temp_dir, artifact_dir, log_level, replay_cache_size_mb}<br>enable_remote (bool, 可选, 默认 true): 是否启用 rd.remote.* | - |
+| rd.core.shutdown | 关闭运行时并释放所有资源（Replay Session、Remote 连接、临时文件句柄）。 | 无 | - |
+| rd.core.get_version | 获取 RenderDoc 运行时版本与构建信息。 | 无 | - |
+| rd.core.get_capabilities | 获取当前环境能力详情；除 replay/remote/debug 基础项外，还会暴露当前 context/session/backend 视角下的 remote capability matrix。 | detail_level (str, 可选, 默认 'summary'): 'summary' \| 'full' | - |
+| rd.core.set_config | 设置运行时配置（对后续调用生效）。 | config (dict): {artifact_dir?, temp_dir?, max_artifact_bytes?, default_image_format?, default_mesh_format?, log_level?} | - |
+| rd.core.get_config | 读取当前运行时配置。 | 无 | - |
+| rd.core.set_log_level | 设置内部日志等级，便于定位 CLI runtime 与 RenderDoc 侧错误。 | level (str): 'trace'\|'debug'\|'info'\|'warn'\|'error' | - |
+| rd.core.get_logs | 读取内部日志（可按时间/级别过滤）。 | since_ms (int, 可选): 仅返回该时间戳之后的日志<br>level_min (str, 可选): 最低级别过滤<br>max_lines (int, 可选, 默认 500) | - |
+| rd.core.healthcheck | 执行自检：验证 RenderDoc 库加载、临时目录写入、（可选）创建最小 Replay/Remote 连接等。 | check_remote (bool, 可选, 默认 false)<br>check_replay (bool, 可选, 默认 true) | - |
+| rd.core.get_operation_history | 读取当前 context 最近的 trace-linked 操作历史，可按时间、状态与操作名过滤。 | since_ms (int, 可选): 仅返回该时间戳之后更新过的操作<br>operation (str, 可选): 按操作名子串过滤<br>status (str, 可选): 按 running/completed/failed 过滤<br>max_items (int, 可选, 默认 32) | - |
+| rd.core.get_runtime_metrics | 读取当前 context 的自监控指标、限制配置、恢复摘要与最近操作统计。 | - | - |
+| rd.core.list_tools | 按 namespace、group、capability、role、intent 等结构化条件列出可用 tool，默认仍以 canonical `rd.*` 主接口优先，其后才是 macro、session/context/core 元信息层与 navigation 辅助层。 | namespace (str, 可选)<br>group (str, 可选)<br>capability (str, 可选)<br>role (str, 可选): canonical\|macro\|navigation<br>intent (str, 可选)<br>mutates_state (bool, 可选)<br>detail_level (str, 可选, 默认 'summary'): summary\|full | - |
+| rd.core.search_tools | 按名称、描述、group、capability 与 intent 做轻量 discovery；默认仍以 canonical `rd.*` 主接口优先，但当 query 明确指向 browse/path/tree/vfs 或 table/tabular/tsv 时，会把 navigation 或 projection 相关结果提前。 | query (str, 可选)<br>namespace (str, 可选)<br>capability (str, 可选)<br>role (str, 可选): canonical\|macro\|navigation<br>intent (str, 可选)<br>detail_level (str, 可选, 默认 'summary'): summary\|full | - |
+| rd.core.get_tool_graph | 返回 tool 之间的 prerequisite 与 macro-to-canonical 依赖图，图中 nodes 沿用 discovery summary 与默认排序，帮助 Agent 先看 canonical 主接口，再看 macro 和 navigation 辅助层。 | query (str, 可选)<br>namespace (str, 可选)<br>capability (str, 可选)<br>role (str, 可选): canonical\|macro\|navigation<br>intent (str, 可选) | - |
+
+## 3.2，捕获文件与 Replay Session (Capture & Replay)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.capture.open_file | 打开一个 .rdc 捕获文件并返回文件句柄（不自动创建 Replay）。 | file_path (str): 捕获文件的绝对/可访问路径<br>read_only (bool, 可选, 默认 true): 是否以只读方式打开 | - |
+| rd.capture.close_file | 关闭捕获文件句柄。 | capture_file_id (str) | capture_file_id; rd.capture.open_file; This tool requires an opened capture handle before it can act on capture-backed state. |
+| rd.capture.get_info | 获取捕获文件元数据（时间、可执行文件、驱动、机器信息、RDC 版本等）。 | capture_file_id (str) | capture_file_id; rd.capture.open_file; This tool requires an opened capture handle before it can act on capture-backed state. |
+| rd.capture.get_thumbnail | 获取捕获文件缩略图（如果存在）。 | capture_file_id (str)<br>max_size_px (int, 可选, 默认 256): 缩略图最大边长 | capture_file_id; rd.capture.open_file; This tool requires an opened capture handle before it can act on capture-backed state. |
+| rd.capture.list_frames | 列出捕获文件中所有帧的基本信息（帧索引、时间戳、缩略图可用性等）。 | capture_file_id (str) | capture_file_id; rd.capture.open_file; This tool requires an opened capture handle before it can act on capture-backed state. |
+| rd.capture.open_replay | 基于 capture_file_id 创建一个可回放的 Replay Session；若提供 options.remote_id，则必须严格走该 live remote handle 对应的 remote backend，不允许 silent local fallback。 | capture_file_id (str)<br>options (dict, 可选): 回放选项，例如 {force_api?, gpu_id?, software_replay?, enable_debug?, replay_cache_mb?} | capture_file_id; rd.capture.open_file; Opening a replay always requires an opened capture handle.<br>remote_id; rd.remote.connect; Remote replay requires a live remote handle in options.remote_id. |
+| rd.capture.close_replay | 关闭一个 Replay Session，释放回放 driver 与缓存资源。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.replay.set_frame | 切换当前回放帧（会重置 active event 到该帧起始）。 | session_id (str)<br>frame_index (int) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.replay.get_frame_info | 获取当前/指定帧的统计信息（drawcall 数、marker 数、时长等）。 | session_id (str)<br>frame_index (int, 可选): 缺省为当前帧 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.set_active | 设置当前 active event；成功后 runtime 与 context snapshot 必须同步到同一个 resolved event，失败时保持旧状态不变。 | session_id (str)<br>event_id (int) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.get_active | 读取当前 active event。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.replay.get_api_properties | 获取 Replay Session 的 API 属性（如 shader debug 支持、counter 支持等）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.replay.get_driver_info | 获取回放 driver 信息（版本、vendor、device、driver 字符串等）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.3，事件导航与 API 检查 (Event Navigation & API Inspection)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.event.get_actions | 用于获取当前帧的根 Action 列表，进而构建 Drawcall/Marker 树（兼容 V3 版本）。 | session_id (str)<br>include_markers (bool, 可选, 默认 true)<br>include_drawcalls (bool, 可选, 默认 true)<br>max_nodes (int, 可选, 默认 2000): 有界返回的最大事件节点数<br>projection (dict, optional): tabular projection request for list readability | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.get_action_tree | 获取当前帧完整的 Action 树，支持按深度或过滤条件进行裁剪。 | session_id (str)<br>max_depth (int, 可选)<br>filter (dict, 可选)<br>offset (int, 可选, 默认 0): 根节点分页偏移<br>limit (int, 可选, 默认 256): 根节点分页大小<br>max_nodes (int, 可选, 默认 2000): 整棵树返回的最大节点数 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.get_action_details | 获取单个 Action 的详细信息，包括 Drawcall 参数、Marker 范围以及输出目标等摘要。 | session_id (str)<2>event_id (int) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.get_drawcall_children | 获取指定 Event 对应 Action 的子节点 event_id 列表，便于快速遍历。 | session_id (str)<br>event_id (int) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.get_parent_chain | 获取指定 Event 的父链（从根节点到当前 Event），用于还原 Marker Stack 或 Pass 层级。 | session_id (str)<br>event_id (int) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.search_actions | 在当前帧的 Action 树中搜索节点，支持按名称、Flag 或事件范围等条件。 | session_id (str)<br>query (dict): 查询条件，例如 {name_regex?, name_contains?, flags_include?, flags_exclude?, event_id_min?, event_id_max?}<br>max_results (int, 可选, 默认 200) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.list_passes | 根据 Marker 或 Region 归纳当前帧的 Pass 列表，类似于 RenderDoc Event Browser 的 Region 视图。 | session_id (str)<br>marker_policy (str, 可选, 默认 'region'): 可选值 'region', 'markers_only', 'both' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.get_marker_stack | 获取指定 Event 时刻的 Marker Stack（从外层到内层）。 | session_id (str)<br>event_id (int) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.get_api_calls | 获取指定 Event 对应的底层 API 调用列表，例如 D3D 或 Vulkan 命令。 | session_id (str)<br>event_id (int)<br>include_arguments (bool, 可选, 默认 true)<br>max_calls (int, 可选, 默认 2000) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.get_callstack | 获取指定 Event 的 CPU Callstack（如果捕获时包含该信息且平台支持）。 | session_id (str)<br>event_id (int)<br>resolve_symbols (bool, 可选, 默认 false) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.diff_pipeline_state | 对比两个 Event 的 Pipeline State 差异，可用于定位“状态被谁修改”的问题。 | session_id (str)<br>event_a (int): 基准 eventId<br>event_b (int): 对比 eventId<br>scope (str, 可选, 默认 'all'): 对比范围，可选值 'all', 'shaders', 'bindings', 'raster', 'om', 'ia'<br>include_unchanged (bool, 可选, 默认 false) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.event.get_resource_usage | 获取指定 Event 上资源的摘要使用情况，例如哪些资源被绑定为 RT/DS/SRV/UAV/CBV/IB/VB 等。 | session_id (str)<br>event_id (int) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.4，管线状态查询 (Pipeline State Inspection)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.pipeline.get_state | 获取当前 active event 的完整 Pipeline State（兼容 V3；返回结构按 API 类型组织）。 | session_id (str)<br>event_id (int, 可选): 缺省为当前 active event，并回传 resolved_event_id<br>detail_level (str, 可选, 默认 'full'): 'summary'\|'full'<br>context_id (str, optional): choose the context to use; defaults to the current daemon context | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_state_summary | 获取 Pipeline State 的紧凑摘要（适合大模型快速阅读）。 | session_id (str)<br>event_id (int, 可选): 缺省为当前 active event，并回传 resolved_event_id<br>include_bindings (bool, 可选, 默认 true)<br>include_shaders (bool, 可选, 默认 true)<br>context_id (str, optional): choose the context to use; defaults to the current daemon context | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_stage_state | 获取指定 Shader Stage 的 Pipeline 子状态。 | session_id (str)<br>stage (str): 'VS'\|'HS'\|'DS'\|'GS'\|'PS'\|'CS'\|'AS'\|'MS'\|'RT' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_vertex_input | 获取 Input Assembler 状态：VB/IB、stride/offset、顶点布局/attribute 映射。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_vertex_buffers | 获取当前绑定的 Vertex Buffers 列表（含 slot/stride/offset/resource_id）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_index_buffer | 获取当前绑定的 Index Buffer（resource_id/format/offset）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_primitive_topology | 获取拓扑信息（Primitive Topology、Patch Control Points 等）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_viewports_scissors | 获取 Viewports 与 Scissors（多 viewport 支持）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_rasterizer_state | 获取 Rasterizer State（cull mode、front face、depth clamp、depth bias、line width 等）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_multisample_state | 获取 MSAA/coverage/alpha-to-coverage 等多采样相关状态。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_blend_state | 获取 Blend State（per RT 的 blend enable、因子、op、write mask）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_depth_stencil_state | 获取 Depth/Stencil State（depth func/write、stencil ops、stencil ref、bounds 等）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_output_targets | 获取 Output Merger / Framebuffer：RT/DS 绑定、formats、mip/slice、load/store（若可得）。 | session_id (str)<br>event_id (int, 可选): 缺省为当前 active event，并回传 resolved_event_id<br>context_id (str, optional): choose the context to use; defaults to the current daemon context | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_render_targets | 仅获取 Render Targets 列表（包含 resource_id、format、mip/slice、name）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_depth_target | 仅获取 Depth/Stencil Target 信息。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_resource_bindings | 获取指定 stage 的资源绑定（SRV/CBV/RO-Images 等）。 | session_id (str)<br>stage (str): 'VS'\|'HS'\|'DS'\|'GS'\|'PS'\|'CS'\|'AS'\|'MS'\|'RT' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_uav_bindings | 获取指定 stage 的 UAV/Storage 绑定。 | session_id (str)<br>stage (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_sampler_bindings | 获取指定 stage 的 Sampler 绑定。 | session_id (str)<br>stage (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_constant_buffers | 获取指定 stage 的 Constant Buffer 绑定（slot/buffer/offset/size）。 | session_id (str)<br>stage (str)<br>include_contents (bool, 可选, 默认 false): 若 true 则额外解码变量值（可能较慢）<br>max_bytes (int, 可选, 默认 1048576): 解码上限，避免超大 CB 导致内存压力 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_push_constants | 获取 Vulkan Push Constants（按 range/offset 组织；若当前 API 非 Vulkan 则返回空）。 | session_id (str)<br>decode_as (str, 可选): 'raw'\|'u32'\|'f32'\|'struct'（struct 需要 layout）<br>layout (dict, 可选): struct layout 定义 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_dynamic_state | 获取 Vulkan Dynamic State（viewport/scissor/lineWidth/depthBias/stencilRef 等）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_root_signature | 获取 D3D12 Root Signature 摘要（参数表、descriptor ranges、static samplers）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_descriptor_heaps | 获取 D3D12 Descriptor Heaps 绑定信息（CBV/SRV/UAV, Sampler）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_resource_states | 获取 D3D12 Resource State（barrier 后的状态快照；若可得）。 | session_id (str)<br>resource_id (str, 可选): 指定资源；缺省则返回当前关键绑定资源的状态 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.pipeline.get_shader | 获取指定 stage 的 shader 句柄与摘要信息（resource_id、entry、debug info 可用性等）。 | session_id (str)<br>stage (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.5，资源探查 (Resource Inspection & History)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.resource.list_all | 列出捕获中所有资源（Textures/Buffers/Shaders/Pipelines 等），兼容 V3。 | session_id (str)<br>types (list[str], 可选): 过滤类型，如 ['Texture','Buffer','Shader']；缺省为全部<br>include_unused (bool, 可选, 默认 true)<br>projection (dict, optional): tabular projection request for list readability | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.list_textures | 列出所有纹理资源，包含维度、格式、array、mips、samples。 | session_id (str)<br>include_render_targets (bool, 可选, 默认 true)<br>include_depth_stencil (bool, 可选, 默认 true) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.list_buffers | 列出所有 buffer 资源，包含大小、用途、结构化信息（若可得）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.get_details | 获取资源详细信息，兼容 V3；根据资源类型返回不同字段。 | session_id (str)<br>resource_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.get_usage | 获取资源的使用情况，即哪些 event 读/写/绑定该资源，兼容 V3。 | session_id (str)<br>resource_id (str)<br>max_events (int, 可选, 默认 20000) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.get_history | 获取资源的读写历史，按时间排序，包含写入来源、清除、copy 等。 | session_id (str)<br>resource_id (str)<br>include_reads (bool, 可选, 默认 false): 若为 true 则包含 reads（可能很长）<br>include_writes (bool, 可选, 默认 true) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.get_initial_contents | 获取资源初始内容（如果捕获保存了初始内容），通常用于追踪“初始数据是否正确”，兼容 V3。 | session_id (str)<br>resource_id (str)<br>output_path (str, 可选): 将数据保存到指定文件；缺省由系统分配 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.get_current_contents | 读取资源在当前 active event 时刻的内容（buffer 返回 bytes；texture 返回 subresource blob 或保存为文件）。 | session_id (str)<br>resource_id (str)<br>subresource (dict, 可选): 纹理子资源 {mip, slice, sample}；buffer 可省略<br>range (dict, 可选): buffer 范围 {offset, size}<br>output_path (str, 可选) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.set_alias | 为资源设置一个本地别名，仅影响后续输出/报告，不修改捕获内容。 | session_id (str)<br>resource_id (str)<br>alias (str): 例如 'GBufferA'/'MainColor' 等 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.get_descriptor_info | 获取资源在当前绑定上下文中的 descriptor/view 信息（SRV/UAV/RTV/DSV 等）。 | session_id (str)<br>resource_id (str)<br>event_id (int, 可选): 若提供则临时切换到该 event 查询（不改变全局 active event） | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.estimate_memory | 估算资源占用内存，按格式/维度推算，用于快速筛选大资源。 | session_id (str)<br>resource_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.resource.get_creation_context | 获取资源创建上下文：创建 event、创建参数摘要（若可得）。 | session_id (str)<br>resource_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.6，纹理数据访问与分析 (Texture Data Access & Analysis)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.texture.get_data | 用于读取纹理子资源的数值 readback 容器。默认返回 `.npz` artifact，供后续统计、像素分析或离线数值处理；它不是图片导出接口。 | session_id (str)<br>texture_id (str): 纹理资源 ID<br>event_id (int, 可选): 若提供则在该 event 上解析 texture/readback，并回传 resolved_event_id<br>subresource (dict, 可选): 包含 mip (int, 默认 0), slice (int, 默认 0), sample (int, 默认 0)<br>output_path (str, 可选): 若提供则必须使用 `.npz` 扩展名<br>as_base64 (bool, 可选): 同时返回 `.npz` 容器的 base64 文本<br>context_id (str, optional): choose the context to use; defaults to the current daemon context | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.texture.get_subresource_data | 用于读取并返回纹理子数据的元数据 (metadata)，例如尺寸、行距 (row pitch) 和格式 (format) 等，并支持选择性导出。 | session_id (str)<br>texture_id (str)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>export (bool, 可选, 默认 false)<br>output_path (str, 可选) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.texture.get_pixel_value | 用于读取纹理在指定像素坐标处的值。该值将自动按照纹理格式解码为 float4 或 int4。此功能兼容 V3 版本。 | session_id (str)<br>texture_id (str)<br>x (int)<br>y (int)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>as_type (str, 可选, 默认 'float'): 返回值类型，可选 'float', 'uint', 'int' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.texture.get_region_values | 用于读取纹理中一个矩形区域内的像素值，常用于局部统计分析、查找 NaN 或 Inf 值。 | session_id (str)<br>texture_id (str)<br>rect (dict): 包含 {x, y, w, h}<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>stride (int, 可选, 默认 1): 采样步长，大于 1 可降低处理成本<br>as_type (str, 可选, 默认 'float') | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.texture.get_pixel_history | 用于获取当前活动事件 (active event) 下某个像素的历史信息，即哪些绘制调用 (drawcall) 或调度 (dispatch) 影响了该像素。此功能兼容 V3 版本。 | session_id (str)<br>texture_id (str): 通常为当前渲染目标 (RT)<br>x (int)<br>y (int)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>include_shaders (bool, 可选, 默认 true) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.texture.get_min_max | 用于计算纹理子资源的最小值 (min) 和最大值 (max)。此功能兼容 V3 版本。 | session_id (str)<br>texture_id (str)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>channels (str, 可选, 默认 'rgba'): 指定通道，可选 'r', 'rg', 'rgb', 'rgba' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.texture.get_histogram | 用于计算纹理子资源的直方图。此功能兼容 V3 版本。 | session_id (str)<br>texture_id (str)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>channels (str, 可选, 默认 'r')<br>bins (int, 可选, 默认 256)<br>range (dict, 可选): 包含 {min, max} (如果缺省则自动计算) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.texture.compute_stats | 用于计算纹理的统计量，包括均值 (mean)、标准差 (stddev)、NaN/Inf 计数以及 0/1 占比等，以便进行快速的健全性检查 (sanity check)。 | session_id (str)<br>texture_id (str)<br>mip (int, 可选, 默认 0)<br>slice (int, 可选, 默认 0)<br>sample (int, 可选, 默认 0)<br>stride (int, 可选, 默认 1) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.texture.render_overlay | 用于将叠加层 (overlay) 渲染到纹理上并导出，例如绘制调用高亮、线框、视口/裁剪 (viewport/scissor) 或过度绘制 (quad overdraw) 等。此功能兼容 V3 版本。 | session_id (str)<br>texture_id (str)<br>overlay (str): 叠加层类型，可选 'None', 'Drawcall', 'Wireframe', 'ViewportScissor', 'Overdraw'<br>event_id (int, 可选): 叠加层关联的事件 ID<br>output_path (str, 可选)<br>image_format (str, 可选, 默认 'png') | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.texture.save_mip_chain | 用于批量导出 mip chain，可选择将每个 mip 保存为单独文件或合并到指定目录。 | session_id (str)<br>texture_id (str)<br>output_dir (str)<br>file_format (str, 可选, 默认 'png')<br>slice (int, 可选, 默认 0) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.texture.diff | 用于对比两张纹理 (要求尺寸相同且格式可转换)，并输出差异图以及各项指标，如峰值信噪比 (PSNR)、最大绝对误差 (max error) 和均方误差 (mean squared error)。 | session_id (str)<br>tex_a (dict): 包含 {texture_id, subresource?}<br>tex_b (dict): 包含 {texture_id, subresource?}<br>metric (list[str], 可选): 指标列表，可选 ['max_abs', 'mse', 'psnr']<br>output_path (str, 可选): 差异图输出路径 (PNG/EXR) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.7，缓冲区与网格数据访问 (Buffer & Mesh Data Access)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.buffer.get_data | 读取 buffer 的原始字节数据（兼容 V3；默认保存到文件以避免 JSON 过大）。 | session_id (str)<br>buffer_id (str)<br>offset (int, 可选, 默认 0)<br>size (int, 可选): 读取字节数；缺省为 buffer 末尾<br>output_path (str, 可选): 若提供则写入该文件，否则写入临时 artifact 文件<br>as_base64 (bool, 可选, 默认 false): 小数据可直接 base64 返回 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.buffer.get_structured_data | 按结构化布局解码 buffer 内容（兼容 V3；适用于 StructuredBuffer/SSBO/顶点数据等）。 | session_id (str)<br>buffer_id (str)<br>layout (dict): 结构体布局定义，例如 {stride, fields:[{name,type,offset,count?}]}<br>offset (int, 可选, 默认 0)<br>count (int, 可选): 解码元素个数<br>max_elements (int, 可选, 默认 4096) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.buffer.search_pattern | 在 buffer 内搜索字节模式（适用于查找 magic number、NaN pattern、特定 id）。 | session_id (str)<br>buffer_id (str)<br>pattern (str): 支持 hex 字符串（如 'FF 00 ?? 7F'）或 base64<br>offset (int, 可选, 默认 0)<br>size (int, 可选)<br>max_results (int, 可选, 默认 256) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.mesh.get_post_vs_data | 获取指定 drawcall 的 Post-VS 数据（位置/属性等）。 | session_id (str)<br>event_id (int, 可选): 缺省使用当前 active event<br>view (str, 可选, 默认 'vs_out'): 'vs_out'\|'gs_out'\|'ts_out'\|'ms_out'<br>instance (int, 可选, 默认 0)<br>view_index (int, 可选, 默认 0): multiview/VR<br>max_vertices (int, 可选): 限制导出顶点数 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.mesh.get_post_gs_data | 获取指定 drawcall 的 Post-GS 数据（若管线包含 GS）。 | session_id (str)<br>event_id (int, 可选)<br>instance (int, 可选, 默认 0)<br>max_primitives (int, 可选) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.mesh.decode_vertex_data | 对指定 VB 按输入布局解码顶点属性。 | session_id (str)<br>vertex_buffer_id (str)<br>layout (dict): 输入布局定义 {stride, attributes:[{semantic/name, format, offset}]}<br>vertex_offset (int, 可选, 默认 0)<br>vertex_count (int, 可选, 默认 256)<br>base_vertex (int, 可选, 默认 0) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.mesh.decode_index_data | 解码 Index Buffer（16/32-bit）为 index 列表。 | session_id (str)<br>index_buffer_id (str)<br>format (str): 'R16_UINT'\|'R32_UINT'<br>index_offset (int, 可选, 默认 0)<br>index_count (int, 可选, 默认 256)<br>base_vertex (int, 可选, 默认 0) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.mesh.get_drawcall_mesh_config | 获取当前 drawcall 的 mesh 配置：使用哪些 VB/IB、topology、baseVertex、indexOffset、instanceCount 等。 | session_id (str)<br>event_id (int, 可选) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.mesh.get_mesh_preview | 渲染 mesh 预览图（类似 RenderDoc Mesh Viewer 的输出截图）。 | session_id (str)<br>event_id (int, 可选)<br>mode (str, 可选, 默认 'solid'): 'solid'\|'wireframe'\|'normals'\|'uv'<br>output_path (str, 可选)<br>width (int, 可选, 默认 512)<br>height (int, 可选, 默认 512) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.shader.get_reflection | 获取指定 shader 的反射信息；支持 `event_id + stage` 与 `event_id + stage + shader_id` 两种 event-bound 绑定方式，显式 `shader_id` 会优先参与身份校验。 | session_id (str)<br>shader_id (str, 可选): 若提供，则必须与请求 event/stage 当前绑定 shader identity 一致<br>stage (str, 可选): 若未提供 `shader_id`，则与 `event_id` 一起解析当前绑定 shader<br>event_id (int, 可选): 缺省为当前 active event<br>include_bindings (bool, 可选, 默认 true)<br>include_constant_blocks (bool, 可选, 默认 true)<br>context_id (str, optional): choose the context to use; defaults to the current daemon context | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.get_disassembly | 获取指定 shader 的反汇编/IR；event-bound shader 解析与 `rd.pipeline.get_shader`、`rd.export.shader_bundle`、`rd.shader.get_reflection`、`rd.shader.edit_and_replace` 使用同一套绑定逻辑。 | session_id (str)<br>shader_id (str)<br>target (str, 可选): `'auto'<br>'dxbc' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.get_source | 获取 shader 的源码/调试信息（若捕获包含 debug info，例如 PDB/DWARF/source embedding）。 | session_id (str)<br>shader_id (str)<br>prefer_original (bool, 可选, 默认 true): 优先返回原始源码（若可得） | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.extract_binary | 提取 shader 的二进制 blob（DXIL/DXBC/SPIR-V 等），并保存为文件。 | session_id (str)<br>shader_id (str)<br>output_path (str, 可选)<br>container (str, 可选): `'auto'<br>'dxil' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.list_entry_points | 列出 shader 容器中的 entry points（适用于 DXIL library/多 entry SPIR-V）。 | session_id (str)<br>shader_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.get_bindpoint_mapping | 获取 shader 资源绑定点映射（register/space/binding -> semantic meaning）。 | session_id (str)<br>shader_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.get_constant_block_layout | 读取常量块布局（variables、offset、type、array、matrix layout）。 | session_id (str)<br>shader_id (str)<br>block_name_or_index (str\|int) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.get_constant_buffer_contents | 读取指定 stage/slot 的 Constant Buffer 并按反射结构解码变量值（推荐用于专家级核对）。 | session_id (str)<br>stage (str)<br>slot (int)<br>array_index (int, 可选, 默认 0): CB array/space 情况<br>max_bytes (int, 可选, 默认 1048576)<br>flatten (bool, 可选, 默认 true): 是否将嵌套结构摊平成 path->value | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.edit_and_replace | 在当前 Replay Session 中替换 shader；支持 `event_id + stage` 与 `event_id + stage + shader_id` 两种入口，显式 `shader_id` 会优先作为绑定 identity 校验。 | session_id (str)<br>stage (str): `'VS'<br>'PS' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.revert_replacement | 撤销 shader 替换，恢复捕获中的原始 shader。 | session_id (str)<br>replacement_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.list_replacements | 列出当前 session 中已生效的 shader 替换。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.get_messages | 获取 RenderDoc 在 shader 编译/替换/调试过程产生的 messages。 | session_id (str)<br>severity_min (str, 可选, 默认 'info'): `'debug'<br>'info' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.compile | （可选扩展）在 server 侧调用外部编译器（dxc/glslangValidator/metal）编译 shader，返回 binary 路径；用于构建替换输入。 | source (str): HLSL/GLSL/MSL 源码<br>stage (str)<br>entry (str)<br>target (str): 例如 'vs_6_6'/'ps_6_6' 或 'spirv1.6'<br>defines (dict, 可选)<br>include_dirs (list[str], 可选)<br>additional_args (list[str], 可选)<br>output_path (str, 可选) | - |
+
+## 3.9，Shader Debugger 与像素/顶点级调试 (Shader Debugging)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.shader.debug_start | 启动 shader debugger（默认 pixel），在 remote replay 下会先读取 remote capability matrix；如果当前 backend/session 明确不支持 debug，则在创建 trace 前直接 truthful-fail。 | session_id (str)<br>mode (str, 可选, 默认 'pixel'): 当前正式支持 `pixel`；传入其他 mode 会返回结构化 `validation_error`，并在 details 中附带 `supported_modes` / `requested_mode` / `failure_stage` / `failure_reason`<br>event_id (int, 可选): 缺省为当前 active event<br>params (dict): pixel 模式下使用 {x, y, sample?, target?, view?, primitive?}<br>timeout_ms (int, 可选, 默认 10000)<br>context_id (str, optional): choose the context to use; defaults to the current daemon context | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.shader.get_debug_state | 获取当前 debugger 状态（当前 PC、活跃函数、变量、寄存器等）。 | session_id (str)<br>shader_debug_id (str)<br>detail_level (str, 可选, 默认 'full'): 'summary' \| 'full' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.step | 单步执行 debugger（步进一条指令或源代码行）。 | session_id (str)<br>shader_debug_id (str)<br>step_mode (str, 可选, 默认 'instruction'): 'instruction' \| 'line' \| 'over' \| 'out' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.continue | 继续执行 debugger（直到断点/结束/超时）。 | session_id (str)<br>shader_debug_id (str)<br>timeout_ms (int, 可选, 默认 10000) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.run_to | 运行到指定位置（PC 或 source location）。 | session_id (str)<br>shader_debug_id (str)<br>target (dict): {pc?, file?, line?}<br>timeout_ms (int, 可选, 默认 10000) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.set_breakpoints | 设置断点列表（按 PC 或 source location）。 | session_id (str)<br>shader_debug_id (str)<br>breakpoints (list[dict]): {pc?, file?, line?} | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.clear_breakpoints | 清除所有断点。 | session_id (str)<br>shader_debug_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.get_variables | 获取当前 scope 的变量（支持按名称过滤/按路径展开结构体）。 | session_id (str)<br>shader_debug_id (str)<br>name_filter (str, 可选): regex/contains<br>expand_depth (int, 可选, 默认 2)<br>max_variables (int, 可选, 默认 2048) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.evaluate_expression | 在 debugger 上下文中求值表达式（如 'cb0.myVar' 或寄存器表达式；实现可选）。 | session_id (str)<br>shader_debug_id (str)<br>expression (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.get_callstack | 获取 shader 调用栈（函数名/文件/行）。 | session_id (str)<br>shader_debug_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.finish | 结束并释放 shader debug session。 | session_id (str)<br>shader_debug_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.pixel_history | 获取像素历史（推荐替代 rd.texture.get_pixel_history；支持更丰富的测试/输出解释字段）。 | session_id (str)<br>x (int)<br>y (int)<br>target (dict, 可选): {texture_id?}（缺省为当前 RT0）<br>sample (int, 可选, 默认 0)<br>include_tests (bool, 可选, 默认 true)<br>include_shader_outputs (bool, 可选, 默认 true) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.debug.explain_test_failure | 对单条 pixel history 记录给出"为什么没写入/被丢弃"的解释（depth/stencil/scissor/blend 等）。 | session_id (str)<br>history_item (dict): 来自 rd.debug.pixel_history 的某个元素<br>verbosity (str, 可选, 默认 'normal'): 'short' \| 'normal' \| 'verbose' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.10，性能与高级分析 (Performance & Advanced Analysis)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.perf.enumerate_counters | 枚举可用的 GPU counters。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.perf.describe_counter | 获取单个 counter 的详细描述。 | session_id (str)<br>counter_id (int) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.perf.sample_counters | 对当前帧/指定 event 范围采样 counters（兼容 V3；可能较慢）。 | session_id (str)<br>counter_ids (list[int])<br>event_range (dict, 可选): {start_event_id, end_event_id}；缺省为整帧<br>stride (int, 可选, 默认 1): 每隔多少个 event 采样一次（降低成本） | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.perf.get_event_durations | 获取每个 event 的 GPU duration（若支持 timing queries；可用于定位慢 draw）。 | session_id (str)<br>event_range (dict, 可选)<br>max_events (int, 可选, 默认 20000) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.perf.get_frame_timing | 获取整帧 timing 摘要（GPU/CPU 若可得），含关键区间统计。 | session_id (str)<br>frame_index (int, 可选) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.perf.get_pipeline_statistics | 获取 pipeline statistics（VS/PS invocations、primitives、clipped 等；若 API/驱动支持）。 | session_id (str)<br>event_id (int, 可选) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.11，导出、报告与可复现打包 (Export & Reporting)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.export.screenshot | 导出当前 event 的输出截图（等价于 UI 的保存 framebuffer）。 | session_id (str)<br>target (dict, 可选): {texture_id? , rt_index?}；缺省为当前 RT0<br>event_id (int, 可选): 指定 event 输出；缺省为当前 active event<br>output_path (str)<br>file_format (str, 可选, 默认 'png')<br>include_alpha (bool, 可选, 默认 true)<br>overlay (str, 可选): 'None'\|'Drawcall'\|'Wireframe'\|'Overdraw' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.texture | 将纹理导出为可直接打开的图片/导出文件；这是统一的纹理导出入口，支持子资源选择、显示映射与通道控制。 | session_id (str)<br>texture_id (str)<br>subresource (dict, 可选): 包含 {mip, slice, sample}<br>output_path (str)<br>file_format (str, 可选): 文件格式，可选 'png', 'exr', 'dds', 'jpg'<br>channels (str, 可选, 默认 'rgba')<br>remap (dict, 可选): 包含 {black_point, white_point, gamma, hdr_clamp?}<br>flip_y (bool, 可选, 默认 false) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.buffer | 将 buffer 内容导出到文件；这是统一的 buffer 落盘导出入口。 | session_id (str)<br>buffer_id (str)<br>output_path (str)<br>offset (int, 可选, 默认 0)<br>size (int, 可选) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.mesh | 将指定 drawcall 的 mesh 导出到文件；这是统一的 mesh 落盘导出入口。 | session_id (str)<br>event_id (int, 可选)<br>format (str, 可选, 默认 'obj'): 'obj'\|'ply'\|'gltf'<br>output_path (str)<br>include_attributes (bool, 可选, 默认 true)<br>space (str, 可选, 默认 'postvs'): 'prevs'\|'postvs' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.pipeline_state_json | 将当前 event 的 pipeline state 以 JSON 导出到文件（便于 diff/归档）。 | session_id (str)<br>event_id (int, 可选)<br>output_path (str)<br>detail_level (str, 可选, 默认 'full') | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.event_tree_json | 导出当前帧的 event/draw 树到 JSON。 | session_id (str)<br>output_path (str)<br>max_depth (int, 可选) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.resource_list_csv | 导出资源列表到 CSV（包含名称/类型/大小/格式/维度等）。 | session_id (str)<br>output_path (str)<br>types (list[str], 可选) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.pixel_history_json | 导出某像素的 pixel history 到 JSON（便于共享/复现）。 | session_id (str)<br>x (int)<br>y (int)<br>target (dict, 可选)<br>output_path (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.shader_bundle | 导出当前 event 相关 shader 的 bundle；event-bound shader 绑定与 `rd.pipeline.get_shader` / `rd.shader.get_disassembly` / `rd.shader.get_reflection` / `rd.shader.edit_and_replace` 保持一致。 | session_id (str)<br>event_id (int, 可选)<br>output_dir (str)<br>include_binaries (bool, 可选, 默认 true)<br>include_reflection (bool, 可选, 默认 true)<br>include_disassembly (bool, 可选, 默认 true) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.cbuffer_dump | 导出当前 event 的常量缓冲数据（按 stage/slot 命名），支持结构化变量值。 | session_id (str)<br>output_dir (str)<br>stages (list[str], 可选): 缺省为所有 stage<br>include_raw (bool, 可选, 默认 false)<br>include_decoded (bool, 可选, 默认 true) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.repro_bundle_zip | 生成可复现的 bug report 压缩包：包含 rdc、关键截图、pipeline JSON、pixel history、shader bundle、cbuffer dump 等。 | session_id (str)<br>bundle_spec (dict): {include_rdc?, include_thumbnails?, include_pipeline_json?, include_pixel_history?, include_shaders?, include_cbuffers?, include_resources?}<br>focus (dict, 可选): {event_id?, x?, y?, target_texture_id?}<br>output_path (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.export.markdown_report | 生成 Markdown 报告（包含帧摘要、关键 pass、问题点、截图链接、数据引用）。 | session_id (str)<br>report_spec (dict, 可选): {title?, include_sections?, verbosity?}<br>focus (dict, 可选)<br>output_path (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.12，远程连接与自动化抓帧 (Remote Capture & Target Control)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.remote.connect | 连接到远程 RenderDoc server；支持 direct RenderDoc endpoint 和 Android adb bootstrap。 | host (str, renderdoc transport required; adb_android optional)<br>port (int, optional, default 38920)<br>timeout_ms (int, optional, default 5000)<br>options (dict, optional): {transport?: 'renderdoc'\|'adb_android', device_serial?, local_port?, install_apk?, push_config?} | capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.disconnect | 断开远程连接。 | remote_id (str) | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.ping | 检查远程连接可用性与延迟。 | remote_id (str) | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.list_targets | 列出远程可连接的 targets（已注入/已运行应用、可抓帧进程等）。 | remote_id (str) | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.launch_app | 在远程机器启动应用并注入 RenderDoc（若 server 支持）。 | remote_id (str)<br>exe_path (str)<br>working_dir (str, 可选)<br>cmdline (str, 可选)<br>env (dict, 可选)<br>capture_options (dict, 可选): 参考 rd.remote.set_capture_options | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.set_capture_options | 设置远程抓帧参数（保存路径、frame limit、禁止/允许某些 API 特性等）。 | remote_id (str)<br>options (dict): {capture_file_path_template?, capture_all_cmd_lists?, allow_vsync?, hook_into_children?, ref_all_resources?, ...} | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.set_overlay_options | 设置远程 overlay（例如显示 capture 提示、frame number、FPS）。 | remote_id (str)<br>options (dict): {enabled, show_frame_number?, show_fps?, show_capture_list?} | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.trigger_capture | 在远程 target 上触发一次或多次捕获。 | remote_id (str)<br>target_id (str, 可选): 缺省表示 server 默认 target（若存在）<br>num_frames (int, 可选, 默认 1)<br>capture_delay_ms (int, 可选, 默认 0): 延迟触发 | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.queue_capture | 在远程 target 上排队捕获（例如下一次 Present/下一帧），并返回队列状态。 | remote_id (str)<br>target_id (str, 可选)<br>num_frames (int, 可选, 默认 1) | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.list_captures | 列出远程服务器上所有可用捕获。 | remote_id (str) | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.copy_capture | 将远程 capture 拷贝到本地路径（兼容 V3；也可用于下载）。 | remote_id (str)<br>capture_id (int)<br>local_path (str) | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+| rd.remote.delete_capture | 删除远程服务器上的 capture（谨慎使用）。 | remote_id (str)<br>capture_id (int) | remote_id; rd.remote.connect; This tool targets a live remote endpoint handle.<br>capability.remote; rd.core.init; Remote tools require remote capability to be enabled for the current runtime. |
+
+## 3.14，诊断工具 (Diagnostics, Heuristic Checks)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.diag.scan_common_issues | 对当前 active event 执行一组常见问题扫描（空绑定、viewport/scissor、depth/blend、格式不匹配等），输出结构化 issue 列表。 | session_id (str)<br>severity_min (str, 可选, 默认 'info')<br>include_suggestions (bool, 可选, 默认 true) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.diag.check_render_targets | 检查 RT 绑定/format/write mask 是否合理（例如 RT0 为空、format 与 shader 输出不兼容）。 | session_id (str)<br>expect (dict, 可选): 期望约束，例如 {min_rt_count?, formats?, require_alpha?} | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.diag.check_depth_stencil | 检查 depth/stencil 状态导致的“全被丢弃/全写深度失败”等问题。 | session_id (str)<br>pixel (dict, 可选): {x,y} 若提供则结合 pixel history 给出更强解释 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.diag.check_viewport_scissor | 检查 viewport/scissor 是否为空/越界/与 RT 尺寸不匹配。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.diag.check_culling | 检查 cull mode/front face/depth clip 导致的“看不见几何体”。 | session_id (str)<br>mesh_preview (bool, 可选, 默认 false): 若 true 则附带 mesh preview 截图路径 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.diag.check_blend | 检查 blend state（例如全 0 写出、写 mask 关闭、premul 错误等）。 | session_id (str)<br>rt_index (int, 可选, 默认 0) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.diag.check_srgb | 检查 sRGB/linear mismatch（RT 格式、采样视图、gamma 映射）。 | session_id (str)<br>textures (list[str], 可选): 指定需要检查的 texture_id 列表 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.diag.check_resource_bindings | 检查资源绑定：null/未初始化、dimension 不匹配、UAV/SRV 冲突、descriptor 越界等（按 API 能力）。 | session_id (str)<br>stages (list[str], 可选): 缺省为所有 stage<br>include_descriptor_dump (bool, 可选, 默认 false) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.diag.check_constant_buffers | 检查常量缓冲：slot 为空、size 不足、offset 非对齐、变量出现 NaN/Inf（若解码）。 | session_id (str)<br>stages (list[str], 可选)<br>decode_values (bool, 可选, 默认 true) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.diag.check_d3d12_resource_states | （D3D12 专用）检查关键资源在当前 event 的 resource state 是否与用途一致（heuristic）。 | session_id (str)<br>resources (list[str], 可选): 指定资源；缺省为当前绑定资源集合 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.diag.check_vk_dynamic_state | （Vulkan 专用）检查 dynamic state 是否遗漏设置（例如 viewport/scissor 未设置导致空渲染）。 | session_id (str) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.15，专家级宏工作流 (Expert Macro Workflows)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.macro.summarize_frame | 生成整帧的专家级摘要：按 Pass/Marker 归类 drawcalls，列出主要 RT/DS、关键 shader、耗时热点（若可得）。 | session_id (str)<br>frame_index (int, 可选): 缺省当前帧<br>max_passes (int, 可选, 默认 50)<br>max_draws_per_pass (int, 可选, 默认 50)<br>include_timings (bool, 可选, 默认 true) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.macro.find_pass_by_marker | 按 marker 名称/regex 查找 pass，并返回对应 event 范围（适合快速定位某个渲染阶段）。 | session_id (str)<br>name_regex (str)<br>max_results (int, 可选, 默认 20) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.macro.explain_pixel | 对某像素给出“专家解释”：按 pixel history 还原每次写入的 depth/stencil/blend 路径，并指出最终颜色来自哪一步。 | session_id (str)<br>x (int)<br>y (int)<br>target (dict, 可选)<br>verbosity (str, 可选, 默认 'normal'): `'short'<br>'normal' | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.macro.resource_dependency_graph | 构建资源依赖图：节点为资源，边表示 copy/resolve/render-to/read-from（用于复杂 frame 的因果分析）。 | session_id (str)<br>event_range (dict, 可选): {start_event_id,end_event_id}<br>max_nodes (int, 可选, 默认 2000)<br>max_edges (int, 可选, 默认 10000) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.macro.find_state_change_point | 在 event 区间内搜索“某个状态何时从 A 变为 B”（通过 pipeline diff 快速二分/线性扫描）。 | session_id (str)<br>event_range (dict): {start_event_id,end_event_id}<br>state_path (str): 例如 'OM.Blend.RT0.Enable' 或 'PS.Shader'<br>target_value (any): 期望值<br>search_policy (str, 可选, 默认 'binary'): `'binary'<br>'linear'<br>max_steps (int, 可选, 默认 64`) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.macro.compare_events_report | 对两个 event 生成可读的对比报告：state diff + 绑定资源 diff + shader diff（含链接到导出的 artifacts）。 | session_id (str)<br>event_a (int)<br>event_b (int)<br>output_path (str, 可选): 若提供则写入 Markdown 报告 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.macro.find_unexpected_clear | 扫描帧内对关键 RT/DS 的 clear/Discard 操作，定位“画面被清掉/闪烁”的来源。 | session_id (str)<br>targets (list[dict], 可选): [{texture_id, name?}]；缺省为当前主要 RT/DS<br>max_results (int, 可选, 默认 200) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.macro.quick_triage_missing_draw | 快速排查“某 draw/物体不见了”：结合 mesh preview、pipeline state、viewport/scissor、depth/cull/blend、binding sanity，输出结论与证据。 | session_id (str)<br>event_id (int, 可选): 缺省当前 active event<br>pixel (dict, 可选): {x,y} 若提供则结合 pixel history<br>output_dir (str, 可选): 输出截图/JSON 的目录 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.macro.build_bug_report_pack | 更高层的 bug report 打包：调用 rd.export.repro_bundle_zip 并补充解释文本、关键 diff、资源依赖图。 | session_id (str)<br>focus (dict, 可选)<br>output_path (str)<br>verbosity (str, 可选, 默认 'normal') | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.macro.shader_hotfix_validate | 在 session 内做“替换 shader -> 重新导出对比截图/指标”的闭环验证，用于快速验证修复假设。 | session_id (str)<br>replacement (dict): 参考 rd.shader.edit_and_replace<br>validation (dict): {target_texture_id?, x?, y?, metric? , screenshot_before?, screenshot_after?}<br>output_dir (str, 可选) | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.16，通用辅助工具 (Utilities, Optional)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.util.compute_hash | 计算文件或字节的哈希值（默认为 sha256），主要用于验证导出内容的一致性。 | path (str): 文件路径<br>algo (str, 可选, 默认 'sha256'): 哈希算法 | - |
+| rd.util.diff_text | 对比两段文本或两个文件，并输出统一差异格式 (unified diff)，这对于比较 shader disasm 或 pipeline JSON 等内容非常有用。 | a (str): 文本内容或文件路径<br>b (str): 文本内容或文件路径<br>a_is_path (bool, 可选, 默认 false): 标记 a 是否为文件路径<br>b_is_path (bool, 可选, 默认 false): 标记 b 是否为文件路径<br>context_lines (int, 可选, 默认 3): 上下文行数 | - |
+| rd.util.diff_images | 对比两张图片（支持 PNG、JPEG、EXR 格式），输出差异图及相关指标，如 PSNR、SSIM 和最大绝对误差。 | image_a_path (str): 第一张图片的文件路径<br>image_b_path (str): 第二张图片的文件路径<br>metrics (list[str], 可选): 需要计算的指标列表，例如 ['psnr', 'ssim', 'max_abs', 'mse']<br>output_path (str, 可选): 差异图的输出路径 | - |
+| rd.util.pack_zip | 将一组文件打包成 zip 压缩文件。此为通用工具，导出功能已提供专用打包接口。 | paths (list[str]): 需要打包的文件路径列表<br>output_path (str): zip 文件的输出路径 | - |
+| rd.util.list_artifacts | 列出当前会话生成的所有 artifacts，便于后续清理或归档。 | session_id (str, 可选): 会话 ID，缺省时列出全局 artifacts<br>prefix (str, 可选): 用于过滤 artifacts 路径的前缀 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+| rd.util.cleanup_artifacts | 根据指定条件（如会话、前缀、时间或大小阈值）清理 artifacts。 | session_id (str, 可选): 会话 ID<br>older_than_ms (int, 可选): 清理早于指定毫秒数的 artifacts<br>prefix (str, 可选): 用于过滤 artifacts 路径的前缀<br>max_total_bytes (int, 可选): 清理 artifacts 直到总大小低于指定字节数 | session_id; rd.capture.open_file, rd.capture.open_replay; This tool operates on a live replay session. |
+
+## 3.17，上下文快照工具 (Context Snapshot Tools)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.session.get_context | 读取当前 context 快照与持久化状态索引，返回 runtime、remote、focus、session 表、恢复信息、最近操作与限制配置。 | - | - |
+| rd.session.update_context | 更新当前 context 的 user-owned 字段，例如 focus_pixel、focus_resource_id、focus_shader_id 与 notes。 | key (str)<br>value (json, 可选): 传 null 表示清除对应 user-owned 字段 | - |
+| rd.session.create_context | Create or initialize an isolated CLI daemon context namespace. | new_context_id (str)<br>context_id (str, optional): current daemon context when omitted | - |
+| rd.session.list_contexts | List known isolated CLI daemon context namespaces. | context_id (str, optional): current daemon context when omitted | - |
+| rd.session.select_context | Read another isolated CLI daemon context namespace without mutating the current one. | target_context_id (str)<br>context_id (str, optional): current daemon context when omitted | - |
+| rd.session.clear_context | Clear an isolated CLI daemon context namespace and its runtime state. | target_context_id (str, optional)<br>context_id (str, optional): current daemon context when omitted | - |
+| rd.session.open_preview | Open or rebind the preview window for the selected context session. | session_id (str, optional): must match the current context session; otherwise select it first via `rd.session.select_session`<br>context_id (str, optional): current daemon context when omitted | - |
+| rd.session.close_preview | Close the preview window for the selected context. | context_id (str, optional): current daemon context when omitted | - |
+| rd.session.list_sessions | 列出当前 context 下的持久化 session 表、当前选中 session 与恢复摘要。 | - | - |
+| rd.session.select_session | 切换当前 context 的 current session 指针，而不销毁其他已持有的 session。 | session_id (str) | - |
+| rd.session.resume | 基于持久化状态尝试恢复当前 context 的本地 `.rdc` session；可选仅校验指定 session 的恢复结果。 | session_id (str, 可选): 若给定则在恢复完成后校验该 session 是否已恢复为 live | - |
+
+## 3.18，VFS 导航工具 (VFS Navigation Tools)
+
+| Tool | Summary | Parameters | Prerequisites |
+| --- | --- | --- | --- |
+| rd.vfs.ls | 以 JSON-first 方式列出 read-only VFS 节点，用于浏览 draws/passes/resources/pipeline/context/artifacts 结构；它是导航辅助层，不是第二套调试真相。 | path (str, 可选, 默认 '/'): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session<br>projection (dict, 可选): 当 kind='tabular' 时返回 entries 的表格化摘要，用于提高扫描效率，不表示语义重要度排序 | - |
+| rd.vfs.cat | 读取 read-only VFS 节点的 JSON 表示，用于路径式浏览与导航；需要精确调试、导出或状态切换时仍应回到 canonical `rd.*` tools。 | path (str): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session | - |
+| rd.vfs.tree | 按 VFS 路径返回树形 read-only 视图，适合初步浏览 session 结构或向人展示层级视图；它是 browse-only 辅助层，不代替 canonical inspection tools。 | path (str, 可选, 默认 '/'): VFS 起点路径<br>depth (int, 可选, 默认 2): 递归深度<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session | - |
+| rd.vfs.resolve | 解析 VFS 路径到对应节点元数据，用于判断 path 是否存在、是否需要 session 以及当前可用的 browse-only 视图，不代替 canonical debug/export/state APIs。 | path (str): VFS 路径<br>session_id (str, 可选): 当 path 指向 replay 相关域时用于解析当前 session | - |

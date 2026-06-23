@@ -39,7 +39,7 @@ Exit codes:
 
 Compatibility policy:
 
-- Version 1.0.0 is the first GA release; pre-GA ownership, lease, baton, handoff, and runtime materialization experiments are outside the 1.0 compatibility surface.
+- Version 1.0.0 is the first GA release; pre-GA ownership, lease, baton, handoff, and runtime materialization experiments are outside the 1.0 public contract surface.
 - 1.x releases may add commands, fields, diagnostics, and tools.
 - 1.x releases must not remove published commands or change the canonical JSON envelope semantics.
 - Tool-specific JSON `data` payloads may add fields such as shader `edit_plan` when they make agent usage safer without changing existing fields.

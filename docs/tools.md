@@ -1,6 +1,6 @@
 ﻿# Tools
 
-`spec/tool_catalog.json` defines 194 `rd.*` tools. The public transport is CLI; raw tool calls use `rdx call <rd.*>` or `python cli/run_cli.py call <rd.*>`.
+`spec/tool_catalog.json` defines 194 `rd.*` tools. The public transport is CLI; raw tool calls use `rdx call <rd.*>`.
 
 ```bat
 rdx tools list --json
@@ -24,3 +24,5 @@ rdx vfs cat --path /context --format json
 JSON is the stable protocol. TSV is only a tabular projection for list/navigation output; nested context, pipeline, shader, and preview data stay JSON.
 
 `rd.session.open_preview` opens the preview window through the daemon-backed CLI runtime. `preview.display` is returned from context/session state for geometry inspection.
+
+The generated reader-facing reference is [tool-reference.md](tool-reference.md). The high-frequency facade commands are `rdx event`, `rdx pipeline`, `rdx shader`, `rdx export`, `rdx pixel`, and `rdx resource`; they all dispatch to canonical `rd.*` tools and keep JSON as the default output.

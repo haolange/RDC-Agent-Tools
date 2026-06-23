@@ -32,13 +32,14 @@ EXCLUDE_DIRS = {
     "dist",
     "intermediate",
 }
-EXCLUDE_FILE_SUFFIXES = {".pyc", ".pyo", ".pdb", ".ilk", ".exp", ".lib"}
+EXCLUDE_FILE_SUFFIXES = {".pyc", ".pyo", ".pdb", ".ilk", ".exp", ".lib", ".rdc"}
 RELEASE_ROOT_FILES = {
     ".gitattributes",
     ".gitignore",
     "AGENTS.md",
     "CHANGELOG.md",
     "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "README.md",
     "pyproject.toml",
     "rdx.bat",
@@ -104,7 +105,7 @@ def _copy_release_tree(root: Path, staging_root: Path) -> list[dict[str, object]
 
 
 def _license_inventory(staging_root: Path) -> list[dict[str, str]]:
-    rows = [{"name": "rdx-tools", "version": TOOL_VERSION, "license": "MIT", "path": "LICENSE"}]
+    rows = [{"name": "rdx-tools", "version": TOOL_VERSION, "license": "Apache-2.0", "path": "LICENSE"}]
     site_packages = staging_root / "binaries" / "windows" / "x64" / "python" / "Lib" / "site-packages"
     if not site_packages.is_dir():
         return rows

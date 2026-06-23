@@ -322,6 +322,39 @@ def test_get_actions_reports_root_browse_lookup_hint(monkeypatch: pytest.MonkeyP
     assert payload["recommended_followup_tool"] == "rd.event.get_action_tree"
 
 
+def test_get_actions_tabular_projection_flattens_actions(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[
+            _FakeAction(
+                101,
+                name="root_a",
+                flags=_FakeActionFlags.Drawcall,
+                children=[_FakeAction(111, name="child_a", flags=_FakeActionFlags.Dispatch)],
+                outputs=["ResourceId::256"],
+            ),
+        ]
+    )
+    _install_common_env(monkeypatch, controller)
+    _seed_capture()
+    _seed_session(101)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_event(
+                "get_actions",
+                {"session_id": "sess_demo", "projection": {"kind": "tabular", "include_tsv_text": True}},
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    tabular = payload["projections"]["tabular"]
+    assert tabular["columns"][:4] == ["format_version", "event_id", "name", "depth"]
+    assert tabular["row_count"] == 2
+    assert "root_a" in tabular["tsv_text"]
+    assert "child_a" in tabular["tsv_text"]
+
+
 def test_ensure_event_repairs_polluted_active_event(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = _FakeController(
         roots=[
@@ -556,6 +589,42 @@ def test_resource_usage_and_history_expose_canonical_and_raw_event_ids(monkeypat
         {"event_id": None, "raw_event_id": 1042, "event_resolvable": False, "usage": "Read", "is_write": False},
     ]
 
+
+
+def test_resource_list_all_tabular_projection(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[_FakeAction(101, flags=_FakeActionFlags.Drawcall)],
+        resources=[
+            SimpleNamespace(
+                resourceId="ResourceId::7",
+                name="main_color",
+                width=640,
+                height=480,
+                depth=1,
+                mips=1,
+                format=SimpleNamespace(Name=lambda: "R8G8B8A8_UNORM"),
+            )
+        ],
+    )
+    _install_common_env(monkeypatch, controller)
+    _seed_capture()
+    _seed_session(101)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_resource(
+                "list_all",
+                {"session_id": "sess_demo", "projection": {"kind": "tabular", "include_tsv_text": True}},
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    tabular = payload["projections"]["tabular"]
+    assert tabular["columns"][:9] == ["format_version", "resource_id", "kind", "name", "width", "height", "depth", "format", "byte_size"]
+    assert tabular["row_count"] == 1
+    assert "ResourceId::7" in tabular["tsv_text"]
+    assert "main_color" in tabular["tsv_text"]
 
 
 def test_capture_close_file_rejects_unknown_handle() -> None:

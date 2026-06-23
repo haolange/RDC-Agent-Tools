@@ -3047,6 +3047,76 @@ def _artifact_rows_projection(artifacts: Sequence[Dict[str, Any]], *, include_ts
     )
 
 
+
+def _event_actions_projection(actions: Sequence[Dict[str, Any]], *, include_tsv_text: bool) -> Dict[str, Any]:
+    rows: List[Dict[str, Any]] = []
+
+    def visit(item: Dict[str, Any]) -> None:
+        flags = _as_dict(item.get("flags"), default={})
+        outputs = item.get("outputs")
+        rows.append(
+            {
+                "event_id": int(item.get("event_id") or 0),
+                "name": str(item.get("name") or ""),
+                "depth": int(item.get("depth") or 0),
+                "is_draw": bool(flags.get("is_draw", False)),
+                "is_dispatch": bool(flags.get("is_dispatch", False)),
+                "is_marker": bool(flags.get("is_marker", False)),
+                "is_pass_boundary": bool(flags.get("is_pass_boundary", False)),
+                "num_indices": int(item.get("num_indices") or 0),
+                "num_vertices": int(item.get("num_vertices") or 0),
+                "outputs": ",".join(str(value) for value in outputs) if isinstance(outputs, list) else "",
+            },
+        )
+        for child in item.get("children") or []:
+            if isinstance(child, dict):
+                visit(child)
+
+    for action in actions:
+        if isinstance(action, dict):
+            visit(action)
+    return _tabular_projection(
+        rows,
+        columns=[
+            "event_id",
+            "name",
+            "depth",
+            "is_draw",
+            "is_dispatch",
+            "is_marker",
+            "is_pass_boundary",
+            "num_indices",
+            "num_vertices",
+            "outputs",
+        ],
+        include_tsv_text=include_tsv_text,
+    )
+
+
+def _resource_rows_projection(resources: Sequence[Dict[str, Any]], *, include_tsv_text: bool) -> Dict[str, Any]:
+    rows = []
+    for resource in resources:
+        if not isinstance(resource, dict):
+            continue
+        kind = "texture" if resource.get("texture_id") else "buffer" if resource.get("buffer_id") else "resource"
+        rows.append(
+            {
+                "resource_id": str(resource.get("resource_id") or ""),
+                "kind": kind,
+                "name": str(resource.get("name") or ""),
+                "width": int(resource.get("width") or 0),
+                "height": int(resource.get("height") or 0),
+                "depth": int(resource.get("depth") or 0),
+                "format": str(resource.get("format") or ""),
+                "byte_size": int(resource.get("byte_size") or 0),
+            },
+        )
+    return _tabular_projection(
+        rows,
+        columns=["resource_id", "kind", "name", "width", "height", "depth", "format", "byte_size"],
+        include_tsv_text=include_tsv_text,
+    )
+
 def _capability_entry(
     available: bool,
     *,
@@ -6371,6 +6441,8 @@ def _tool_query_rank_adjustment(entry: Dict[str, Any], query_text: str) -> int:
         adjustment -= 450
     if _query_contains_term(query_text, _TABULAR_QUERY_TERMS) and _tool_supports_tabular_projection(entry):
         adjustment -= 275
+        if str(entry.get("role") or "") == "navigation":
+            adjustment -= 450
     return adjustment
 
 
@@ -7244,12 +7316,19 @@ async def _dispatch_event(action: str, args: Dict[str, Any]) -> str:
             item = bounded_action(root, 0)
             if item is not None:
                 out.append(item)
-        return _ok(
-            actions=out,
-            pagination={"max_nodes": max_nodes, "emitted_nodes": emitted, "truncated": emitted >= max_nodes},
-            lookup_scope="root_browse",
-            recommended_followup_tool="rd.event.get_action_tree",
-        )
+        response: Dict[str, Any] = {
+            "actions": out,
+            "pagination": {"max_nodes": max_nodes, "emitted_nodes": emitted, "truncated": emitted >= max_nodes},
+            "lookup_scope": "root_browse",
+            "recommended_followup_tool": "rd.event.get_action_tree",
+        }
+        projection = _projection_request(args, "rd.event.get_actions")
+        if projection:
+            response["projections"] = _event_actions_projection(
+                out,
+                include_tsv_text=bool(projection.get("include_tsv_text", False)),
+            )
+        return _ok(**response)
 
     if action == "get_action_tree":
         max_depth = args.get("max_depth")
@@ -7722,7 +7801,17 @@ async def _dispatch_resource(action: str, args: Dict[str, Any]) -> str:
     if action == "list_all":
         textures = await list_textures()
         buffers = await list_buffers()
-        return _ok(resources=textures + buffers)
+        resources = textures + buffers
+        projection = _projection_request(args, "rd.resource.list_all")
+        if projection:
+            return _ok(
+                resources=resources,
+                projections=_resource_rows_projection(
+                    resources,
+                    include_tsv_text=bool(projection.get("include_tsv_text", False)),
+                ),
+            )
+        return _ok(resources=resources)
     if action == "list_textures":
         return _ok(textures=await list_textures())
     if action == "list_buffers":

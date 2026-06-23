@@ -8,7 +8,7 @@ Run `rdx --json doctor` first. It reports the tools root, Python runtime, Render
 
 Use `rdx context status --json` to inspect the active context. If the wrong capture/session is active, run `rdx context clear --json` and reopen the `.rdc`. Use `rdx context update --key notes --value "..." --json` to leave agent-facing recovery notes.
 
-If VFS, `diff pipeline`, or `assert pipeline` reports `session_required`, the selected `--daemon-context` has no active session. Open a capture with `capture open --file <rdc>` or pass `--session-id`.
+If VFS, facade commands, `diff pipeline`, or `assert pipeline` reports `session_required`, the selected `--daemon-context` has no active session. Open a capture with `capture open --file <rdc>` or pass `--session-id`.
 
 ## Remote Lifecycle
 
@@ -27,3 +27,7 @@ DXIL/DXBC disassembly is read-only by default. If `edit_plan.can_replace=false`,
 preview 打不开或自动失效：先检查 `session preview status` and the current `session_id` from `context status`.
 
 preview 看着不全、留黑边或像是畸形：检查 `preview.display` and confirm the framebuffer extent is not being confused with viewport / scissor.
+
+## Facade TSV
+
+`--format tsv` is supported only by list/projection commands such as `vfs ls`, `event list`, and `resource list`. Use JSON for nested state such as `pipeline show`, `shader disasm`, `export screenshot`, `pixel history`, and resource details.

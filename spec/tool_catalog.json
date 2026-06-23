@@ -379,17 +379,18 @@
         }
       ]
     },
-    {
+        {
       "name": "rd.event.get_actions",
       "group": "3.3，事件导航与 API 检查 (Event Navigation & API Inspection)",
       "description": "用于获取当前帧的根 Action 列表，进而构建 Drawcall/Marker 树（兼容 V3 版本）。",
-      "parameter_raw": "session_id (str)<br>include_markers (bool, 可选, 默认 true)<br>include_drawcalls (bool, 可选, 默认 true)<br>max_nodes (int, 可选, 默认 2000): 有界返回的最大事件节点数",
+      "parameter_raw": "session_id (str)<br>include_markers (bool, 可选, 默认 true)<br>include_drawcalls (bool, 可选, 默认 true)<br>max_nodes (int, 可选, 默认 2000): 有界返回的最大事件节点数<br>projection (dict, optional): tabular projection request for list readability",
       "returns_raw": "ok (bool)<br>data (dict): {actions, pagination}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
         "include_markers",
         "include_drawcalls",
-        "max_nodes"
+        "max_nodes",
+        "projection"
       ],
       "prerequisites": [
         {
@@ -400,7 +401,10 @@
           ],
           "reason": "This tool operates on a live replay session."
         }
-      ]
+      ],
+      "supports_projection": {
+        "tabular": true
+      }
     },
     {
       "name": "rd.event.get_action_tree",
@@ -1164,16 +1168,17 @@
         }
       ]
     },
-    {
+        {
       "name": "rd.resource.list_all",
       "group": "3.5，资源探查 (Resource Inspection & History)",
       "description": "列出捕获中所有资源（Textures/Buffers/Shaders/Pipelines 等），兼容 V3。",
-      "parameter_raw": "session_id (str)<br>types (list[str], 可选): 过滤类型，如 ['Texture','Buffer','Shader']；缺省为全部<br>include_unused (bool, 可选, 默认 true)",
+      "parameter_raw": "session_id (str)<br>types (list[str], 可选): 过滤类型，如 ['Texture','Buffer','Shader']；缺省为全部<br>include_unused (bool, 可选, 默认 true)<br>projection (dict, optional): tabular projection request for list readability",
       "returns_raw": "ok (bool)<br>data (dict): {resources}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
         "types",
-        "include_unused"
+        "include_unused",
+        "projection"
       ],
       "prerequisites": [
         {
@@ -1184,7 +1189,10 @@
           ],
           "reason": "This tool operates on a live replay session."
         }
-      ]
+      ],
+      "supports_projection": {
+        "tabular": true
+      }
     },
     {
       "name": "rd.resource.list_textures",

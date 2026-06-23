@@ -143,6 +143,36 @@ def _verify_release_manifest(root: Path) -> None:
     leaked_mcp = sorted(path for path in paths if path == "mcp" or path.startswith("mcp/"))
     if leaked_mcp:
         raise RuntimeError(f"release manifest exposes MCP paths: {leaked_mcp[:5]}")
+    leaked_tests = sorted(path for path in paths if path == "tests" or path.startswith("tests/"))
+    if leaked_tests:
+        raise RuntimeError(f"release manifest exposes test paths: {leaked_tests[:5]}")
+    leaked_rdc = sorted(path for path in paths if path.lower().endswith(".rdc"))
+    if leaked_rdc:
+        raise RuntimeError(f"release manifest exposes .rdc fixtures: {leaked_rdc[:5]}")
+
+
+def _verify_license_inventory(root: Path) -> None:
+    inventory_path = root / "LICENSE_INVENTORY.json"
+    sbom_path = root / "SBOM.json"
+    if not inventory_path.is_file():
+        raise RuntimeError(f"missing license inventory: {inventory_path}")
+    if not sbom_path.is_file():
+        raise RuntimeError(f"missing SBOM: {sbom_path}")
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    if not isinstance(inventory, list):
+        raise RuntimeError("license inventory is not a list")
+    project_rows = [row for row in inventory if isinstance(row, dict) and row.get("name") == "rdx-tools"]
+    if not project_rows:
+        raise RuntimeError("license inventory missing rdx-tools row")
+    if project_rows[0].get("license") != "Apache-2.0" or project_rows[0].get("path") != "LICENSE":
+        raise RuntimeError(f"rdx-tools license inventory mismatch: {project_rows[0]!r}")
+    sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+    components = sbom.get("components") if isinstance(sbom, dict) else None
+    if not isinstance(components, list):
+        raise RuntimeError("SBOM components field is missing or invalid")
+    sbom_rows = [row for row in components if isinstance(row, dict) and row.get("name") == "rdx-tools"]
+    if not sbom_rows or sbom_rows[0].get("license") != "Apache-2.0":
+        raise RuntimeError("SBOM does not report Apache-2.0 for rdx-tools")
 
 
 def _verify_doctor(root: Path) -> None:
@@ -190,7 +220,7 @@ def _verify_tools_catalog(root: Path) -> None:
     names = {str(item.get("name") or "") for item in tools if isinstance(item, dict)}
     leaked = sorted(REMOVED_CATALOG_TOOLS & names)
     if leaked:
-        raise RuntimeError(f"removed compatibility aliases still listed: {leaked}")
+        raise RuntimeError(f"removed aliases still listed: {leaked}")
 
 
 def _verify_cli_contract(root: Path) -> None:
@@ -277,6 +307,7 @@ def main(argv: list[str] | None = None) -> int:
             zf.extractall(temp_dir)
         root = _find_package_root(temp_dir)
         _verify_release_manifest(root)
+        _verify_license_inventory(root)
         _verify_doctor(root)
         _verify_physical_launcher_file(root)
         _verify_version_payload(root)

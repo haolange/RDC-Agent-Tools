@@ -73,6 +73,12 @@ def _print_launcher_help() -> None:
         "  call <operation> [--args-json ... | --args-file ...] [--format json|tsv] [--remote]",
         "  capture open|status",
         "  vfs ls|cat|tree|resolve",
+        "  event list|show",
+        "  pipeline show|section",
+        "  shader source|disasm|constants",
+        "  export screenshot|texture|buffer|mesh",
+        "  pixel value|history",
+        "  resource list|show|usage",
         "  diff pipeline|image",
         "  assert pipeline|image",
         "",
@@ -90,6 +96,10 @@ def _print_launcher_help() -> None:
         "  rdx session preview on",
         "  rdx call rd.session.get_context --args-file .\\args.json --format json",
         "  rdx vfs ls --path / --format tsv",
+        "  rdx event list --format tsv",
+        "  rdx pipeline show --event-id 42",
+        "  rdx shader source --event-id 42 --stage ps",
+        "  rdx export screenshot --event-id 42 --out .\\frame.png",
     ):
         _write_stdout(line)
 
@@ -568,6 +578,23 @@ def _completion_words() -> list[str]:
         "open",
         "call",
         "vfs",
+        "event",
+        "show",
+        "pipeline",
+        "section",
+        "shader",
+        "source",
+        "disasm",
+        "constants",
+        "export",
+        "screenshot",
+        "texture",
+        "buffer",
+        "mesh",
+        "pixel",
+        "value",
+        "history",
+        "resource",
         "ls",
         "cat",
         "tree",
@@ -591,6 +618,14 @@ def _completion_words() -> list[str]:
         "--args-file",
         "--format",
         "--remote",
+        "--session-id",
+        "--event-id",
+        "--stage",
+        "--resource-id",
+        "--out",
+        "--slot",
+        "--x",
+        "--y",
     ]
     try:
         tool_names = [str(item.get("name") or "") for item in load_tool_catalog()]
@@ -841,6 +876,144 @@ async def _cmd_vfs(args: argparse.Namespace) -> int:
         call_args["depth"] = int(args.depth)
     payload = _daemon_exec(op, _tabular_request(str(args.format), call_args), context=str(args.daemon_context))
     return EXIT_OK if _render_result(payload, output_format=str(args.format)) else EXIT_RUNTIME_ERR
+
+
+_FACADE_TSV_COMMANDS = {("event", "list"), ("resource", "list")}
+
+
+def _facade_subcommand(args: argparse.Namespace) -> str:
+    for attr in (
+        "event_cmd",
+        "pipeline_cmd",
+        "shader_cmd",
+        "export_cmd",
+        "pixel_cmd",
+        "resource_cmd",
+    ):
+        value = getattr(args, attr, None)
+        if value:
+            return str(value)
+    return ""
+
+
+def _facade_result_kind(args: argparse.Namespace) -> str:
+    subcommand = _facade_subcommand(args)
+    return f"rdx.{args.command}.{subcommand}" if subcommand else f"rdx.{args.command}"
+
+
+def _facade_projection_not_supported_payload(args: argparse.Namespace, context: str) -> Dict[str, Any]:
+    return canonical_error(
+        result_kind=_facade_result_kind(args),
+        code="projection_not_supported",
+        category="validation",
+        message="--format tsv is only supported by facade list/projection commands.",
+        details={
+            "context_id": context,
+            "requested_format": "tsv",
+            "command": str(args.command),
+            "subcommand": _facade_subcommand(args),
+            "supported_tsv_commands": ["event list", "resource list", "vfs ls", "call with a tabular tool projection"],
+            "recovery_hint": "Use --format json for nested pipeline, shader, export, pixel, and resource-detail payloads.",
+        },
+        transport="cli",
+    )
+
+
+def _facade_session_id(args: argparse.Namespace, context: str) -> str:
+    return _default_session_id(getattr(args, "session_id", None), context=context)
+
+
+def _add_optional_event_id(target: Dict[str, Any], value: Any) -> None:
+    if value is not None:
+        target["event_id"] = int(value)
+
+
+def _facade_request(args: argparse.Namespace, session_id: str) -> tuple[str, Dict[str, Any]]:
+    command = str(args.command)
+    subcommand = _facade_subcommand(args)
+
+    if command == "event":
+        if subcommand == "list":
+            return "rd.event.get_actions", {"session_id": session_id}
+        if subcommand == "show":
+            return "rd.event.get_action_details", {"session_id": session_id, "event_id": int(args.event_id)}
+
+    if command == "pipeline":
+        call_args: Dict[str, Any] = {"session_id": session_id}
+        _add_optional_event_id(call_args, getattr(args, "event_id", None))
+        if subcommand == "show":
+            call_args["context_id"] = str(args.daemon_context)
+            return "rd.pipeline.get_state_summary", call_args
+        if subcommand == "section":
+            call_args["stage"] = str(args.stage)
+            return "rd.pipeline.get_stage_state", call_args
+
+    if command == "shader":
+        call_args = {"session_id": session_id, "stage": str(args.stage)}
+        _add_optional_event_id(call_args, getattr(args, "event_id", None))
+        if subcommand == "source":
+            return "rd.shader.get_source", call_args
+        if subcommand == "disasm":
+            return "rd.shader.get_disassembly", call_args
+        if subcommand == "constants":
+            call_args["slot"] = int(args.slot)
+            return "rd.shader.get_constant_buffer_contents", call_args
+
+    if command == "export":
+        call_args = {"session_id": session_id, "output_path": str(Path(args.out).resolve())}
+        _add_optional_event_id(call_args, getattr(args, "event_id", None))
+        if subcommand == "screenshot":
+            return "rd.export.screenshot", call_args
+        if subcommand == "texture":
+            call_args["texture_id"] = str(args.resource_id)
+            return "rd.export.texture", call_args
+        if subcommand == "buffer":
+            call_args["buffer_id"] = str(args.resource_id)
+            return "rd.export.buffer", call_args
+        if subcommand == "mesh":
+            return "rd.export.mesh", call_args
+
+    if command == "pixel":
+        call_args = {
+            "session_id": session_id,
+            "texture_id": str(args.resource_id),
+            "x": int(args.x),
+            "y": int(args.y),
+        }
+        _add_optional_event_id(call_args, getattr(args, "event_id", None))
+        if subcommand == "value":
+            return "rd.texture.get_pixel_value", call_args
+        if subcommand == "history":
+            return "rd.texture.get_pixel_history", call_args
+
+    if command == "resource":
+        if subcommand == "list":
+            return "rd.resource.list_all", {"session_id": session_id}
+        call_args = {"session_id": session_id, "resource_id": str(args.resource_id)}
+        if subcommand == "show":
+            return "rd.resource.get_details", call_args
+        if subcommand == "usage":
+            return "rd.resource.get_usage", call_args
+
+    raise RuntimeError(f"unsupported facade command: {command} {subcommand}".strip())
+
+
+async def _cmd_facade(args: argparse.Namespace) -> int:
+    context = str(args.daemon_context)
+    output_format = str(getattr(args, "format", "json") or "json")
+    try:
+        session_id = _facade_session_id(args, context)
+    except RuntimeError as exc:
+        _print_json(_session_required_error_payload(_facade_result_kind(args), context, str(exc)))
+        return EXIT_RUNTIME_ERR
+
+    op, call_args = _facade_request(args, session_id)
+    if output_format == "tsv" and (str(args.command), _facade_subcommand(args)) not in _FACADE_TSV_COMMANDS:
+        _print_json(_facade_projection_not_supported_payload(args, context))
+        return EXIT_RUNTIME_ERR
+
+    payload = _daemon_exec(op, _tabular_request(output_format, call_args), context=context)
+    return EXIT_OK if _render_result(payload, output_format=output_format) else EXIT_RUNTIME_ERR
 
 
 async def _cmd_capture_open(args: argparse.Namespace) -> int:
@@ -1181,7 +1354,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--daemon-context", default="default", help="Daemon state namespace (default: default)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_version = sub.add_parser("version", help="Print version and compatibility metadata")
+    def add_session_arg(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument("--session-id", default=None)
+
+    def add_format_arg(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument("--format", choices=("json", "tsv"), default="json")
+
+    def add_event_arg(command_parser: argparse.ArgumentParser, *, required: bool = False) -> None:
+        command_parser.add_argument("--event-id", type=int, required=required, default=None)
+
+    p_version = sub.add_parser("version", help="Print version and public contract metadata")
     p_version.add_argument("--json", action="store_true", help="Emit machine-readable JSON output.")
 
     p_doctor = sub.add_parser("doctor", help="Validate CLI runtime setup")
@@ -1271,6 +1453,87 @@ def _build_parser() -> argparse.ArgumentParser:
     p_vfs_tree.add_argument("--session-id", default=None)
     p_vfs_tree.add_argument("--depth", type=int, default=2)
     p_vfs_tree.add_argument("--format", choices=("json", "tsv"), default="json")
+
+    p_event = sub.add_parser("event", help="Event navigation facade")
+    s_event = p_event.add_subparsers(dest="event_cmd", required=True)
+    p_event_list = s_event.add_parser("list", help="List event actions")
+    add_session_arg(p_event_list)
+    add_format_arg(p_event_list)
+    p_event_show = s_event.add_parser("show", help="Show event action details")
+    add_session_arg(p_event_show)
+    add_format_arg(p_event_show)
+    add_event_arg(p_event_show, required=True)
+
+    p_pipeline = sub.add_parser("pipeline", help="Pipeline inspection facade")
+    s_pipeline = p_pipeline.add_subparsers(dest="pipeline_cmd", required=True)
+    p_pipeline_show = s_pipeline.add_parser("show", help="Show pipeline summary")
+    add_session_arg(p_pipeline_show)
+    add_format_arg(p_pipeline_show)
+    add_event_arg(p_pipeline_show)
+    p_pipeline_section = s_pipeline.add_parser("section", help="Show one shader-stage pipeline section")
+    add_session_arg(p_pipeline_section)
+    add_format_arg(p_pipeline_section)
+    add_event_arg(p_pipeline_section)
+    p_pipeline_section.add_argument("--stage", required=True)
+
+    p_shader = sub.add_parser("shader", help="Shader inspection facade")
+    s_shader = p_shader.add_subparsers(dest="shader_cmd", required=True)
+    for shader_cmd, help_text in (
+        ("source", "Show shader source or source fallback"),
+        ("disasm", "Show shader disassembly"),
+    ):
+        p_shader_cmd = s_shader.add_parser(shader_cmd, help=help_text)
+        add_session_arg(p_shader_cmd)
+        add_format_arg(p_shader_cmd)
+        add_event_arg(p_shader_cmd)
+        p_shader_cmd.add_argument("--stage", required=True)
+    p_shader_constants = s_shader.add_parser("constants", help="Show shader constant-buffer contents")
+    add_session_arg(p_shader_constants)
+    add_format_arg(p_shader_constants)
+    add_event_arg(p_shader_constants)
+    p_shader_constants.add_argument("--stage", required=True)
+    p_shader_constants.add_argument("--slot", required=True, type=int)
+
+    p_export = sub.add_parser("export", help="Export facade")
+    s_export = p_export.add_subparsers(dest="export_cmd", required=True)
+    p_export_screenshot = s_export.add_parser("screenshot", help="Export event output screenshot")
+    add_session_arg(p_export_screenshot)
+    add_format_arg(p_export_screenshot)
+    add_event_arg(p_export_screenshot)
+    p_export_screenshot.add_argument("--out", required=True)
+    for export_cmd, help_text in (("texture", "Export a texture resource"), ("buffer", "Export a buffer resource")):
+        p_export_cmd = s_export.add_parser(export_cmd, help=help_text)
+        add_session_arg(p_export_cmd)
+        add_format_arg(p_export_cmd)
+        p_export_cmd.add_argument("--resource-id", required=True)
+        p_export_cmd.add_argument("--out", required=True)
+    p_export_mesh = s_export.add_parser("mesh", help="Export event mesh")
+    add_session_arg(p_export_mesh)
+    add_format_arg(p_export_mesh)
+    add_event_arg(p_export_mesh)
+    p_export_mesh.add_argument("--out", required=True)
+
+    p_pixel = sub.add_parser("pixel", help="Pixel inspection facade")
+    s_pixel = p_pixel.add_subparsers(dest="pixel_cmd", required=True)
+    for pixel_cmd, help_text in (("value", "Read one pixel value"), ("history", "Show one pixel history")):
+        p_pixel_cmd = s_pixel.add_parser(pixel_cmd, help=help_text)
+        add_session_arg(p_pixel_cmd)
+        add_format_arg(p_pixel_cmd)
+        add_event_arg(p_pixel_cmd)
+        p_pixel_cmd.add_argument("--resource-id", required=True)
+        p_pixel_cmd.add_argument("--x", required=True, type=int)
+        p_pixel_cmd.add_argument("--y", required=True, type=int)
+
+    p_resource = sub.add_parser("resource", help="Resource inspection facade")
+    s_resource = p_resource.add_subparsers(dest="resource_cmd", required=True)
+    p_resource_list = s_resource.add_parser("list", help="List capture resources")
+    add_session_arg(p_resource_list)
+    add_format_arg(p_resource_list)
+    for resource_cmd, help_text in (("show", "Show resource details"), ("usage", "Show resource usage")):
+        p_resource_cmd = s_resource.add_parser(resource_cmd, help=help_text)
+        add_session_arg(p_resource_cmd)
+        add_format_arg(p_resource_cmd)
+        p_resource_cmd.add_argument("--resource-id", required=True)
 
     p_diff = sub.add_parser("diff", help="Diff commands")
     s_diff = p_diff.add_subparsers(dest="diff_cmd", required=True)
@@ -1402,6 +1665,9 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     if args.command == "vfs":
         return await _cmd_vfs(args)
+
+    if args.command in {"event", "pipeline", "shader", "export", "pixel", "resource"}:
+        return await _cmd_facade(args)
 
     if args.command == "capture":
         if args.capture_cmd == "open":

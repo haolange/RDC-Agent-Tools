@@ -159,6 +159,28 @@ def test_noninteractive_version_and_completion_are_available() -> None:
     assert "Register-ArgumentCompleter" in completion_proc.stdout
 
 @pytest.mark.skipif(os.name != "nt", reason="rdx.bat launcher tests are windows-specific")
+def test_noninteractive_facade_out_argument_is_passed_through() -> None:
+    context_id = "pytest-bat-facade-out"
+    try:
+        code, payload, output = _run_bat(
+            "--non-interactive",
+            "--daemon-context",
+            context_id,
+            "export",
+            "screenshot",
+            "--out",
+            "intermediate/artifacts/pytest-bat-facade-out.png",
+        )
+    finally:
+        _cleanup_context(context_id)
+
+    assert code == 1
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "session_required"
+    assert "Parameter cannot be processed" not in output
+
+
+@pytest.mark.skipif(os.name != "nt", reason="rdx.bat launcher tests are windows-specific")
 def test_noninteractive_tools_list_passthroughs_canonical_payload() -> None:
     code, payload, _ = _run_bat(
         "--non-interactive",
