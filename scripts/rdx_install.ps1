@@ -54,7 +54,8 @@ function Copy-RdxTools {
         [string]$SourceRoot,
         [string]$TargetRoot
     )
-    $excludeDirs = @('\intermediate\', '\dist\', '\.git\', '\.venv\', '\__pycache__\')
+    $excludeDirNames = @('intermediate', 'dist', '.git', '.venv', '__pycache__', '.agents', '.codex', '.qoder')
+    $excludeDirPrefixes = @('pytest-cache-files-')
     if ($DryRun) {
         Write-Step "DRY-RUN copy $SourceRoot -> $TargetRoot"
         return
@@ -66,9 +67,12 @@ function Copy-RdxTools {
     Get-ChildItem -LiteralPath $SourceRoot -Recurse -Force | ForEach-Object {
         $src = $_.FullName
         $rel = $src.Substring($SourceRoot.Length).TrimStart('\', '/')
-        $normalized = '\' + $rel.Replace('/', '\')
-        foreach ($needle in $excludeDirs) {
-            if ($normalized.Contains($needle)) { return }
+        $parts = @($rel -split '[\\/]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        foreach ($part in $parts) {
+            if ($excludeDirNames -contains $part) { return }
+            foreach ($prefix in $excludeDirPrefixes) {
+                if ($part.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return }
+            }
         }
         $dst = Join-Path $TargetRoot $rel
         if ($_.PSIsContainer) {
