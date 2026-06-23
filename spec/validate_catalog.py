@@ -29,6 +29,7 @@ _ALLOWED_WHEN = {
     "",
     "options.remote_id_present",
 }
+_REMOVED_COMPATIBILITY_ALIASES = {"rd.resource.rename", "rd.shader.save_binary"}
 
 
 def _iter_readability_errors(payload: dict[str, Any]) -> list[str]:
@@ -130,20 +131,27 @@ def main() -> int:
     if any(not name.startswith("rd.") for name in unique):
         print("[spec] Invalid tool name prefix found (must start with rd.)")
         return 4
+    removed_aliases = sorted(_REMOVED_COMPATIBILITY_ALIASES & unique)
+    if removed_aliases:
+        print(f"[spec] Removed compatibility aliases are still present: {removed_aliases}")
+        return 5
+    if "\u517c\u5bb9\u5de5\u5177" in json.dumps(data, ensure_ascii=False):
+        print("[spec] Removed compatibility-tool wording is still present")
+        return 5
 
     readability_issues = _iter_readability_errors(data)
     if readability_issues:
         print("[spec] Catalog readability validation failed")
         for issue in readability_issues[:20]:
             print(f"- {issue}")
-        return 5
+        return 6
 
     schema_issues = _iter_schema_errors(data)
     if schema_issues:
         print("[spec] Catalog schema validation failed")
         for issue in schema_issues[:20]:
             print(f"- {issue}")
-        return 6
+        return 7
 
     print(f"[spec] Catalog validation passed ({len(unique)} unique rd.* tools)")
     return 0

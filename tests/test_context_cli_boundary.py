@@ -11,7 +11,7 @@ from rdx.context_snapshot import clear_context_snapshot
 from rdx.runtime_state import clear_context_state
 
 
-REMOVED_CONTEXT_FIELDS = {
+PRE_GA_CONTEXT_FIELDS = {
     "runtime_" + "owner",
     "owner_" + "lease",
     "active_" + "baton",
@@ -19,7 +19,7 @@ REMOVED_CONTEXT_FIELDS = {
     "runtime_" + "parallelism_" + "ceiling",
     "entry_" + "mode",
 }
-REMOVED_SESSION_TOOLS = {
+PRE_GA_SESSION_TOOLS = {
     "rd.session.claim_" + "runtime_" + "owner",
     "rd.session.release_" + "runtime_" + "owner",
     "rd.session.export_" + "runtime_" + "baton",
@@ -64,7 +64,7 @@ def _reset_runtime_state() -> None:
         server.server_runtime._config = original_config
 
 
-def test_context_lifecycle_tools_round_trip() -> None:
+def test_context_lifecycle_tools_do_not_expose_pre_ga_coordination_fields() -> None:
     created = asyncio.run(
         server.dispatch_operation(
             "rd.session.create_context",
@@ -90,7 +90,7 @@ def test_context_lifecycle_tools_round_trip() -> None:
     assert default_snapshot["data"]["context_id"] == "default"
     assert default_snapshot["data"]["notes"] == ""
     assert default_snapshot["data"]["session_locator"] == {"rdc_path": "", "session_id": "", "frame_index": 0, "active_event_id": 0}
-    assert REMOVED_CONTEXT_FIELDS.isdisjoint(default_snapshot["data"])
+    assert PRE_GA_CONTEXT_FIELDS.isdisjoint(default_snapshot["data"])
 
     listed = asyncio.run(server.dispatch_operation("rd.session.list_contexts", {}, transport="test"))
     assert listed["ok"] is True
@@ -98,7 +98,7 @@ def test_context_lifecycle_tools_round_trip() -> None:
     context_ids = {item["context_id"] for item in contexts}
     assert {"default", "ctx-alpha"} <= context_ids
     assert all("session_locator" in item for item in contexts)
-    assert all(REMOVED_CONTEXT_FIELDS.isdisjoint(item) for item in contexts)
+    assert all(PRE_GA_CONTEXT_FIELDS.isdisjoint(item) for item in contexts)
 
     selected = asyncio.run(
         server.dispatch_operation(
@@ -110,7 +110,7 @@ def test_context_lifecycle_tools_round_trip() -> None:
     assert selected["ok"] is True
     assert selected["data"]["selected_context_id"] == "ctx-alpha"
     assert selected["data"]["notes"] == "alpha-notes"
-    assert REMOVED_CONTEXT_FIELDS.isdisjoint(selected["data"])
+    assert PRE_GA_CONTEXT_FIELDS.isdisjoint(selected["data"])
 
     cleared = asyncio.run(
         server.dispatch_operation(
@@ -122,10 +122,10 @@ def test_context_lifecycle_tools_round_trip() -> None:
     assert cleared["ok"] is True
     assert cleared["data"]["context_id"] == "ctx-alpha"
     assert cleared["data"]["notes"] == ""
-    assert REMOVED_CONTEXT_FIELDS.isdisjoint(cleared["data"])
+    assert PRE_GA_CONTEXT_FIELDS.isdisjoint(cleared["data"])
 
 
-def test_docs_and_catalog_describe_context_isolation_without_coordination_contracts() -> None:
+def test_docs_and_catalog_keep_pre_ga_coordination_markers_out_of_public_contract() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     readme = (repo_root / "README.md").read_text(encoding="utf-8-sig")
     session_doc = (repo_root / "docs" / "session-model.md").read_text(encoding="utf-8-sig")
@@ -144,11 +144,11 @@ def test_docs_and_catalog_describe_context_isolation_without_coordination_contra
         assert "session_locator" in text
         assert all(term not in text for term in forbidden_doc_terms)
 
-    assert REMOVED_SESSION_TOOLS.isdisjoint(tools)
+    assert PRE_GA_SESSION_TOOLS.isdisjoint(tools)
     assert "session_locator" in tools["rd.session.get_context"]["returns_raw"]
     assert "session_locator" in tools["rd.session.list_contexts"]["returns_raw"]
     for tool in tools.values():
         param_names = {str(name) for name in tool.get("param_names", [])}
         assert {"runtime_" + "owner", "owner_" + "lease_id", "baton_" + "id"}.isdisjoint(param_names)
         returns_raw = str(tool.get("returns_raw") or "")
-        assert all(field not in returns_raw for field in REMOVED_CONTEXT_FIELDS)
+        assert all(field not in returns_raw for field in PRE_GA_CONTEXT_FIELDS)

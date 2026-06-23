@@ -524,6 +524,7 @@ def _version_payload() -> Dict[str, Any]:
             "schema_version": SCHEMA_VERSION,
             "platform": "windows-x64" if os.name == "nt" else sys.platform,
             "tools_root": str(root),
+            "public_commands": ["rdx"],
             "entrypoints": {
                 "windows_bat": str(root / "rdx.bat"),
                 "posix_shell": str(root / "bin" / "rdx"),
@@ -604,7 +605,7 @@ def _completion_script(shell: str) -> str:
         quoted = ", ".join("'" + word.replace("'", "''") + "'" for word in words)
         return "\n".join(
             [
-                "Register-ArgumentCompleter -Native -CommandName rdx,rdx.bat -ScriptBlock {",
+                "Register-ArgumentCompleter -Native -CommandName rdx -ScriptBlock {",
                 "  param($wordToComplete, $commandAst, $cursorPosition)",
                 f"  $words = @({quoted})",
                 "  $words | Where-Object { $_ -like \"$wordToComplete*\" } | ForEach-Object {",
@@ -622,7 +623,7 @@ def _completion_script(shell: str) -> str:
                 "  local cur=\"${COMP_WORDS[COMP_CWORD]}\"",
                 f"  COMPREPLY=( $(compgen -W \"{joined}\" -- \"$cur\") )",
                 "}",
-                "complete -F _rdx_complete rdx rdx.bat",
+                "complete -F _rdx_complete rdx",
                 "",
             ]
         )
@@ -630,7 +631,7 @@ def _completion_script(shell: str) -> str:
         joined = " ".join(words)
         return "\n".join(
             [
-                "#compdef rdx rdx.bat",
+                "#compdef rdx",
                 "_rdx() {",
                 f"  compadd -- {joined}",
                 "}",

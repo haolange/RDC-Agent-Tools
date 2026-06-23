@@ -189,7 +189,7 @@ def _append_path_candidate(candidates: List[Dict[str, Any]], value: Any, key: st
 
 
 def collect_artifact_candidates(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extract artifact references from legacy payload fields."""
+    """Extract artifact references from operation payload fields."""
     candidates: List[Dict[str, Any]] = []
     for key in _PATH_KEYS:
         if key in payload:

@@ -26,11 +26,12 @@ def _write_smoke_log(root: Path, *, passed: bool = True) -> None:
 def _mock_release_gate_basics(monkeypatch, root: Path) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(release_gate, "_tools_root", lambda: root)
     monkeypatch.setattr(release_gate, "_run", lambda cmd, cwd, **kwargs: (True, "ok"))
-    monkeypatch.setattr(release_gate, "_run_launcher", lambda args, cwd: (True, "ok"))
+    monkeypatch.setattr(release_gate, "_run_public_command", lambda args, cwd: (True, "usage: rdx"))
+    monkeypatch.setattr(release_gate, "_run_windows_launcher_file", lambda args, cwd: (True, "ok"))
     monkeypatch.setattr(
         release_gate,
-        "_run_launcher_expect_error",
-        lambda args, cwd, expected_code: (True, expected_code),
+        "_run_public_command_expect_error",
+        lambda args, cwd, expected_codes: (True, next(iter(expected_codes))),
     )
     monkeypatch.setattr(release_gate, "_check_manifest", lambda root: (True, "manifest ok"))
     monkeypatch.setattr(release_gate, "_check_bundled_python", lambda: (True, "bundled python ok"))
@@ -39,6 +40,13 @@ def _mock_release_gate_basics(monkeypatch, root: Path) -> None:  # type: ignore[
         "_check_user_docs_no_python_bootstrap",
         lambda root: (True, "user docs ok"),
     )
+    monkeypatch.setattr(
+        release_gate,
+        "_check_user_docs_no_bat_command_examples",
+        lambda root: (True, "user docs command ok"),
+    )
+    monkeypatch.setattr(release_gate, "_check_catalog_public_surface", lambda root: (True, "catalog ok"))
+    monkeypatch.setattr(release_gate, "_check_no_mcp_public_surface", lambda root: (True, "mcp ok"))
 
 
 def test_rg_no_match_falls_back_when_rg_missing(monkeypatch, tmp_path: Path) -> None:
@@ -78,19 +86,19 @@ def test_rg_no_match_falls_back_when_rg_permission_denied(monkeypatch, tmp_path:
 def test_rg_no_match_literal_falls_back_when_rg_missing(monkeypatch, tmp_path: Path) -> None:
     sample = tmp_path / "docs" / "sample.md"
     sample.parent.mkdir(parents=True, exist_ok=True)
-    legacy_token = "ext" + "ensions/"
-    sample.write_text(f"mentions {legacy_token}legacy path\n", encoding="utf-8")
+    pre_ga_token = "ext" + "ensions/"
+    sample.write_text(f"mentions {pre_ga_token}pre-GA path\n", encoding="utf-8")
 
     def _missing_rg(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise FileNotFoundError("rg missing")
 
     monkeypatch.setattr(release_gate.subprocess, "run", _missing_rg)
 
-    ok, detail = release_gate._rg_no_match(release_gate.ScanRule(legacy_token, literal=True), tmp_path)
+    ok, detail = release_gate._rg_no_match(release_gate.ScanRule(pre_ga_token, literal=True), tmp_path)
 
     assert not ok
     assert "python fallback" in detail
-    assert f"{legacy_token}legacy path" in detail
+    assert f"{pre_ga_token}pre-GA path" in detail
 
 
 def test_release_gate_accepts_current_bash_smoke_log(monkeypatch, tmp_path: Path) -> None:
@@ -173,8 +181,8 @@ def test_release_gate_main_survives_rg_permission_error(monkeypatch, tmp_path: P
     _write_smoke_log(tmp_path)
     bad_ref = tmp_path / "docs" / "sample.md"
     bad_ref.parent.mkdir(parents=True, exist_ok=True)
-    legacy_token = "ext" + "ensions/"
-    bad_ref.write_text(f"legacy {legacy_token}path reference\n", encoding="utf-8")
+    pre_ga_token = "ext" + "ensions/"
+    bad_ref.write_text(f"pre-GA {pre_ga_token}path reference\n", encoding="utf-8")
 
     def _deny_rg(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise PermissionError("access denied")
@@ -275,6 +283,7 @@ def test_release_gate_rejects_stale_release_package_manifest(tmp_path: Path) -> 
         "name": "rdx-tools",
         "version": "1.0.0",
         "platform": "windows-x64",
+        "public_commands": ["rdx"],
         "entrypoints": ["rdx.bat"],
         "file_count": 1,
         "files": [
@@ -304,6 +313,7 @@ def test_release_gate_accepts_zero_byte_files_in_release_manifest(tmp_path: Path
         "name": "rdx-tools",
         "version": "1.0.0",
         "platform": "windows-x64",
+        "public_commands": ["rdx"],
         "entrypoints": ["rdx.bat"],
         "file_count": 1,
         "files": [{"path": "rdx.bat", "size": 0, "sha256": source_sha}],

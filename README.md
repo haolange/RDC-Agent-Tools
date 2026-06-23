@@ -1,26 +1,26 @@
 ﻿# rdx-tools
 
-`rdx-tools` is a CLI-only RenderDoc `.rdc` runtime package. It exposes 196 `rd.*` tools through `rdx.bat`, `bin/rdx`, or `python cli/run_cli.py`.
+`rdx-tools` is a CLI-only RenderDoc `.rdc` runtime package. It exposes 194 `rd.*` tools through the `rdx` command.
 
 ## Entry Points
 
 ```bat
-rdx.bat --version
-rdx.bat version --json
-rdx.bat --json doctor
-rdx.bat tools list --json
-rdx.bat context status --json
-rdx.bat capture open --file "C:\path\capture.rdc" --frame-index 0
-rdx.bat context update --key notes --value "triaged" --json
-rdx.bat vfs ls --path / --format tsv
-rdx.bat completion powershell
+rdx --version
+rdx version --json
+rdx --json doctor
+rdx tools list --json
+rdx context status --json
+rdx capture open --file "C:\path\capture.rdc" --frame-index 0
+rdx context update --key notes --value "triaged" --json
+rdx vfs ls --path / --format tsv
+rdx completion powershell
 ```
 
 ```bash
 bash resources/tools/bin/rdx --json doctor
 ```
 
-`--non-interactive` is a launcher flag only. `rdx.bat --non-interactive --json doctor` runs the same CLI.
+`--non-interactive` is a Windows launcher flag only. `rdx --non-interactive --json doctor` runs the same CLI on Windows.
 
 ## Smoke
 

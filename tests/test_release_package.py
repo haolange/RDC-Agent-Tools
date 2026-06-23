@@ -56,28 +56,71 @@ def test_package_release_builds_self_contained_zip(tmp_path: Path, monkeypatch) 
         assert "rdx-tools/intermediate/logs/secret.log" not in names
         manifest = json.loads(zf.read("rdx-tools/RELEASE_MANIFEST.json").decode("utf-8"))
     assert manifest["platform"] == "windows-x64"
-    assert "rdx.bat" in manifest["entrypoints"]
+    assert manifest["public_commands"] == ["rdx"]
+    assert sorted(manifest["entrypoints"]) == ["bin/rdx", "cli/run_cli.py", "rdx.bat"]
     manifest_paths = {entry["path"] for entry in manifest["files"]}
     assert "pyproject.toml" in manifest_paths
     assert "uv.lock" not in manifest_paths
     assert not any(path == "tests" or path.startswith("tests/") for path in manifest_paths)
 
 
+def test_verify_release_package_accepts_manifest_public_command_split(tmp_path: Path) -> None:
+    root = tmp_path / "rdx-tools"
+    for rel in ("rdx.bat", "bin/rdx", "cli/run_cli.py"):
+        _write(root / rel)
+    manifest = {
+        "name": "rdx-tools",
+        "version": "1.0.0",
+        "platform": "windows-x64",
+        "public_commands": ["rdx"],
+        "entrypoints": ["rdx.bat", "bin/rdx", "cli/run_cli.py"],
+        "files": [
+            {"path": "rdx.bat", "size": 3, "sha256": "0" * 64},
+            {"path": "bin/rdx", "size": 3, "sha256": "0" * 64},
+            {"path": "cli/run_cli.py", "size": 3, "sha256": "0" * 64},
+        ],
+    }
+    _write(root / "RELEASE_MANIFEST.json", json.dumps(manifest))
+
+    verify_release_package._verify_release_manifest(root)
+
+
+def test_verify_release_package_rejects_manifest_without_public_command(tmp_path: Path) -> None:
+    root = tmp_path / "rdx-tools"
+    for rel in ("rdx.bat", "bin/rdx", "cli/run_cli.py"):
+        _write(root / rel)
+    manifest = {
+        "name": "rdx-tools",
+        "version": "1.0.0",
+        "platform": "windows-x64",
+        "entrypoints": ["rdx.bat", "bin/rdx", "cli/run_cli.py"],
+        "files": [
+            {"path": "rdx.bat", "size": 3, "sha256": "0" * 64},
+            {"path": "bin/rdx", "size": 3, "sha256": "0" * 64},
+            {"path": "cli/run_cli.py", "size": 3, "sha256": "0" * 64},
+        ],
+    }
+    _write(root / "RELEASE_MANIFEST.json", json.dumps(manifest))
+
+    with pytest.raises(RuntimeError, match="public_commands"):
+        verify_release_package._verify_release_manifest(root)
+
+
 def test_verify_release_package_rejects_pre_ga_payload_path(tmp_path: Path) -> None:
     package = tmp_path / "rdx-tools-1.0.0-windows-x64.zip"
-    legacy_path = "rdx-tools/rdx/" + "runtime_" + "materializer.py"
+    pre_ga_path = "rdx-tools/rdx/" + "runtime_" + "materializer.py"
     with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr(legacy_path, "legacy\n")
+        archive.writestr(pre_ga_path, "pre-ga\n")
 
     with pytest.raises(RuntimeError, match="pre-GA path"):
-        verify_release_package._verify_no_legacy_payload(package)
+        verify_release_package._verify_no_pre_ga_payload(package)
 
 
 def test_verify_release_package_rejects_pre_ga_payload_marker(tmp_path: Path) -> None:
     package = tmp_path / "rdx-tools-1.0.0-windows-x64.zip"
-    legacy_marker = "worker_" + "materialize"
+    pre_ga_marker = "worker_" + "materialize"
     with zipfile.ZipFile(package, "w") as archive:
-        archive.writestr("rdx-tools/binaries/windows/x64/manifest.runtime.json", '{"flag":"' + legacy_marker + '"}')
+        archive.writestr("rdx-tools/binaries/windows/x64/manifest.runtime.json", '{"flag":"' + pre_ga_marker + '"}')
 
     with pytest.raises(RuntimeError, match="pre-GA marker"):
-        verify_release_package._verify_no_legacy_payload(package)
+        verify_release_package._verify_no_pre_ga_payload(package)

@@ -17,7 +17,7 @@ Use `-DryRun` to inspect the file and PATH actions first.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/rdx_install.ps1 -Action doctor -InstallDir "$env:LOCALAPPDATA\Programs\rdx-tools"
-rdx.bat --json doctor
+rdx --json doctor
 ```
 
 ## Uninstall

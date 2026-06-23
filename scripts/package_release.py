@@ -136,6 +136,7 @@ def _write_release_metadata(staging_root: Path, files: list[dict[str, object]]) 
         "name": PACKAGE_PREFIX,
         "version": TOOL_VERSION,
         "platform": PACKAGE_PLATFORM,
+        "public_commands": ["rdx"],
         "entrypoints": ["rdx.bat", "bin/rdx", "cli/run_cli.py"],
         "file_count": len(files),
         "files": files,

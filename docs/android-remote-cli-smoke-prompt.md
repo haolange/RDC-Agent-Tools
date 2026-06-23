@@ -5,12 +5,12 @@ Use this prompt for Android remote-only smoke through CLI transport. Start from 
 Core sequence:
 
 ```bat
-rdx.bat --json doctor
-rdx.bat call rd.remote.connect --args-file intermediate\logs\remote_connect_args.json --format json
-rdx.bat call rd.remote.ping --args-file intermediate\logs\remote_ping_args.json --format json
-rdx.bat call rd.capture.open_file --args-file intermediate\logs\remote_open_file_args.json --format json
-rdx.bat call rd.capture.open_replay --args-file intermediate\logs\remote_open_replay_args.json --format json
-rdx.bat call rd.session.get_context --format json
+rdx --json doctor
+rdx call rd.remote.connect --args-file intermediate\logs\remote_connect_args.json --format json
+rdx call rd.remote.ping --args-file intermediate\logs\remote_ping_args.json --format json
+rdx call rd.capture.open_file --args-file intermediate\logs\remote_open_file_args.json --format json
+rdx call rd.capture.open_replay --args-file intermediate\logs\remote_open_replay_args.json --format json
+rdx call rd.session.get_context --format json
 ```
 
 For direct RenderDoc remote endpoints, the connect args file must include

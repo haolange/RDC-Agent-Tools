@@ -2,7 +2,7 @@
 
 Scope: this file governs `resources/tools` changes only.
 
-`rdx-tools` is CLI-only. Keep `rdx.bat`, `bin/rdx`, and `python cli/run_cli.py` as the public entrypoints.
+`rdx-tools` is CLI-only. Use `rdx` as the public user command; keep `rdx.bat`, `bin/rdx`, and `python cli/run_cli.py` as package launcher files.
 
 ## Conflict policy:
 

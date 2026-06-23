@@ -1,16 +1,16 @@
 {
   "source_path": "spec/doc_extracted.txt",
-  "tool_count": 196,
-  "generated_at": "2026-06-13T13:01:38.341783Z",
+  "tool_count": 194,
+  "generated_at": "2026-06-23T03:53:28.296826Z",
   "groups": {
     "3.1，核心与环境管理 (Core & Environment)": 14,
     "3.2，捕获文件与 Replay Session (Capture & Replay)": 13,
     "3.3，事件导航与 API 检查 (Event Navigation & API Inspection)": 12,
     "3.4，管线状态查询 (Pipeline State Inspection)": 25,
-    "3.5，资源探查 (Resource Inspection & History)": 13,
+    "3.5，资源探查 (Resource Inspection & History)": 12,
     "3.6，纹理数据访问与分析 (Texture Data Access & Analysis)": 11,
     "3.7，缓冲区与网格数据访问 (Buffer & Mesh Data Access)": 9,
-    "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)": 14,
+    "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)": 13,
     "3.9，Shader Debugger 与像素/顶点级调试 (Shader Debugging)": 13,
     "3.10，性能与高级分析 (Performance & Advanced Analysis)": 6,
     "3.11，导出、报告与可复现打包 (Export & Reporting)": 12,
@@ -1363,28 +1363,6 @@
       ]
     },
     {
-      "name": "rd.resource.rename",
-      "group": "3.5，资源探查 (Resource Inspection & History)",
-      "description": "兼容工具：等价于 rd.resource.set_alias，保留 V3 名称。",
-      "parameter_raw": "session_id (str)<br>resource_id (str)<br>new_name (str)",
-      "returns_raw": "ok (bool)<br>data (dict): tool-specific payload<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "resource_id",
-        "new_name"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
       "name": "rd.resource.get_descriptor_info",
       "group": "3.5，资源探查 (Resource Inspection & History)",
       "description": "获取资源在当前绑定上下文中的 descriptor/view 信息（SRV/UAV/RTV/DSV 等）。",
@@ -2025,29 +2003,6 @@
       "description": "提取 shader 的二进制 blob（DXIL/DXBC/SPIR-V 等），并保存为文件。",
       "parameter_raw": "session_id (str)<br>shader_id (str)<br>output_path (str, 可选)<br>container (str, 可选): `'auto'<br>'dxil'",
       "returns_raw": "ok (bool)<br>data (dict): tool-specific payload<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
-      "param_names": [
-        "session_id",
-        "shader_id",
-        "output_path",
-        "container"
-      ],
-      "prerequisites": [
-        {
-          "requires": "session_id",
-          "via_tools": [
-            "rd.capture.open_file",
-            "rd.capture.open_replay"
-          ],
-          "reason": "This tool operates on a live replay session."
-        }
-      ]
-    },
-    {
-      "name": "rd.shader.save_binary",
-      "group": "3.8，Shader 探查、反射与替换 (Shader Inspection & Replacement)",
-      "description": "兼容工具：等价于 rd.shader.extract_binary（保留更直观的名称）。",
-      "parameter_raw": "session_id (str)<br>shader_id (str)<br>output_path (str)<br>container (str, 可选)",
-      "returns_raw": "ok (bool)<br>data (dict): {saved_path}<br>artifacts (list)<br>error (dict|null)<br>meta (dict)<br>projections (dict, 可选)",
       "param_names": [
         "session_id",
         "shader_id",

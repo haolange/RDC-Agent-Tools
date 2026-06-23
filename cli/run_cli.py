@@ -177,6 +177,7 @@ def _emit_version(argv: list[str]) -> None:
                 "schema_version": "3.0.0",
                 "platform": "windows-x64" if os.name == "nt" else sys.platform,
                 "tools_root": str(root),
+                "public_commands": ["rdx"],
                 "entrypoints": {
                     "windows_bat": str(root / "rdx.bat"),
                     "posix_shell": str(root / "bin" / "rdx"),

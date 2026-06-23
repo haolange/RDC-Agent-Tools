@@ -1,31 +1,27 @@
 ﻿# Agent Integration
 
-Agents should call `rdx-tools` through their shell tool. The public entrypoints are:
-
-- `rdx.bat`
-- `bin/rdx`
-- `python cli/run_cli.py`
+Agents should call `rdx-tools` through their shell tool. The public user command is `rdx`.
 
 Recommended probes:
 
 ```bat
-rdx.bat --version
-rdx.bat --json doctor
-rdx.bat context status --json
-rdx.bat tools search pipeline --json
-rdx.bat vfs ls --path / --format tsv
+rdx --version
+rdx --json doctor
+rdx context status --json
+rdx tools search pipeline --json
+rdx vfs ls --path / --format tsv
 ```
 
 Canonical agent lifecycle:
 
 ```bat
-rdx.bat --daemon-context task-123 --json doctor
-rdx.bat --daemon-context task-123 context status --json
-rdx.bat --daemon-context task-123 capture open --file "C:\captures\case.rdc"
-rdx.bat --daemon-context task-123 vfs tree --path / --depth 2 --format json
-rdx.bat --daemon-context task-123 context update --key notes --value "triaged" --json
-rdx.bat --daemon-context task-123 context clear --json
-rdx.bat --daemon-context task-123 daemon stop
+rdx --daemon-context task-123 --json doctor
+rdx --daemon-context task-123 context status --json
+rdx --daemon-context task-123 capture open --file "C:\captures\case.rdc"
+rdx --daemon-context task-123 vfs tree --path / --depth 2 --format json
+rdx --daemon-context task-123 context update --key notes --value "triaged" --json
+rdx --daemon-context task-123 context clear --json
+rdx --daemon-context task-123 daemon stop
 ```
 
 After enabling preview for an opened capture, agents should inspect `preview.display` in `context status --json` for framebuffer, window, and fit geometry instead of inferring geometry from screenshots alone.

@@ -144,4 +144,4 @@ async def dispatch_operation(
 
 
 def main() -> None:
-    raise RuntimeError("rdx-tools is a CLI package; use `rdx.bat --json doctor`, `bin/rdx --json doctor`, or `rdx.bat call <rd.*>`.")
+    raise RuntimeError("rdx-tools is a CLI package; use `rdx --json doctor` or `rdx call <rd.*>`.")

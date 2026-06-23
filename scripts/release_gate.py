@@ -46,6 +46,11 @@ REQUIRED_FILES = [
 ]
 
 BASH_SMOKE_LOG = "intermediate/logs/smoke_cli.log"
+PUBLIC_COMMAND = "rdx"
+WINDOWS_LAUNCHER_FILE = "rdx.bat"
+EXPECTED_PUBLIC_COMMANDS = [PUBLIC_COMMAND]
+EXPECTED_ENTRYPOINTS = [WINDOWS_LAUNCHER_FILE, "bin/rdx", "cli/run_cli.py"]
+REMOVED_CATALOG_TOOLS = {"rd.resource.rename", "rd.shader.save_binary"}
 
 BANNED_SUFFIXES = {".pdb", ".lib", ".exp", ".ilk", ".h"}
 TEXT_SCAN_SUFFIXES = {
@@ -69,6 +74,12 @@ SCAN_SKIP_PREFIXES = {
     "intermediate/",
     "tests/",
 }
+MCP_DOC_MARKERS = (
+    "mcp/run_mcp.py",
+    "model context protocol",
+    "mcp server",
+    "mcp public",
+)
 USER_DOCS = [
     "README.md",
     "docs/install.md",
@@ -103,9 +114,14 @@ def _cmd_exe() -> str:
     return str(Path(system_root) / "System32" / "cmd.exe")
 
 
-def _launcher_env() -> dict[str, str]:
+def _launcher_env(root: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env.pop("RDX_PYTHON", None)
+    if root is not None:
+        env["PATH"] = str(root) + os.pathsep + str(env.get("PATH") or "")
+        pathext = str(env.get("PATHEXT") or "")
+        if ".BAT" not in pathext.upper().split(";"):
+            env["PATHEXT"] = pathext + (";" if pathext else "") + ".BAT"
     return env
 
 
@@ -127,12 +143,12 @@ def _run(cmd: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> tup
     return ok, detail.strip()
 
 
-def _run_launcher(args: list[str], cwd: Path) -> tuple[bool, str]:
-    return _run([_cmd_exe(), "/c", "rdx.bat", *args], cwd, env=_launcher_env())
+def _run_public_command(args: list[str], cwd: Path) -> tuple[bool, str]:
+    return _run([_cmd_exe(), "/c", PUBLIC_COMMAND, *args], cwd, env=_launcher_env(cwd))
 
 
-def _run_launcher_expect_error(args: list[str], cwd: Path, *, expected_code: str) -> tuple[bool, str]:
-    code, out, err = run_subprocess([_cmd_exe(), "/c", "rdx.bat", *args], cwd=cwd, env=_launcher_env())
+def _run_public_command_expect_error(args: list[str], cwd: Path, *, expected_codes: set[str]) -> tuple[bool, str]:
+    code, out, err = run_subprocess([_cmd_exe(), "/c", PUBLIC_COMMAND, *args], cwd=cwd, env=_launcher_env(cwd))
     detail = ((out or "") + (err or "")).strip()
     try:
         from scripts._shared import extract_json_payload
@@ -141,9 +157,14 @@ def _run_launcher_expect_error(args: list[str], cwd: Path, *, expected_code: str
     except Exception:
         payload = {}
     actual_code = str(((payload or {}).get("error") or {}).get("code") or "")
-    if code != 0 and actual_code == expected_code:
+    if code != 0 and actual_code in expected_codes:
         return True, detail
-    return False, f"expected non-zero `{expected_code}`, got exit={code} code={actual_code}\n{detail}"
+    expected = ", ".join(sorted(expected_codes))
+    return False, f"expected non-zero one of `{expected}`, got exit={code} code={actual_code}\n{detail}"
+
+
+def _run_windows_launcher_file(args: list[str], cwd: Path) -> tuple[bool, str]:
+    return _run([_cmd_exe(), "/c", WINDOWS_LAUNCHER_FILE, *args], cwd, env=_launcher_env())
 
 
 def _bundled_python_for_gate(root: Path) -> str:
@@ -277,6 +298,74 @@ def _check_user_docs_no_python_bootstrap(root: Path) -> tuple[bool, str]:
                 line_no = text[: match.start()].count("\n") + 1
                 return False, f"{rel}:{line_no}: matched forbidden user-path text: {match.group(0)}"
     return True, "user docs do not require venv or package-manager bootstrap"
+
+
+def _check_user_docs_no_bat_command_examples(root: Path) -> tuple[bool, str]:
+    command_pattern = re.compile(r"(?i)(?:^|\s)(?:\.\\)?rdx\.bat\s+\S")
+    for rel in USER_DOCS:
+        path = root / rel
+        if not path.is_file():
+            return False, f"missing user doc: {path}"
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if command_pattern.search(line):
+                return False, f"{rel}:{lineno}: use `{PUBLIC_COMMAND}` for user commands: {line.strip()}"
+    return True, "user docs reserve rdx.bat for launcher-file references only"
+
+
+def _check_help_uses_public_command(help_text: str) -> tuple[bool, str]:
+    if not help_text.strip():
+        return False, "help output is empty"
+    if re.search(r"(?i)(?:^|\s)(?:\.\\)?rdx\.bat\s+\S", help_text):
+        return False, "help output contains rdx.bat command examples"
+    if "usage: rdx" not in help_text:
+        return False, "help output does not advertise usage: rdx"
+    return True, "help output advertises rdx and no rdx.bat command examples"
+
+
+def _check_catalog_public_surface(root: Path) -> tuple[bool, str]:
+    catalog_path = root / "spec" / "tool_catalog.json"
+    if not catalog_path.is_file():
+        return False, f"missing catalog: {catalog_path}"
+    try:
+        payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"invalid catalog json: {exc}"
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return False, "catalog tools field is missing or invalid"
+    names = {str(item.get("name") or "").strip() for item in tools if isinstance(item, dict)}
+    removed = sorted(REMOVED_CATALOG_TOOLS & names)
+    if removed:
+        return False, f"removed compatibility aliases still in active catalog: {removed}"
+    declared_count = int(payload.get("tool_count") or len(tools))
+    if declared_count != len(tools):
+        return False, f"catalog tool_count mismatch: declared={declared_count} actual={len(tools)}"
+    if len(tools) != 194:
+        return False, f"expected 194 active tools after alias convergence, got {len(tools)}"
+    catalog_text = json.dumps(payload, ensure_ascii=False)
+    if "\u517c\u5bb9\u5de5\u5177" in catalog_text:
+        return False, "active catalog contains removed compatibility-tool wording"
+    return True, "active catalog has 194 tools and no removed compatibility aliases"
+
+
+def _check_no_mcp_public_surface(root: Path) -> tuple[bool, str]:
+    mcp_root = root / "mcp"
+    if mcp_root.exists():
+        return False, "mcp/ must not be part of the active release source surface"
+    release_paths = {str(item["path"]) for item in _release_source_manifest(root)}
+    leaked = sorted(path for path in release_paths if path == "mcp" or path.startswith("mcp/"))
+    if leaked:
+        return False, f"release source manifest exposes MCP paths: {leaked[:5]}"
+    for rel in USER_DOCS:
+        path = root / rel
+        if not path.is_file():
+            return False, f"missing user doc: {path}"
+        text = path.read_text(encoding="utf-8", errors="replace").lower()
+        for marker in MCP_DOC_MARKERS:
+            if marker in text:
+                return False, f"{rel}: exposes MCP public entrypoint marker `{marker}`"
+    return True, "release source and user docs expose no MCP public entrypoint"
 
 
 def _check_reports(root: Path, *, require_smoke_reports: bool) -> tuple[bool, str]:
@@ -433,62 +522,83 @@ def main(argv: list[str] | None = None) -> int:
 
     ok_user_docs, user_docs_detail = _check_user_docs_no_python_bootstrap(root)
     results.append(("docs:no_user_python_bootstrap", ok_user_docs, user_docs_detail))
+    ok_docs_command, docs_command_detail = _check_user_docs_no_bat_command_examples(root)
+    results.append(("docs:public-command-examples", ok_docs_command, docs_command_detail))
+    ok_catalog_surface, catalog_surface_detail = _check_catalog_public_surface(root)
+    results.append(("catalog:public-surface", ok_catalog_surface, catalog_surface_detail))
+    ok_mcp_surface, mcp_surface_detail = _check_no_mcp_public_surface(root)
+    results.append(("mcp:no-public-entrypoint", ok_mcp_surface, mcp_surface_detail))
 
     ok_manifest, msg_manifest = _check_manifest(root)
     results.append(("manifest:integrity", ok_manifest, msg_manifest))
     ok_bundled_python, bundled_python_detail = _check_bundled_python()
     results.append(("manifest:bundled-python", ok_bundled_python, bundled_python_detail))
 
-    ok_bat_help, bat_help = _run_launcher(["--help"], cwd=root)
-    results.append(("entry:rdx.bat --help", ok_bat_help, bat_help))
-    ok_bat_doctor, bat_doctor = _run_launcher(["--json", "doctor"], cwd=root)
-    results.append(("entry:rdx.bat --json doctor", ok_bat_doctor, bat_doctor))
-    ok_bat_noninteractive_doctor, bat_noninteractive_doctor = _run_launcher(["--non-interactive", "--json", "doctor"], cwd=root)
-    results.append(("entry:rdx.bat --non-interactive --json doctor", ok_bat_noninteractive_doctor, bat_noninteractive_doctor))
-    ok_bat_version, bat_version = _run_launcher(["--version"], cwd=root)
-    results.append(("entry:rdx.bat --version", ok_bat_version, bat_version))
-    ok_bat_version_json, bat_version_json = _run_launcher(["version", "--json"], cwd=root)
-    results.append(("entry:rdx.bat version --json", ok_bat_version_json, bat_version_json))
-    ok_bat_completion, bat_completion = _run_launcher(["completion", "powershell"], cwd=root)
-    results.append(("entry:rdx.bat completion powershell", ok_bat_completion, bat_completion))
-    ok_context_status, context_status = _run_launcher(["context", "status", "--json"], cwd=root)
-    results.append(("entry:rdx.bat context status --json", ok_context_status, context_status))
-    ok_context_list, context_list = _run_launcher(["context", "list", "--json"], cwd=root)
-    results.append(("entry:rdx.bat context list --json", ok_context_list, context_list))
-    ok_context_update, context_update = _run_launcher(
+    ok_public_help, public_help = _run_public_command(["--help"], cwd=root)
+    results.append(("entry:rdx --help", ok_public_help, public_help))
+    ok_help_contract, help_contract = _check_help_uses_public_command(public_help)
+    results.append(("help:public-command", ok_public_help and ok_help_contract, help_contract))
+    ok_public_doctor, public_doctor = _run_public_command(["--json", "doctor"], cwd=root)
+    results.append(("entry:rdx --json doctor", ok_public_doctor, public_doctor))
+    ok_public_version, public_version = _run_public_command(["--version"], cwd=root)
+    results.append(("entry:rdx --version", ok_public_version, public_version))
+    ok_public_version_json, public_version_json = _run_public_command(["version", "--json"], cwd=root)
+    results.append(("entry:rdx version --json", ok_public_version_json, public_version_json))
+    ok_public_tools, public_tools = _run_public_command(["tools", "list", "--json"], cwd=root)
+    results.append(("entry:rdx tools list --json", ok_public_tools, public_tools))
+    ok_context_status, context_status = _run_public_command(["context", "status", "--json"], cwd=root)
+    results.append(("entry:rdx context status --json", ok_context_status, context_status))
+    ok_context_list, context_list = _run_public_command(["context", "list", "--json"], cwd=root)
+    results.append(("entry:rdx context list --json", ok_context_list, context_list))
+    ok_context_update, context_update = _run_public_command(
         ["--daemon-context", "release-gate-context", "context", "update", "--key", "notes", "--value", "release-gate", "--json"],
         cwd=root,
     )
-    results.append(("entry:rdx.bat context update --json", ok_context_update, context_update))
-    ok_context_clear, context_clear = _run_launcher(
+    results.append(("entry:rdx context update --json", ok_context_update, context_update))
+    ok_context_clear, context_clear = _run_public_command(
         ["--daemon-context", "release-gate-context", "context", "clear", "--json"],
         cwd=root,
     )
-    results.append(("entry:rdx.bat context clear --json", ok_context_clear, context_clear))
-    ok_vfs_tsv, vfs_tsv = _run_launcher(["vfs", "ls", "--path", "/", "--format", "tsv"], cwd=root)
-    results.append(("entry:rdx.bat vfs ls --format tsv", ok_vfs_tsv, vfs_tsv))
-    ok_vfs_bad_tsv, vfs_bad_tsv = _run_launcher_expect_error(
+    results.append(("entry:rdx context clear --json", ok_context_clear, context_clear))
+    ok_vfs_tsv, vfs_tsv = _run_public_command(["vfs", "ls", "--path", "/", "--format", "tsv"], cwd=root)
+    results.append(("entry:rdx vfs ls --format tsv", ok_vfs_tsv, vfs_tsv))
+    ok_physical_launcher, physical_launcher = _run_windows_launcher_file(["--non-interactive", "--json", "doctor"], cwd=root)
+    results.append(("launcher-file:rdx.bat --non-interactive --json doctor", ok_physical_launcher, physical_launcher))
+    ok_vfs_bad_tsv, vfs_bad_tsv = _run_public_command_expect_error(
         ["vfs", "tree", "--path", "/", "--format", "tsv"],
         cwd=root,
-        expected_code="projection_not_supported",
+        expected_codes={"projection_not_supported"},
     )
     results.append(("negative:vfs tree tsv projection", ok_vfs_bad_tsv, vfs_bad_tsv))
-    ok_call_bad_tsv, call_bad_tsv = _run_launcher_expect_error(
+    ok_call_bad_tsv, call_bad_tsv = _run_public_command_expect_error(
         ["call", "rd.session.get_context", "--format", "tsv"],
         cwd=root,
-        expected_code="tabular_projection_missing",
+        expected_codes={"tabular_projection_missing"},
     )
     results.append(("negative:call context tsv projection", ok_call_bad_tsv, call_bad_tsv))
-    ok_diff_no_session, diff_no_session = _run_launcher_expect_error(
+    unsupported_alias_codes = {"not_found", "operation_not_found", "tool_not_found", "unknown_operation", "unsupported_operation", "unsupported_command"}
+    ok_removed_resource_alias, removed_resource_alias = _run_public_command_expect_error(
+        ["call", "rd.resource.rename", "--format", "json"],
+        cwd=root,
+        expected_codes=unsupported_alias_codes,
+    )
+    results.append(("negative:removed rd.resource.rename", ok_removed_resource_alias, removed_resource_alias))
+    ok_removed_shader_alias, removed_shader_alias = _run_public_command_expect_error(
+        ["call", "rd.shader.save_binary", "--format", "json"],
+        cwd=root,
+        expected_codes=unsupported_alias_codes,
+    )
+    results.append(("negative:removed rd.shader.save_binary", ok_removed_shader_alias, removed_shader_alias))
+    ok_diff_no_session, diff_no_session = _run_public_command_expect_error(
         ["--daemon-context", "release-gate-empty", "diff", "pipeline", "--event-a", "1", "--event-b", "2"],
         cwd=root,
-        expected_code="session_required",
+        expected_codes={"session_required"},
     )
     results.append(("negative:diff pipeline no session", ok_diff_no_session, diff_no_session))
-    ok_assert_no_session, assert_no_session = _run_launcher_expect_error(
+    ok_assert_no_session, assert_no_session = _run_public_command_expect_error(
         ["--daemon-context", "release-gate-empty", "assert", "pipeline", "--event-a", "1", "--event-b", "2"],
         cwd=root,
-        expected_code="session_required",
+        expected_codes={"session_required"},
     )
     results.append(("negative:assert pipeline no session", ok_assert_no_session, assert_no_session))
     ok_cli_help, cli_help = _run([sys.executable, "cli/run_cli.py", "--help"], cwd=root)

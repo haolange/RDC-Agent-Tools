@@ -3,7 +3,7 @@
 ## 1.0.0
 
 - `rdx-tools` is a CLI-only RenderDoc `.rdc` runtime.
-- Public entrypoints are `rdx.bat`, `bin/rdx`, and `python cli/run_cli.py`.
+- The public user command is `rdx`; release packages keep `rdx.bat`, `bin/rdx`, and `python cli/run_cli.py` as launcher files.
 - This is the first GA compatibility baseline. Pre-GA ownership, lease, baton, handoff, and runtime materialization experiments are intentionally outside the 1.0 public contract.
 - CLI daemon contexts are isolated runtime namespaces chosen by the caller; business orchestration remains outside this package.
 - Workers use the packaged runtime binaries in place instead of materializing per-run binary copies.

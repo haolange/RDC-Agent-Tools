@@ -7843,10 +7843,6 @@ async def _dispatch_resource(action: str, args: Dict[str, Any]) -> str:
         _require(args, "resource_id", "alias")
         _runtime.aliases[str(args["resource_id"])] = str(args["alias"])
         return _ok()
-    if action == "rename":
-        _require(args, "resource_id", "new_name")
-        _runtime.aliases[str(args["resource_id"])] = str(args["new_name"])
-        return _ok()
     if action == "get_descriptor_info":
         _require(args, "resource_id")
         details_response = await _dispatch_resource("get_details", {"session_id": session_id, "resource_id": args["resource_id"]})
@@ -10156,7 +10152,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             pixel_history_summary=last_history_summary,
         )
 
-    if action in {"get_debug_state", "list_replacements", "revert_replacement", "edit_and_replace", "get_messages", "save_binary", "extract_binary", "get_source", "list_entry_points", "get_bindpoint_mapping", "get_constant_block_layout", "get_constant_buffer_contents", "get_reflection", "get_disassembly"}:
+    if action in {"get_debug_state", "list_replacements", "revert_replacement", "edit_and_replace", "get_messages", "extract_binary", "get_source", "list_entry_points", "get_bindpoint_mapping", "get_constant_block_layout", "get_constant_buffer_contents", "get_reflection", "get_disassembly"}:
         pass
     else:
         return _err(f"Unsupported shader action: {action}")
@@ -10498,8 +10494,6 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 messages.append({"severity": "info", "message": msg})
         return _ok(messages=messages, severity_min=severity_min)
 
-    if action == "save_binary":
-        action = "extract_binary"
     if action == "extract_binary":
         shader_id = str(args.get("shader_id", "")).strip()
         try:

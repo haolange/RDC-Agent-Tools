@@ -159,7 +159,7 @@ function Write-JsonStatus {
 }
 
 function Show-Usage {
-    Write-Output 'usage: rdx.bat [--non-interactive] [--daemon-context <id>] [--json] <command> ...'
+    Write-Output 'usage: rdx [--non-interactive] [--daemon-context <id>] [--json] <command> ...'
     Write-Output ''
     Write-Output 'commands:'
     Write-Output '  version'
@@ -176,15 +176,15 @@ function Show-Usage {
     Write-Output '  call <rd.*>'
     Write-Output ''
     Write-Output 'examples:'
-    Write-Output '  rdx.bat --version'
-    Write-Output '  rdx.bat version --json'
-    Write-Output '  rdx.bat --json doctor'
-    Write-Output '  rdx.bat --non-interactive --json doctor'
-    Write-Output '  rdx.bat completion powershell'
-    Write-Output '  rdx.bat context status --json'
-    Write-Output '  rdx.bat context update --key notes --value triaged --json'
-    Write-Output '  rdx.bat capture open --file D:\path\capture.rdc --frame-index 0'
-    Write-Output '  rdx.bat vfs ls --path / --format tsv'
+    Write-Output '  rdx --version'
+    Write-Output '  rdx version --json'
+    Write-Output '  rdx --json doctor'
+    Write-Output '  rdx --non-interactive --json doctor'
+    Write-Output '  rdx completion powershell'
+    Write-Output '  rdx context status --json'
+    Write-Output '  rdx context update --key notes --value triaged --json'
+    Write-Output '  rdx capture open --file D:\path\capture.rdc --frame-index 0'
+    Write-Output '  rdx vfs ls --path / --format tsv'
 }
 
 function Read-LauncherLine {
@@ -304,7 +304,7 @@ function Invoke-Cli {
     $finalArgs = $extraArgs + @($scriptPath) + (Normalize-CommandArgs -CommandArgs $CommandArgs -ContextId $ContextId)
     $env:RDX_TOOLS_ROOT = $ToolsRoot
     $env:PYTHONIOENCODING = 'utf-8'
-    $env:RDX_LAUNCHER_PROG = 'rdx.bat'
+    $env:RDX_LAUNCHER_PROG = 'rdx'
     if ([string]$env:RDX_BAT_DEBUG -eq '1') {
         Write-Host ('[RDX][DEBUG] python=' + $python.Executable)
         Write-Host ('[RDX][DEBUG] args=' + (($finalArgs | ForEach-Object { '[' + [string]$_ + ']' }) -join ' '))
@@ -337,7 +337,7 @@ function New-CliShellCommandFile {
         '@echo off',
         ('set "RDX_TOOLS_ROOT={0}"' -f (Quote-CmdFileValue $ToolsRoot)),
         'set "PYTHONIOENCODING=utf-8"',
-        'set "RDX_LAUNCHER_PROG=rdx.bat"',
+        'set "RDX_LAUNCHER_PROG=rdx"',
         ('title RDX CLI [{0}]' -f $ContextId),
         ('doskey rdx={0} "{1}" --daemon-context "{2}" $*' -f $python.CommandText, $cliPath, $ContextId),
         ('doskey status={0} "{1}" --daemon-context "{2}" daemon status' -f $python.CommandText, $cliPath, $ContextId),
@@ -414,7 +414,7 @@ function Show-MainMenu {
 
     while ($true) {
         Write-Host ''
-        Write-Host '=== rdx.bat Launcher ==='
+        Write-Host '=== RDX Launcher ==='
         Write-Host '1. Start CLI'
         Write-Host '2. Help'
         Write-Host '0. Exit'

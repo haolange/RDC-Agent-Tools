@@ -32,14 +32,16 @@ def test_catalog_uses_repo_relative_source_path_and_readable_groups() -> None:
         assert "Context Snapshot Tools" in text or "????" not in text
 
 
-def test_catalog_boundaries_remove_legacy_surfaces_and_expand_export_params() -> None:
+def test_catalog_boundaries_remove_pre_ga_surfaces_and_expand_export_params() -> None:
     catalog = ROOT / "spec" / "tool_catalog.json"
     payload = json.loads(catalog.read_text(encoding="utf-8"))
     tools = payload.get("tools", [])
     names = {str(t.get("name", "")).strip() for t in tools}
-    assert int(payload.get("tool_count") or 0) == 196
+    assert int(payload.get("tool_count") or 0) == 194
 
     removed = {
+        "rd.resource.rename",
+        "rd.shader.save_binary",
         "rd.app.is_available",
         "rd.app.start_frame_capture",
         "rd.app.end_frame_capture",

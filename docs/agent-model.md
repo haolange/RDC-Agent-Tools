@@ -1,6 +1,6 @@
 ﻿# Agent Model
 
-Agents should treat `rdx-tools` as CLI-only. Use `rdx.bat`, `bin/rdx`, or `python cli/run_cli.py`.
+Agents should treat `rdx-tools` as CLI-only. Use the `rdx` command through the agent shell tool.
 
 Read state with `rdx context status` before acting, and write scoped notes or focus with `rdx context update`. `session_locator` summarizes the active capture/session/event for the selected daemon context. Multiple daemon contexts are isolated from each other, and the caller chooses which context id to use.
 

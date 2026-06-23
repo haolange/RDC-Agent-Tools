@@ -2,7 +2,11 @@
 
 `rdx-tools` 1.x treats the CLI entrypoints and canonical JSON envelope as stable.
 
-Stable entrypoints:
+Stable public command:
+
+- `rdx`
+
+Packaged launcher files:
 
 - `rdx.bat`
 - `bin/rdx`

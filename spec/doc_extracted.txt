@@ -354,10 +354,6 @@
 0365: 为资源设置一个本地别名，仅影响后续输出/报告，不修改捕获内容。
 0366: session_id (str)<br>resource_id (str)<br>alias (str): 例如 'GBufferA'/'MainColor' 等
 0367: success (bool)<br>error_message (str, 可选)
-0368: rd.resource.rename
-0369: 兼容工具：等价于 rd.resource.set_alias，保留 V3 名称。
-0370: session_id (str)<br>resource_id (str)<br>new_name (str)
-0371: success (bool)<br>error_message (str, 可选)
 0372: rd.resource.get_descriptor_info
 0373: 获取资源在当前绑定上下文中的 descriptor/view 信息（SRV/UAV/RTV/DSV 等）。
 0374: session_id (str)<br>resource_id (str)<br>event_id (int, 可选): 若提供则临时切换到该 event 查询（不改变全局 active event）
@@ -482,10 +478,6 @@
 0511: 提取 shader 的二进制 blob（DXIL/DXBC/SPIR-V 等），并保存为文件。
 0512: session_id (str)<br>shader_id (str)<br>output_path (str, 可选)<br>container (str, 可选): `'auto'
 0513: 'dxil'
-0514: rd.shader.save_binary
-0515: 兼容工具：等价于 rd.shader.extract_binary（保留更直观的名称）。
-0516: session_id (str)<br>shader_id (str)<br>output_path (str)<br>container (str, 可选)
-0517: success (bool)<br>saved_path (str)<br>error_message (str, 可选)
 0518: rd.shader.list_entry_points
 0519: 列出 shader 容器中的 entry points（适用于 DXIL library/多 entry SPIR-V）。
 0520: session_id (str)<br>shader_id (str)
