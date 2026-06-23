@@ -1614,3 +1614,94 @@ def test_get_disassembly_reports_dxil_readonly_edit_plan(monkeypatch: pytest.Mon
     assert payload["edit_plan"]["can_edit_text"] is False
     assert payload["edit_plan"]["can_replace"] is False
     assert payload["edit_plan"]["recommended_next_tool"] == "rd.shader.extract_binary"
+
+
+def test_patch_engine_hlsl_full_replacement_builds_and_replaces_without_editing_dxil(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderCompileFlags=_FakeShaderCompileFlags,
+        ShaderCompileFlag=_FakeShaderCompileFlag,
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(patch_engine_mod, "_to_rd_stage", lambda stage: "ps")
+
+    class _HlslController(_PatchEngineController):
+        def GetTargetShaderEncodings(self) -> list[str]:
+            return ["HLSL"]
+
+    controller = _HlslController()
+    session_manager = _PatchEngineSessionManager(controller)
+    engine = patch_engine_mod.PatchEngine()
+
+    result = asyncio.run(
+        engine.apply_patch(
+            session_id="sess_demo",
+            event_id=314,
+            stage=ShaderStage.PS,
+            session_manager=session_manager,
+            patch_spec=PatchSpec(
+                patch_id="repl_hlsl",
+                target_event_id=314,
+                target_stage=ShaderStage.PS,
+                target_shader_id="ResourceId::77",
+                source_text="float4 main() : SV_Target { return 1; }",
+                source_encoding="hlsl",
+                entry="main",
+                target="ps_6_6",
+            ),
+        )
+    )
+
+    assert result.success is True
+    assert result.error_code == ""
+    assert controller.build_calls
+    assert controller.replace_calls == [("ResourceId::77", "ResourceId::99")]
+    build_args = controller.build_calls[0]
+    assert build_args[0] == "main"
+    assert build_args[1] == "HLSL"
+    assert b"float4 main" in build_args[2]
+    assert result.messages[0] == "Applied full source replacement input."
+
+
+def test_patch_engine_hlsl_compile_failure_does_not_replace(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rd = SimpleNamespace(
+        ResourceId=lambda: "ResourceId::0",
+        ShaderCompileFlags=_FakeShaderCompileFlags,
+        ShaderCompileFlag=_FakeShaderCompileFlag,
+    )
+    monkeypatch.setattr(patch_engine_mod, "_get_rd", lambda: fake_rd)
+    monkeypatch.setattr(patch_engine_mod, "_to_rd_stage", lambda stage: "ps")
+
+    class _HlslController(_PatchEngineController):
+        def GetTargetShaderEncodings(self) -> list[str]:
+            return ["HLSL"]
+
+    controller = _HlslController(build_errors="syntax error", build_shader_id="ResourceId::99")
+    session_manager = _PatchEngineSessionManager(controller)
+    engine = patch_engine_mod.PatchEngine()
+
+    result = asyncio.run(
+        engine.apply_patch(
+            session_id="sess_demo",
+            event_id=314,
+            stage=ShaderStage.PS,
+            session_manager=session_manager,
+            patch_spec=PatchSpec(
+                patch_id="repl_hlsl",
+                target_event_id=314,
+                target_stage=ShaderStage.PS,
+                target_shader_id="ResourceId::77",
+                source_text="float4 main() : SV_Target { return ; }",
+                source_encoding="hlsl",
+                entry="main",
+                target="ps_6_6",
+            ),
+        )
+    )
+
+    assert result.success is False
+    assert result.error_code == "shader_build_failed"
+    assert result.error_details["replacement_attempted"] is False
+    assert result.error_details["cleanup_attempted"] is True
+    assert controller.replace_calls == []
+    assert controller.free_calls == ["ResourceId::99"]

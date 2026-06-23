@@ -1,4 +1,4 @@
-﻿"""
+"""
 RDX daemon/runtime server with registry-driven tool registration.
 
 - Registers all catalog-defined tools from `rdx/spec/tool_catalog.json`
@@ -6264,19 +6264,12 @@ _NAVIGATION_QUERY_TERMS = {
     "ls",
     "navigate",
     "vfs",
-    "浏览",
-    "路径",
-    "树",
-    "结构",
-    "导航",
 }
 _TABULAR_QUERY_TERMS = {
     "table",
     "tabular",
     "tsv",
     "spreadsheet",
-    "表格",
-    "制表",
 }
 _QUERY_TOKEN_RE = re.compile(r"[a-z0-9_]+|[\u4e00-\u9fff]+")
 
@@ -6411,9 +6404,9 @@ def _tool_search_haystack(entry: Dict[str, Any]) -> str:
         " ".join(str(item) for item in entry.get("intents", [])),
     ]
     if _tool_supports_tabular_projection(entry):
-        parts.append("tabular tsv projection table spreadsheet 表格 制表")
+        parts.append("tabular tsv projection table spreadsheet")
     if str(entry.get("role") or "") == "navigation":
-        parts.append("browse path tree navigate vfs 浏览 路径 树 结构 导航")
+        parts.append("browse path tree navigate vfs")
     return " ".join(parts).lower()
 
 
@@ -7002,6 +6995,45 @@ async def _dispatch_capture(action: str, args: Dict[str, Any]) -> str:
         if handle is None:
             return _err(f"Unknown capture_file_id: {capture_file_id}")
         state = _context_state(_runtime_context_id())
+        for existing_session_id, replay in list(_runtime.replays.items()):
+            if str(getattr(replay, "capture_file_id", "") or "") == capture_file_id:
+                return _ok(
+                    session_id=str(existing_session_id),
+                    capture_file_id=capture_file_id,
+                    active_event_id=int(getattr(replay, "active_event_id", 0) or 0),
+                    recovery_status="ready",
+                    reused_session=True,
+                    frame_count=1,
+                    api_properties={},
+                )
+        stale_session_ids = [
+            str(sid)
+            for sid, record in dict(state.get("sessions") or {}).items()
+            if isinstance(record, dict) and str(record.get("capture_file_id") or "") == capture_file_id
+        ]
+        for stale_session_id in stale_session_ids:
+            try:
+                await _session_manager.close_session(stale_session_id)
+                _runtime.replays.pop(stale_session_id, None)
+                _clear_context_runtime(stale_session_id)
+            except Exception as exc:
+                return _err(
+                    "A stale replay session for this capture could not be cleaned up before reopen",
+                    code="stale_session_requires_restart",
+                    category="runtime",
+                    details={
+                        "capture_file_id": capture_file_id,
+                        "stale_session_id": stale_session_id,
+                        "context_id": _runtime_context_id(),
+                        "error": str(exc),
+                        "recovery_steps": [
+                            "rdx context status --json",
+                            "rdx call rd.capture.close_replay --args-file close_replay_args.json --format json",
+                            "rdx daemon stop --daemon-context <context>",
+                        ],
+                    },
+                )
+        state = _context_state(_runtime_context_id())
         limits = dict(state.get("limits") or {})
         session_count = len(state.get("sessions", {}))
         if session_count >= int(limits.get("max_sessions_per_context") or 1):
@@ -7339,25 +7371,32 @@ async def _dispatch_event(action: str, args: Dict[str, Any]) -> str:
         max_nodes = max(1, _as_int(args.get("max_nodes"), 2000))
         emitted = 0
 
-        def trim(node: Dict[str, Any], depth: int) -> Optional[Dict[str, Any]]:
+        def trim(action_obj: Any, depth: int) -> Optional[Dict[str, Any]]:
             nonlocal emitted
             if emitted >= max_nodes:
                 return None
             if max_depth is not None and depth > int(max_depth):
                 return None
-            if name_contains and name_contains not in str(node.get("name", "")).lower():
+            item = _action_to_dict(action_obj, include_children=False, depth=depth)
+            if name_contains and name_contains not in str(item.get("name", "")).lower():
                 pass
             emitted += 1
-            children = [trim(c, depth + 1) for c in node.get("children", [])]
-            node["children"] = [c for c in children if c is not None]
-            return node
+            children = []
+            for child in getattr(action_obj, "children", None) or []:
+                if emitted >= max_nodes:
+                    break
+                child_item = trim(child, depth + 1)
+                if child_item is not None:
+                    children.append(child_item)
+            item["children"] = children
+            return item
 
         root_payload = {"event_id": 0, "name": "root", "flags": {}, "children": []}
         selected_roots = list(roots)[offset : offset + limit]
         for r in selected_roots:
             if emitted >= max_nodes:
                 break
-            node = trim(_action_to_dict(r, include_children=True, depth=1), 1)
+            node = trim(r, 1)
             if node is not None:
                 root_payload["children"].append(node)
         return _ok(
@@ -7588,14 +7627,42 @@ async def _dispatch_pipeline(action: str, args: Dict[str, Any]) -> str:
         rd_stage = _rd_stage(stage)
         shader_id = await _offload(pipe.GetShader, rd_stage)
         reflection = await _offload(pipe.GetShaderReflection, rd_stage)
+        resources = []
+        samplers = []
+        if reflection is not None:
+            for ro in getattr(reflection, "readOnlyResources", []) or []:
+                resources.append({"name": str(getattr(ro, "name", "")), "bindpoint": int(getattr(ro, "bindPoint", 0)), "type": "SRV"})
+            for rw in getattr(reflection, "readWriteResources", []) or []:
+                resources.append({"name": str(getattr(rw, "name", "")), "bindpoint": int(getattr(rw, "bindPoint", 0)), "type": "UAV"})
+            for sampler in getattr(reflection, "samplers", []) or []:
+                samplers.append({"name": str(getattr(sampler, "name", "")), "bindpoint": int(getattr(sampler, "bindPoint", 0)), "type": "sampler"})
+        constant_blocks = await _collect_constant_buffers(
+            controller,
+            pipe,
+            reflection,
+            stage,
+            shader_id,
+            include_contents=False,
+            max_bytes=_as_int(args.get("max_bytes"), 1048576),
+            flatten=False,
+        )
+        degraded_reasons = list(truth_meta.get("summary_degraded_reasons") or [])
+        unavailable_reason = "binding_degraded" if truth_meta.get("binding_truth_level") == "binding_degraded" else ""
         state = {
             "stage": stage.upper(),
             "shader_id": str(shader_id),
             "entry": str(getattr(reflection, "entryPoint", "")) if reflection else "",
-            "resources": [],
-            "samplers": [],
-            "constant_blocks": [],
+            "resources": resources,
+            "samplers": samplers,
+            "constant_blocks": constant_blocks,
+            "binding_truth_level": truth_meta.get("binding_truth_level"),
+            "summary_degraded": bool(degraded_reasons),
+            "summary_degraded_reasons": degraded_reasons,
+            "stage_binding_quality": "degraded" if degraded_reasons else "available",
+            "recommended_next_tools": ["rd.pipeline.get_constant_buffers", "rd.shader.get_bindpoint_mapping"] if degraded_reasons else [],
         }
+        if unavailable_reason:
+            state["unavailable_reason"] = unavailable_reason
         return _pipeline_ok(stage_state=state)
     if action == "get_vertex_input":
         return _pipeline_ok(ia={"topology": snapshot_dict.get("topology"), "vertex_buffers": snapshot_dict.get("bindings", [])})
@@ -8024,11 +8091,25 @@ async def _render_texture_export(
         output_format=file_format,
     )
     artifact_path = _artifact_path(artifact_ref)
+    export_meta = dict(meta)
+    export_meta["requested_remap"] = dict(_as_dict(view_config.get("requested_remap"), default={}))
+    actual_format = _normalize_export_format(export_meta.get("format") or file_format)
+    requested_format = _normalize_export_format(file_format)
+    if actual_format != requested_format:
+        return {
+            "format_error": {
+                "requested_format": requested_format,
+                "actual_format": actual_format,
+                "artifact_path": artifact_path,
+                "reason": "encoder_fell_back_to_different_format",
+            },
+            "artifact_path": artifact_path,
+            "saved_path": "",
+            "meta": export_meta,
+        }
     out_path = Path(str(output_path))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(artifact_path, out_path)
-    export_meta = dict(meta)
-    export_meta["requested_remap"] = dict(_as_dict(view_config.get("requested_remap"), default={}))
     return {
         "artifact_path": artifact_path,
         "saved_path": str(out_path),
@@ -8056,8 +8137,23 @@ async def _save_texture_export(
         output_path=output_path,
         subresource=subresource,
     )
+    artifact_path = _artifact_path(artifact_ref)
+    requested_format = _normalize_export_format(file_format)
+    actual_format = _normalize_export_format((meta or {}).get("format") or file_format)
+    if actual_format != requested_format:
+        return {
+            "format_error": {
+                "requested_format": requested_format,
+                "actual_format": actual_format,
+                "artifact_path": artifact_path,
+                "reason": "encoder_fell_back_to_different_format",
+            },
+            "artifact_path": artifact_path,
+            "saved_path": "",
+            "meta": meta,
+        }
     return {
-        "artifact_path": _artifact_path(artifact_ref),
+        "artifact_path": artifact_path,
         "saved_path": saved_path or str(output_path),
         "meta": meta,
     }
@@ -8082,7 +8178,14 @@ async def _export_texture_file(args: Dict[str, Any]) -> str:
         alias_name=_runtime.aliases.get(str(texture_id), ""),
     )
     recommended_formats = _recommend_formats_for_texture(texture_desc, name_info=name_info, for_screenshot=False)
-    requested_formats = _parse_requested_formats(args.get("file_format", "png"))
+    deprecated_alias_used: List[str] = []
+    requested_format_value = args.get("file_format")
+    if requested_format_value is None and args.get("format") is not None:
+        requested_format_value = args.get("format")
+        deprecated_alias_used.append("format")
+    if requested_format_value is None:
+        requested_format_value = "png"
+    requested_formats = _parse_requested_formats(requested_format_value)
     selected_formats = _select_export_formats(
         requested_formats,
         recommended_formats=recommended_formats,
@@ -8115,28 +8218,62 @@ async def _export_texture_file(args: Dict[str, Any]) -> str:
                 return _err(
                     "Display-mapped texture export only supports png, jpg, exr, hdr when channels/remap/flip_y are requested",
                 )
-            exports.append(
-                await _render_texture_export(
-                    session_id=session_id,
-                    event_id=event_id,
-                    texture_id=texture_id,
-                    output_path=resolved_output_path,
-                    file_format=export_format,
-                    subresource=normalized_subresource,
-                    view_config=view_config,
-                )
-            )
-            continue
-        exports.append(
-            await _save_texture_export(
+            export_item = await _render_texture_export(
                 session_id=session_id,
                 event_id=event_id,
                 texture_id=texture_id,
                 output_path=resolved_output_path,
                 file_format=export_format,
                 subresource=normalized_subresource,
+                view_config=view_config,
             )
+            if export_item.get("format_error"):
+                details = dict(export_item.get("format_error") or {})
+                details.update(
+                    {
+                        "requested_formats": requested_formats,
+                        "selected_formats": selected_formats,
+                        "supported_formats": sorted({"png", "jpg", "exr", "hdr"}),
+                        "recommended_formats": recommended_formats,
+                        "downgrade_allowed": False,
+                        "deprecated_alias_used": deprecated_alias_used,
+                    }
+                )
+                return _err(
+                    f"Requested texture format '{details.get('requested_format')}' was encoded as '{details.get('actual_format')}'",
+                    code="format_encoder_unavailable",
+                    category="runtime",
+                    details=details,
+                )
+            exports.append(export_item)
+            continue
+        export_item = await _save_texture_export(
+            session_id=session_id,
+            event_id=event_id,
+            texture_id=texture_id,
+            output_path=resolved_output_path,
+            file_format=export_format,
+            subresource=normalized_subresource,
         )
+        if export_item.get("format_error"):
+            details = dict(export_item.get("format_error") or {})
+            details.update(
+                {
+                    "requested_formats": requested_formats,
+                    "selected_formats": selected_formats,
+                    "supported_formats": sorted({"png", "jpg", "exr", "hdr", "dds"}),
+                    "recommended_formats": recommended_formats,
+                    "downgrade_allowed": False,
+                    "deprecated_alias_used": deprecated_alias_used,
+                }
+            )
+            return _err(
+                f"Requested texture format '{details.get('requested_format')}' was encoded as '{details.get('actual_format')}'",
+                code="format_encoder_unavailable",
+                category="runtime",
+                details=details,
+            )
+        exports.append(export_item)
     if not multi_export:
         single = exports[0]
         return _ok(
@@ -8146,6 +8283,7 @@ async def _export_texture_file(args: Dict[str, Any]) -> str:
             selected_formats=selected_formats,
             requested_formats=requested_formats,
             recommended_formats=recommended_formats,
+            deprecated_alias_used=deprecated_alias_used,
             name_info=name_info,
             texture_format=_texture_format_name(texture_desc),
         )
@@ -8155,6 +8293,7 @@ async def _export_texture_file(args: Dict[str, Any]) -> str:
         selected_formats=selected_formats,
         requested_formats=requested_formats,
         recommended_formats=recommended_formats,
+        deprecated_alias_used=deprecated_alias_used,
         name_info=name_info,
         texture_format=_texture_format_name(texture_desc),
     )
@@ -8977,6 +9116,54 @@ def _shader_binary_suffix(container: str) -> str:
     return mapping.get(normalized, ".bin")
 
 
+def _normalize_shader_source_input(args: Dict[str, Any]) -> Dict[str, Any]:
+    source_text = str(args.get("source_text") or "")
+    source_path = str(args.get("source_path") or "").strip()
+    deprecated_aliases: List[str] = []
+    if source_text and source_path:
+        raise ValueError("Use only one shader source input: source_text or source_path")
+    if not source_text and not source_path and args.get("source") is not None:
+        deprecated_aliases.append("source")
+        legacy_source = str(args.get("source") or "")
+        is_existing_file = False
+        if legacy_source.strip():
+            try:
+                is_existing_file = Path(legacy_source).expanduser().is_file()
+            except (OSError, ValueError):
+                is_existing_file = False
+        if is_existing_file:
+            source_path = legacy_source
+        else:
+            source_text = legacy_source
+    include_dirs = [str(item).strip() for item in _as_list(args.get("include_dirs"), default=[]) if str(item).strip()]
+    if source_path:
+        path = Path(source_path).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"Shader source file not found: {source_path}")
+        resolved = path.resolve()
+        resolved_path = str(resolved)
+        source = resolved.read_text(encoding="utf-8-sig")
+        include_dirs = [str(resolved.parent), *include_dirs]
+        source_kind = "source_path"
+    else:
+        source = source_text
+        resolved_path = ""
+        source_kind = "source_text"
+    normalized_include_dirs: List[str] = []
+    for item in include_dirs:
+        if item and item not in normalized_include_dirs:
+            normalized_include_dirs.append(item)
+    if not source:
+        raise ValueError("Missing required shader source input: source_text, source_path, or source")
+    return {
+        "source": source,
+        "source_kind": source_kind,
+        "resolved_source_path": resolved_path,
+        "include_dirs": normalized_include_dirs,
+        "deprecated_alias_used": deprecated_aliases,
+    }
+
+
 def _shader_raw_bytes(reflection: Any) -> bytes:
     raw_bytes = getattr(reflection, "rawBytes", None)
     if raw_bytes is None:
@@ -9573,9 +9760,23 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             )
         controller = await _get_controller(session_id)
         rd = _get_rd()
-        source = str(args.get("source") or "")
-        if not source:
-            return _err("Missing required parameter(s): source", code="validation_error", category="validation")
+        try:
+            source_payload = _normalize_shader_source_input(args)
+        except (OSError, ValueError) as exc:
+            return _err(
+                str(exc),
+                code="validation_error",
+                category="validation",
+                details={
+                    "source_kind": "invalid",
+                    "resolved_source_path": str(args.get("source_path") or ""),
+                    "include_dirs": _as_list(args.get("include_dirs"), default=[]),
+                    "entry": str(args.get("entry") or "main"),
+                    "target": str(args.get("target") or ""),
+                    "failure_stage": "validate_compile_input",
+                },
+            )
+        source = str(source_payload["source"])
         stage = _parse_stage(args.get("stage"))
         entry = str(args.get("entry") or "main").strip() or "main"
         requested_encoding_name = str(args.get("source_encoding") or "").strip().lower()
@@ -9590,12 +9791,21 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         requested_encoding = _shader_encoding_from_name(requested_encoding_name)
         supported_encodings = list(await _offload(controller.GetTargetShaderEncodings) or [])
         supported_encoding_names = [_shader_encoding_name(item) for item in supported_encodings]
+        supported_encoding_name_set = {str(name).lower() for name in supported_encoding_names}
         replacement_supported, replacement_reason = _session_replace_capability(session_id, controller)
         edit_plan = _shader_edit_plan(
             source_encoding=requested_encoding_name,
             source=source,
             source_available=True,
         )
+        source_details = {
+            "source_kind": str(source_payload.get("source_kind") or ""),
+            "resolved_source_path": str(source_payload.get("resolved_source_path") or ""),
+            "include_dirs": list(source_payload.get("include_dirs") or []),
+            "deprecated_alias_used": list(source_payload.get("deprecated_alias_used") or []),
+            "entry": entry,
+            "target": str(args.get("target") or ""),
+        }
         if requested_encoding is None:
             return _err(
                 f"Unsupported shader source encoding: {requested_encoding_name}",
@@ -9607,9 +9817,10 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     "runtime_replacement_supported": bool(replacement_supported),
                     "runtime_replacement_reason": replacement_reason,
                     "edit_plan": edit_plan,
+                    **source_details,
                 },
             )
-        if requested_encoding not in supported_encodings:
+        if requested_encoding_name not in supported_encoding_name_set:
             return _err(
                 f"Requested shader source encoding is unsupported for this session: {requested_encoding_name}",
                 code="shader_compile_encoding_unsupported",
@@ -9620,6 +9831,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     "runtime_replacement_supported": bool(replacement_supported),
                     "runtime_replacement_reason": replacement_reason,
                     "edit_plan": edit_plan,
+                    **source_details,
                 },
             )
         if requested_encoding_name in {"dxil", "dxbc"}:
@@ -9636,6 +9848,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     "failure_stage": "validate_compile_input",
                     "failure_reason": "binary_container_text_input_unsupported",
                     "recommended_next_tool": "rd.shader.extract_binary",
+                    **source_details,
                 },
             )
         compile_flags = rd.ShaderCompileFlags()
@@ -9661,6 +9874,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                     "runtime_replacement_supported": bool(replacement_supported),
                     "runtime_replacement_reason": replacement_reason,
                     "edit_plan": edit_plan,
+                    **source_details,
                 },
             )
         result: Dict[str, Any] = {
@@ -9675,6 +9889,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             "messages": str(messages or ""),
             "compiler_messages": str(messages or ""),
             "edit_plan": edit_plan,
+            **source_details,
         }
         try:
             entry_points = await _offload(controller.GetShaderEntryPoints, shader_id)
@@ -10330,7 +10545,30 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 resolved_event_id=int(event_id),
             )
         ops_payload = _as_list(args.get("ops"), default=[])
-        source_text = str(args.get("source_text") or "")
+        source_payload: Dict[str, Any] = {}
+        source_text = ""
+        has_source_input = any(
+            args.get(name) not in (None, "")
+            for name in ("source_text", "source_path", "source")
+        )
+        if has_source_input:
+            try:
+                source_payload = _normalize_shader_source_input(args)
+                source_text = str(source_payload["source"])
+            except (OSError, ValueError) as exc:
+                return _err(
+                    str(exc),
+                    code="validation_error",
+                    category="validation",
+                    details={
+                        "source_kind": "invalid",
+                        "resolved_source_path": str(args.get("source_path") or ""),
+                        "include_dirs": _as_list(args.get("include_dirs"), default=[]),
+                        "entry": str(args.get("entry") or ""),
+                        "target": str(args.get("target") or ""),
+                        "failure_stage": "validate_edit_input",
+                    },
+                )
         diff_text = str(args.get("diff_text") or "")
         edit_input_count = sum(
             1
@@ -10343,7 +10581,7 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
         )
         if edit_input_count != 1:
             return _err(
-                "rd.shader.edit_and_replace requires exactly one edit input: ops, source_text, or diff_text",
+                "rd.shader.edit_and_replace requires exactly one edit input: ops, source_text/source_path, or diff_text",
                 code="validation_error",
                 category="validation",
             )
@@ -10388,9 +10626,13 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
                 "intent": str(args.get("intent") or "shader_replace"),
                 "ops": ops_payload,
                 "source_text": source_text,
+                "source_path": str(source_payload.get("resolved_source_path") or args.get("source_path") or ""),
                 "diff_text": diff_text,
                 "source_target": source_target,
                 "source_encoding": source_encoding,
+                "entry": str(args.get("entry") or ""),
+                "target": str(args.get("target") or ""),
+                "include_dirs": list(source_payload.get("include_dirs") or _as_list(args.get("include_dirs"), default=[])),
                 "expected_source_hash": expected_source_hash,
                 "max_diff_ops": max_diff_ops,
                 "preserve_outputs": preserve_outputs,
@@ -10699,6 +10941,56 @@ async def _dispatch_shader(action: str, args: Dict[str, Any]) -> str:
             flatten=_as_bool(args.get("flatten"), True),
         )
         cbuffer_payload = dict(cbuffer_entries[0]) if cbuffer_entries else {}
+        decoded_values = cbuffer_payload.get("flattened_contents") or cbuffer_payload.get("contents")
+        if cbuffer_payload and not decoded_values:
+            resource_id = str(cbuffer_payload.get("resource_id") or "").strip()
+            offset = _as_int(cbuffer_payload.get("offset"), 0)
+            byte_size = _as_int(cbuffer_payload.get("byte_size") or cbuffer_payload.get("size"), 0)
+            if resource_id and byte_size > 0:
+                try:
+                    rid = await _resolve_resource_id(session_id, resource_id)
+                    raw = await _offload(controller.GetBufferData, rid, offset, min(byte_size, _as_int(args.get("max_bytes"), 1048576)))
+                    raw_bytes = bytes(raw or b"")
+                    cbuffer_payload["raw_fallback"] = {
+                        "resource_id": resource_id,
+                        "offset": offset,
+                        "byte_size": len(raw_bytes),
+                        "hex_preview": raw_bytes[:256].hex(),
+                        "truncated": len(raw_bytes) < byte_size,
+                        "recommended_next_tool": "rd.export.buffer",
+                        "recommended_args": {
+                            "session_id": session_id,
+                            "buffer_id": resource_id,
+                            "offset": offset,
+                            "size": byte_size,
+                        },
+                    }
+                    cbuffer_payload["decode_status"] = "raw_fallback"
+                    return _ok(cbuffer=cbuffer_payload, shader_id=resolved_shader_id, resolved_event_id=int(event_id))
+                except Exception as exc:
+                    cbuffer_payload["raw_fallback_error"] = str(exc)
+            return _err(
+                "Constant buffer reflection data is unavailable and raw buffer data could not be read",
+                code="constant_buffer_data_unavailable",
+                category="runtime",
+                details={
+                    "session_id": session_id,
+                    "shader_id": resolved_shader_id,
+                    "resolved_event_id": int(event_id),
+                    "stage": stage_name.upper(),
+                    "slot": slot_value,
+                    "cbuffer": cbuffer_payload,
+                    "failure_stage": "decode_constant_buffer",
+                    "failure_reason": "reflection_unavailable_without_raw_fallback",
+                },
+            )
+        if not cbuffer_payload:
+            return _err(
+                "No constant buffer data is available for the requested stage/slot",
+                code="constant_buffer_data_unavailable",
+                category="runtime",
+                details={"session_id": session_id, "shader_id": resolved_shader_id, "resolved_event_id": int(event_id), "stage": stage_name.upper(), "slot": slot_value},
+            )
         return _ok(cbuffer=cbuffer_payload, shader_id=resolved_shader_id, resolved_event_id=int(event_id))
 
     if action in {"list_entry_points", "get_bindpoint_mapping", "get_constant_block_layout", "get_reflection", "get_disassembly"}:
@@ -11100,7 +11392,14 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
             name_info=name_info,
             for_screenshot=True,
         )
-        requested_formats = _parse_requested_formats(args.get("file_format", "png"))
+        deprecated_alias_used: List[str] = []
+        requested_format_value = args.get("file_format")
+        if requested_format_value is None and args.get("format") is not None:
+            requested_format_value = args.get("format")
+            deprecated_alias_used.append("format")
+        if requested_format_value is None:
+            requested_format_value = "png"
+        requested_formats = _parse_requested_formats(requested_format_value)
         selected_formats = _select_export_formats(
             requested_formats,
             recommended_formats=recommended_formats,
@@ -11221,6 +11520,7 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
             selected_formats=valid_formats,
             requested_formats=requested_formats,
             recommended_formats=recommended_formats,
+            deprecated_alias_used=deprecated_alias_used,
             name_info=name_info,
             texture_format=_texture_format_name(texture_desc),
             chosen_output_slot=chosen_output_slot,
@@ -11337,25 +11637,55 @@ async def _dispatch_export(action: str, args: Dict[str, Any]) -> str:
         _require(args, "output_dir")
         output_dir = Path(str(args["output_dir"]))
         output_dir.mkdir(parents=True, exist_ok=True)
-        stages = _as_list(args.get("stages"), default=["vs", "ps", "cs"])
-        dumped = []
+        stages = [str(item).lower() for item in _as_list(args.get("stages"), default=["vs", "ps", "cs"])]
+        slots_arg = args.get("slots")
+        slots = [_as_int(item) for item in _as_list(slots_arg, default=[])] if slots_arg is not None else []
+        dumped: List[str] = []
+        failures: List[Dict[str, Any]] = []
         for stage in stages:
-            resp = await _dispatch_pipeline(
-                "get_constant_buffers",
-                {
-                    "session_id": session_id,
-                    "stage": stage,
-                    "include_contents": _as_bool(args.get("include_decoded"), True),
-                    "max_bytes": _as_int(args.get("max_bytes"), 1048576),
-                    "flatten": True,
-                },
-            )
+            call_args: Dict[str, Any] = {
+                "session_id": session_id,
+                "stage": stage,
+                "include_contents": _as_bool(args.get("include_decoded"), True),
+                "max_bytes": _as_int(args.get("max_bytes"), 1048576),
+                "flatten": True,
+            }
+            resp = await _dispatch_pipeline("get_constant_buffers", call_args)
             payload = json.loads(resp)
-            if payload.get("success"):
-                file_path = output_dir / f"cbuffer_{stage}.json"
-                file_path.write_text(json.dumps(payload.get("constant_buffers", []), ensure_ascii=False, indent=2), encoding="utf-8")
-                dumped.append(str(file_path))
-        return _ok(dumped_paths=dumped, saved_files=dumped)
+            if not payload.get("success"):
+                failures.append({"stage": stage, "error": payload.get("error_message") or payload.get("message"), "code": payload.get("code")})
+                continue
+            buffers = list(payload.get("constant_buffers", []) or [])
+            if slots:
+                buffers = [item for item in buffers if _as_int((item or {}).get("slot"), -1) in slots]
+            if _as_bool(args.get("include_raw"), False):
+                for item in buffers:
+                    resource_id = str((item or {}).get("resource_id") or "").strip()
+                    byte_size = _as_int((item or {}).get("byte_size") or (item or {}).get("size"), 0)
+                    offset = _as_int((item or {}).get("offset"), 0)
+                    if not resource_id or byte_size <= 0:
+                        continue
+                    try:
+                        raw_resp = await _export_buffer_file(
+                            {
+                                "session_id": session_id,
+                                "buffer_id": resource_id,
+                                "offset": offset,
+                                "size": min(byte_size, _as_int(args.get("max_bytes"), 1048576)),
+                                "output_path": str(output_dir / f"cbuffer_{stage}_slot{_as_int((item or {}).get('slot'), 0)}.bin"),
+                            }
+                        )
+                        raw_payload = json.loads(raw_resp)
+                        if raw_payload.get("success"):
+                            item["raw_path"] = raw_payload.get("saved_path")
+                        else:
+                            failures.append({"stage": stage, "slot": (item or {}).get("slot"), "code": raw_payload.get("code"), "error": raw_payload.get("error_message")})
+                    except Exception as exc:
+                        failures.append({"stage": stage, "slot": (item or {}).get("slot"), "error": str(exc), "code": "raw_export_failed"})
+            file_path = output_dir / f"cbuffer_{stage}.json"
+            file_path.write_text(json.dumps(buffers, ensure_ascii=False, indent=2), encoding="utf-8")
+            dumped.append(str(file_path))
+        return _ok(dumped_paths=dumped, saved_files=dumped, failures=failures, partial=bool(failures), stages=stages, slots=slots)
     if action == "repro_bundle_zip":
         _require(args, "output_path")
         output_path = Path(str(args["output_path"]))
@@ -12033,7 +12363,7 @@ async def _vfs_root_node() -> Dict[str, Any]:
 async def _vfs_draws_node(parts: List[str], path: str, args: Dict[str, Any]) -> Dict[str, Any]:
     session_id = _vfs_require_session_id(path, args)
     if len(parts) == 1:
-        payload = await _vfs_call("rd.event.get_action_tree", {"session_id": session_id, "max_depth": args.get("max_depth") or 2})
+        payload = await _vfs_call("rd.event.get_action_tree", {"session_id": session_id, "max_depth": args.get("max_depth") or 2, "max_nodes": args.get("max_nodes") or 2000})
         root = payload.get("root", {})
         children = list(root.get("children") or []) if isinstance(root, dict) else []
         entries = [
@@ -12052,6 +12382,21 @@ async def _vfs_draws_node(parts: List[str], path: str, args: Dict[str, Any]) -> 
 
     event_id = _as_int(parts[1])
     if len(parts) == 2:
+        if _as_bool(args.get("_vfs_tree_mode"), False):
+            return _vfs_node(
+                path,
+                kind="object",
+                title=f"draw {event_id}",
+                requires_session=True,
+                canonical_tools=["rd.event.get_action_details"],
+                data={
+                    "event_id": event_id,
+                    "detail_deferred": True,
+                    "recommended_next_tool": "rd.event.get_action_details",
+                    "unavailable_reason": "vfs_tree_summary_mode",
+                },
+                entries=[],
+            )
         payload = await _vfs_call("rd.event.get_action_details", {"session_id": session_id, "event_id": event_id})
         action = payload.get("action", {})
         entries = [
@@ -12364,8 +12709,15 @@ async def _vfs_resolve_node(path: str, args: Dict[str, Any]) -> Dict[str, Any]:
     raise ValueError(f"Unsupported VFS path: {normalized}")
 
 
-async def _vfs_build_tree(path: str, args: Dict[str, Any], depth: int) -> Dict[str, Any]:
-    node = await _vfs_resolve_node(path, args)
+async def _vfs_build_tree(path: str, args: Dict[str, Any], depth: int, budget: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if budget is None:
+        budget = {"max_nodes": max(1, _as_int(args.get("max_nodes"), 2000)), "emitted_nodes": 0, "truncated": False}
+    if int(budget.get("emitted_nodes") or 0) >= int(budget.get("max_nodes") or 1):
+        budget["truncated"] = True
+        return _vfs_node(path, kind="unavailable", title="VFS tree node budget exhausted", data={"truncation_reason": "max_nodes_exceeded"})
+    budget["emitted_nodes"] = int(budget.get("emitted_nodes") or 0) + 1
+    resolve_args = {**dict(args), "_vfs_tree_mode": True}
+    node = await _vfs_resolve_node(path, resolve_args)
     if depth <= 0:
         return node
     entries = list(node.get("entries") or []) if isinstance(node, dict) else []
@@ -12373,10 +12725,13 @@ async def _vfs_build_tree(path: str, args: Dict[str, Any], depth: int) -> Dict[s
         return node
     children = []
     for entry in entries:
+        if int(budget.get("emitted_nodes") or 0) >= int(budget.get("max_nodes") or 1):
+            budget["truncated"] = True
+            break
         child_path = str(entry.get("path") or "").strip()
         if not child_path:
             continue
-        children.append(await _vfs_build_tree(child_path, args, depth - 1))
+        children.append(await _vfs_build_tree(child_path, args, depth - 1, budget))
     enriched = dict(node)
     enriched["children"] = children
     return enriched
@@ -12414,8 +12769,9 @@ async def _dispatch_vfs(action: str, args: Dict[str, Any]) -> str:
         return _ok(path=path, node=node)
     if action == "tree":
         depth = max(0, _as_int(args.get("depth"), 2))
-        tree = await _vfs_build_tree(path, args, depth)
-        return _ok(path=path, tree=tree)
+        budget = {"max_nodes": max(1, _as_int(args.get("max_nodes"), 2000)), "emitted_nodes": 0, "truncated": False}
+        tree = await _vfs_build_tree(path, args, depth, budget)
+        return _ok(path=path, tree=tree, max_nodes=budget["max_nodes"], emitted_nodes=budget["emitted_nodes"], truncated=bool(budget.get("truncated")), truncation_reason="max_nodes_exceeded" if budget.get("truncated") else "")
     return _err(f"Unsupported vfs action: {action}")
 
 

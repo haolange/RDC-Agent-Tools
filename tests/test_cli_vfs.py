@@ -14,6 +14,7 @@ def test_build_parser_accepts_vfs_tree_command() -> None:
     assert args.vfs_cmd == "tree"
     assert args.path == "/draws"
     assert args.depth == 3
+    assert args.max_nodes == 2000
 
 
 def test_build_parser_accepts_facade_commands() -> None:
@@ -265,7 +266,7 @@ def test_vfs_command_routes_to_daemon_exec(monkeypatch) -> None:
 
     def _fake_daemon_exec(operation: str, args: dict[str, object], *, remote: bool = False, context: str = "default"):  # type: ignore[no-untyped-def]
         assert operation == "rd.vfs.tree"
-        assert args == {"path": "/draws", "depth": 2}
+        assert args == {"path": "/draws", "depth": 2, "max_nodes": 2000}
         assert context == "ctx-vfs"
         return {"ok": True, "data": {"tree": {"path": "/draws"}}}
 
@@ -278,6 +279,7 @@ def test_vfs_command_routes_to_daemon_exec(monkeypatch) -> None:
         path="/draws",
         session_id=None,
         depth=2,
+        max_nodes=2000,
         format="json",
         daemon_context="ctx-vfs",
     )

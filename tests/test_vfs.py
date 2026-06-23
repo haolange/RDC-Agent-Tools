@@ -136,3 +136,60 @@ def test_vfs_resolve_uses_node_key() -> None:
 
     assert payload["success"] is True
     assert payload["node"]["path"] == "/"
+
+
+@pytest.mark.unit
+def test_vfs_tree_respects_max_nodes_budget() -> None:
+    payload = json.loads(asyncio.run(server._dispatch_vfs("tree", {"path": "/", "depth": 1, "max_nodes": 2})))
+
+    assert payload["success"] is True
+    assert payload["max_nodes"] == 2
+    assert payload["emitted_nodes"] == 2
+    assert payload["truncated"] is True
+    assert payload["truncation_reason"] == "max_nodes_exceeded"
+    assert len(payload["tree"].get("children", [])) == 1
+
+@pytest.mark.unit
+def test_vfs_tree_draws_defers_action_details(monkeypatch) -> None:
+    async def _fake_dispatch(tool_name: str, args: dict[str, object], **_: object) -> dict[str, object]:
+        if tool_name == "rd.event.get_action_tree":
+            return {
+                "ok": True,
+                "data": {
+                    "root": {
+                        "event_id": 0,
+                        "name": "root",
+                        "children": [
+                            {"event_id": 101, "name": "root_a", "children": [{"event_id": 111, "name": "child"}]},
+                        ],
+                    },
+                    "pagination": {"max_nodes": 8, "truncated": False},
+                },
+                "error": {},
+                "meta": {},
+            }
+        if tool_name == "rd.event.get_action_details":
+            raise AssertionError("vfs tree should not materialize full action details for /draws/<event>")
+        raise AssertionError(f"unexpected tool: {tool_name}")
+
+    monkeypatch.setattr(server, "dispatch_operation", _fake_dispatch)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_vfs(
+                "tree",
+                {"path": "/draws", "session_id": "sess_demo", "depth": 2, "max_nodes": 8},
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    child = payload["tree"]["children"][0]
+    assert child["path"] == "/draws/101"
+    assert child["data"] == {
+        "event_id": 101,
+        "detail_deferred": True,
+        "recommended_next_tool": "rd.event.get_action_details",
+        "unavailable_reason": "vfs_tree_summary_mode",
+    }
+    assert child.get("children", []) == []

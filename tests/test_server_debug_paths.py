@@ -461,3 +461,46 @@ def test_capabilities_and_compile_error_are_structured() -> None:
         assert "session_id" in str(payload["error"]["message"])
     finally:
         asyncio.run(server.runtime_shutdown())
+
+
+def test_shader_compile_source_path_normalization_adds_file_directory(tmp_path: Path) -> None:
+    include_dir = tmp_path / "shared"
+    shader_dir = tmp_path / "shaders"
+    shader_dir.mkdir()
+    include_dir.mkdir()
+    shader_path = shader_dir / "full_replace.hlsl"
+    shader_path.write_text("#include \"common.hlsl\"\nfloat4 main() : SV_Target { return 1; }\n", encoding="utf-8")
+
+    payload = server.server_runtime._normalize_shader_source_input(
+        {
+            "source_path": str(shader_path),
+            "include_dirs": [str(include_dir)],
+        }
+    )
+
+    assert payload["source_kind"] == "source_path"
+    assert payload["resolved_source_path"] == str(shader_path.resolve())
+    assert payload["include_dirs"][0] == str(shader_dir.resolve())
+    assert str(include_dir) in payload["include_dirs"]
+    assert "float4 main" in payload["source"]
+
+
+def test_shader_compile_source_alias_normalizes_existing_file_once(tmp_path: Path) -> None:
+    shader_path = tmp_path / "legacy_alias.hlsl"
+    shader_path.write_text("float4 main() : SV_Target { return 0; }", encoding="utf-8")
+
+    payload = server.server_runtime._normalize_shader_source_input({"source": str(shader_path)})
+
+    assert payload["source_kind"] == "source_path"
+    assert payload["deprecated_alias_used"] == ["source"]
+    assert payload["resolved_source_path"] == str(shader_path.resolve())
+
+
+def test_shader_compile_source_alias_keeps_inline_hlsl_as_source_text() -> None:
+    payload = server.server_runtime._normalize_shader_source_input(
+        {"source": "float4 main() : SV_Target { return 0; }"}
+    )
+
+    assert payload["source_kind"] == "source_text"
+    assert payload["deprecated_alias_used"] == ["source"]
+    assert payload["resolved_source_path"] == ""

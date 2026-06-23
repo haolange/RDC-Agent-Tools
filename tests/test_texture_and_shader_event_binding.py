@@ -338,3 +338,66 @@ def test_texture_get_data_rejects_non_npz_output_path(monkeypatch: pytest.Monkey
 
     assert payload["success"] is False
     assert payload["code"] == "texture_output_path_extension_mismatch"
+
+
+def test_shader_get_constant_buffer_contents_returns_raw_fallback_when_decode_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _inline_offload(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return fn(*args, **kwargs)
+
+    class _RawController(_FakeShaderController):
+        def GetBufferData(self, resource_id: object, offset: int, size: int) -> bytes:
+            assert resource_id == "ResourceId::cb0"
+            assert offset == 16
+            assert size == 8
+            return b"ABCDEFGH"
+
+    async def _fake_get_controller(session_id: str):  # type: ignore[no-untyped-def]
+        return _RawController()
+
+    async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
+        return int(event_id or 314)
+
+    async def _fake_resolve_resource_id(session_id: str, resource_id: object):  # type: ignore[no-untyped-def]
+        return str(resource_id)
+
+    async def _fake_collect_constant_buffers(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return [
+            {
+                "stage": "PS",
+                "slot": 2,
+                "resource_id": "ResourceId::cb0",
+                "offset": 16,
+                "byte_size": 8,
+                "block_name": "Globals",
+                "contents": [],
+                "flattened_contents": {},
+            }
+        ]
+
+    monkeypatch.setattr(server.server_runtime, "_offload", _inline_offload)
+    monkeypatch.setattr(server.server_runtime, "_get_controller", _fake_get_controller)
+    monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
+    monkeypatch.setattr(server.server_runtime, "_rd_stage", lambda stage: stage)
+    monkeypatch.setattr(server.server_runtime, "_resolve_resource_id", _fake_resolve_resource_id)
+    monkeypatch.setattr(server.server_runtime, "_collect_constant_buffers", _fake_collect_constant_buffers)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_shader(
+                "get_constant_buffer_contents",
+                {
+                    "session_id": "sess_demo",
+                    "event_id": 314,
+                    "stage": "ps",
+                    "slot": 2,
+                    "max_bytes": 8,
+                },
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["cbuffer"]["decode_status"] == "raw_fallback"
+    assert payload["cbuffer"]["raw_fallback"]["byte_size"] == 8
+    assert payload["cbuffer"]["raw_fallback"]["hex_preview"] == "4142434445464748"
+    assert payload["cbuffer"]["raw_fallback"]["recommended_next_tool"] == "rd.export.buffer"

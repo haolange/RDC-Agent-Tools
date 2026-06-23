@@ -213,7 +213,11 @@ def _load_call_args(*, args_json: Optional[str] = None, args_file: Optional[str]
                     return _parse_json_object(recovered, source="--args-json")
                 except json.JSONDecodeError:
                     pass
-            raise ValueError(f"--args-json contains invalid JSON: {exc.msg}") from exc
+            raise ValueError(
+                "--args-json contains invalid JSON: "
+                f"{exc.msg}. Use --args-file args.json for multiline shader source. "
+                "Example: rdx call rd.shader.edit_and_replace --args-file args.json --format json"
+            ) from exc
     return {}
 
 
@@ -874,6 +878,7 @@ async def _cmd_vfs(args: argparse.Namespace) -> int:
         call_args["session_id"] = str(args.session_id)
     if args.vfs_cmd == "tree":
         call_args["depth"] = int(args.depth)
+        call_args["max_nodes"] = int(args.max_nodes)
     payload = _daemon_exec(op, _tabular_request(str(args.format), call_args), context=str(args.daemon_context))
     return EXIT_OK if _render_result(payload, output_format=str(args.format)) else EXIT_RUNTIME_ERR
 
@@ -1452,6 +1457,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_vfs_tree.add_argument("--path", default="/")
     p_vfs_tree.add_argument("--session-id", default=None)
     p_vfs_tree.add_argument("--depth", type=int, default=2)
+    p_vfs_tree.add_argument("--max-nodes", type=int, default=2000)
     p_vfs_tree.add_argument("--format", choices=("json", "tsv"), default="json")
 
     p_event = sub.add_parser("event", help="Event navigation facade")

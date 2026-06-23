@@ -13,7 +13,7 @@ Use `rdx call <rd.*> --format json` when the exact catalog operation matters. Us
 - Run `rdx --json doctor` before assuming the local runtime is ready.
 - Use `--daemon-context <id>` for every non-trivial task so state does not leak between agent jobs.
 - Inspect state with `rdx context status --json`; write notes with `rdx context update --key notes --value "..." --json`; clear finished or confused state with `rdx context clear --json`.
-- Explore with VFS first: `rdx vfs ls --path / --format tsv`, then `rdx vfs tree --path / --depth 2 --format json`, then targeted `rdx vfs cat` or facade/raw calls.
+- Explore with VFS first: `rdx vfs ls --path / --format tsv`, then `rdx vfs cat --path /context --format json`, then bounded trees such as `rdx vfs tree --path /draws --depth 2 --max-nodes 2000 --format json`. Broad `/draws` tree nodes intentionally defer full event details with `detail_deferred=true`; use `event show`, targeted `vfs cat`, or canonical tools for a chosen event. Do not broad-expand `/resources`, `/textures`, or `/buffers`; use `vfs ls`, targeted `vfs cat`, or canonical tools.
 - Treat JSON as canonical. TSV is only a projection for list/navigation surfaces.
 - Keep output bounded. Prefer summaries, VFS paths, and specific resource/event IDs before requesting large payloads.
 - Never guess a session. Open a capture or pass `--session-id` when the selected daemon context has no active session.
@@ -28,7 +28,7 @@ rdx --daemon-context case-1 pipeline show --event-id 42 --format json
 rdx --daemon-context case-1 resource list --format tsv
 ```
 
-Use raw `rdx call` for catalog options such as `max_nodes`, `max_events`, projections, or filters when a facade intentionally hides low-frequency parameters. Store large artifacts under `intermediate/artifacts` or a task-specific output directory instead of printing them.
+Use raw `rdx call` for catalog options such as `max_nodes`, `max_events`, projections, or filters when a facade intentionally hides low-frequency parameters. Store large artifacts under `intermediate/artifacts` or a task-specific output directory instead of printing them. Use `--args-file` for complex JSON, especially multiline HLSL/GLSL replacement source.
 
 ## Failure Recovery
 
@@ -36,10 +36,11 @@ If a command returns `session_required`, run `rdx context status --json` for tha
 
 If preview, remote replay, shader replacement, or export fails, preserve the failing JSON payload. The payload usually includes `failure_stage`, `failure_reason`, `resolved_event_id`, `binding_truth_level`, or `edit_plan`. Do not retry by changing encodings or targets unless the payload recommends a next tool.
 
-If context looks stale, run:
+If context looks stale, first inspect status and close replay through the canonical replay resource path. If cleanup fails or `stale_session_requires_restart` is returned, restart that daemon context. Run:
 
 ```bat
 rdx --daemon-context case-1 context status --json
+rdx --daemon-context case-1 call rd.capture.close_replay --args-file close_replay_args.json --format json
 rdx --daemon-context case-1 context clear --json
 rdx --daemon-context case-1 daemon stop
 ```
@@ -61,7 +62,7 @@ Success means context state contains a `session_locator` with capture, session, 
 
 ```bat
 rdx --daemon-context case-1 event list --format tsv
-rdx --daemon-context case-1 vfs tree --path /draws --depth 2 --format json
+rdx --daemon-context case-1 vfs tree --path /draws --depth 2 --max-nodes 2000 --format json
 rdx --daemon-context case-1 context update --key focus --value "unknown frame triage" --json
 ```
 
@@ -106,16 +107,16 @@ rdx --daemon-context case-1 shader disasm --event-id 42 --stage ps --format json
 rdx --daemon-context case-1 shader constants --event-id 42 --stage ps --slot 0 --format json
 ```
 
-Read `edit_plan` before editing. `can_replace=false` is a stop condition. If `recommended_next_tool` points to disassembly or binary extraction, follow that path instead of inventing a source encoding.
+Read `edit_plan` before editing. `captured_source_editable=false` means captured disassembly is read-only. For DXIL/DXBC full replacement, provide complete HLSL through `source_path` or `source_text` with `entry` and `target` such as `ps_6_6`; build failures do not call `ReplaceResource`, and replace failures report cleanup/context evidence. If `runtime_full_replace_supported=false`, follow the returned failure reason instead of inventing a source encoding.
 
 ### 7. Android Remote Open And Replay
 
 Use the remote tools explicitly through `rdx call` because device, package, activity, and capture paths are environment-specific:
 
 ```bat
-rdx --daemon-context android-1 call rd.remote.connect --args-json "{\"device_serial\":\"<serial>\"}" --format json
-rdx --daemon-context android-1 call rd.remote.ping --args-json "{}" --format json
-rdx --daemon-context android-1 call rd.capture.open_replay --args-json "{\"capture_file_id\":\"<capture-file-id>\",\"options\":{}}" --format json
+rdx --daemon-context android-1 call rd.remote.connect --args-file intermediate\logs\remote_connect_args.json --format json
+rdx --daemon-context android-1 call rd.remote.ping --args-file intermediate\logs\remote_ping_args.json --format json
+rdx --daemon-context android-1 call rd.capture.open_replay --args-file intermediate\logs\remote_open_replay_args.json --format json
 rdx --daemon-context android-1 context status --json
 ```
 

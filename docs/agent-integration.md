@@ -18,7 +18,7 @@ Canonical agent lifecycle:
 rdx --daemon-context task-123 --json doctor
 rdx --daemon-context task-123 context status --json
 rdx --daemon-context task-123 capture open --file "C:\captures\case.rdc"
-rdx --daemon-context task-123 vfs tree --path / --depth 2 --format json
+rdx --daemon-context task-123 vfs tree --path /draws --depth 2 --max-nodes 2000 --format json
 rdx --daemon-context task-123 event list --format tsv
 rdx --daemon-context task-123 pipeline show --event-id 42 --format json
 rdx --daemon-context task-123 context update --key notes --value "triaged" --json

@@ -12,7 +12,8 @@ rdx capture open --file "C:\path\sample.rdc" --frame-index 0
 rdx context status --json
 rdx context update --key notes --value "triaged" --json
 rdx vfs ls --path / --format tsv
-rdx vfs tree --path / --depth 2 --format json
+rdx vfs cat --path /context --format json
+rdx vfs tree --path /draws --depth 2 --max-nodes 2000 --format json
 rdx event list --format tsv
 rdx pipeline show --event-id 42 --format json
 rdx resource list --format tsv
@@ -43,3 +44,5 @@ The script prints each CLI command before executing it and mirrors output to `in
 Remote-only smoke still uses CLI transport. Watch for `remote_handle_consumed` after `rd.capture.open_replay` binds a remote handle to a session.
 
 For task-level recipes, see [rdx-native agent playbook](rdx-native-agent-playbook.md). The full generated tool list is [Tool reference](tool-reference.md).
+
+Texture export is truthful about requested precision. ile_format is canonical; the legacy ormat alias is accepted only at the boundary. Explicit HDR/EXR/DDS requests fail closed with structured format metadata if the encoder cannot produce that format; PNG is display-mapped evidence, not proof of retained HDR data.

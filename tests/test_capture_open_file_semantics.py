@@ -145,3 +145,59 @@ def test_dispatch_capture_open_replay_returns_after_ready_state_without_preview_
         server._runtime.replays.clear()
         server._runtime.replays.update(original_replays)
         server.server_runtime._session_manager = original_session_manager
+
+def test_dispatch_capture_open_replay_reuses_live_session_for_same_capture(monkeypatch, tmp_path) -> None:
+    original_captures = dict(server._runtime.captures)
+    original_replays = dict(server._runtime.replays)
+    original_session_manager = server.server_runtime._session_manager
+    sample = tmp_path / "sample.rdc"
+    sample.write_bytes(b"rdc")
+
+    class _UnexpectedSessionManager:
+        async def create_session(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("live same-capture replay should be reused")
+
+        async def open_capture(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("live same-capture replay should be reused")
+
+    clear_context_snapshot()
+    clear_context_state()
+    server._runtime.context_snapshots.clear()
+    server._runtime.context_states.clear()
+    server._runtime.hydrated_contexts.clear()
+    server._runtime.captures.clear()
+    server._runtime.replays.clear()
+    server._runtime.captures["capf_demo"] = server.server_runtime.CaptureFileHandle(
+        capture_file_id="capf_demo",
+        file_path=str(sample),
+        read_only=True,
+        driver="D3D12",
+    )
+    server._runtime.replays["sess_live"] = server.server_runtime.ReplayHandle(
+        session_id="sess_live",
+        capture_file_id="capf_demo",
+        frame_index=0,
+        active_event_id=7010,
+    )
+    server.server_runtime._session_manager = _UnexpectedSessionManager()
+    try:
+        payload = json.loads(
+            asyncio.run(server._dispatch_capture("open_replay", {"capture_file_id": "capf_demo", "options": {}}))
+        )
+
+        assert payload["success"] is True
+        assert payload["session_id"] == "sess_live"
+        assert payload["capture_file_id"] == "capf_demo"
+        assert payload["active_event_id"] == 7010
+        assert payload["reused_session"] is True
+    finally:
+        clear_context_snapshot()
+        clear_context_state()
+        server._runtime.context_snapshots.clear()
+        server._runtime.context_states.clear()
+        server._runtime.hydrated_contexts.clear()
+        server._runtime.captures.clear()
+        server._runtime.captures.update(original_captures)
+        server._runtime.replays.clear()
+        server._runtime.replays.update(original_replays)
+        server.server_runtime._session_manager = original_session_manager

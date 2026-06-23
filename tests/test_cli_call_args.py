@@ -90,3 +90,13 @@ def test_load_call_args_rejects_non_object_args_file(tmp_path) -> None:
 
     with pytest.raises(ValueError, match=r"--args-file must be a JSON object"):
         rdx_cli._load_call_args(args_file=str(args_file))
+
+
+def test_load_call_args_invalid_complex_json_points_to_args_file() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        rdx_cli._load_call_args(args_json='{"source_text":"float4 main() : SV_Target { return 0; }"')
+
+    message = str(excinfo.value)
+    assert "--args-json contains invalid JSON" in message
+    assert "Use --args-file args.json for multiline shader source" in message
+    assert "rd.shader.edit_and_replace --args-file args.json" in message

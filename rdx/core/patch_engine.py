@@ -123,6 +123,7 @@ def _compiler_output_is_fatal(output: Any) -> bool:
         "fatal:",
         "fatal error",
         "compile error",
+        "syntax error",
         "failed",
         "compilation failed",
         "compile failed",
@@ -292,6 +293,28 @@ class PatchEngine:
                         "expected_shader_id": str(patch_spec.target_shader_id or ""),
                         "bound_shader_id": _shader_id_str(shader_id),
                     },
+                )
+
+            direct_source = str(patch_spec.source_text or "")
+            direct_encoding_name = str(patch_spec.source_encoding or "").strip().lower()
+            direct_target = str(patch_spec.target or "").strip().lower()
+            direct_full_replace = bool(direct_source) and (
+                direct_encoding_name in {"hlsl", "glsl"}
+                or bool(re.match(r"^[a-z]{2}_[0-9]", direct_target))
+            )
+            if direct_full_replace:
+                return self._apply_full_source_replace(
+                    controller=controller,
+                    session_id=session_id,
+                    event_id=event_id,
+                    stage=stage,
+                    rd_stage=rd_stage,
+                    shader_id=shader_id,
+                    refl=refl,
+                    patch_spec=patch_spec,
+                    source=direct_source,
+                    source_encoding=direct_encoding_name or "hlsl",
+                    output_ids_before=output_ids_before,
                 )
 
             # 3 -- 以最佳可编辑编码进行反汇编
@@ -949,6 +972,283 @@ class PatchEngine:
                 compile_flags=compile_flag_payload if 'compile_flag_payload' in locals() else [],
             )
 
+    def _apply_full_source_replace(
+        self,
+        *,
+        controller: Any,
+        session_id: str,
+        event_id: int,
+        stage: ShaderStage,
+        rd_stage: Any,
+        shader_id: Any,
+        refl: Any,
+        patch_spec: PatchSpec,
+        source: str,
+        source_encoding: str,
+        output_ids_before: Optional[List[str]],
+    ) -> PatchResult:
+        encoding_name = str(source_encoding or "hlsl").strip().lower() or "hlsl"
+        supported_encodings = list(controller.GetTargetShaderEncodings() or []) if hasattr(controller, "GetTargetShaderEncodings") else []
+        encoding = self._encoding_from_name(encoding_name, supported_encodings)
+        edit_plan = self._edit_plan_for_source(
+            encoding_name=encoding_name,
+            disassembly_target=str(patch_spec.target or encoding_name.upper()),
+            source=source,
+        )
+        edit_plan.update(
+            {
+                "input_kind": "user_full_source",
+                "captured_source_editable": False,
+                "runtime_full_replace_supported": encoding is not None,
+                "can_replace": encoding is not None,
+                "can_build": encoding is not None,
+                "allowed_edit_inputs": ["source_text", "source_path"],
+                "recommended_next_tool": "rd.shader.edit_and_replace" if encoding is not None else "rd.shader.compile",
+            }
+        )
+        original_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        entry_point = str(patch_spec.entry or getattr(refl, "entryPoint", "") or "main")
+        if encoding is None:
+            return PatchResult(
+                patch_id=patch_spec.patch_id,
+                original_shader_hash=original_hash,
+                success=False,
+                error_message=f"Replay backend does not support {encoding_name.upper()} full-source replacement.",
+                error_code="shader_compile_encoding_unsupported",
+                error_category="validation",
+                error_details={
+                    "event_id": int(event_id),
+                    "stage": stage.value.upper(),
+                    "session_id": str(session_id),
+                    "shader_id": _shader_id_str(shader_id),
+                    "requested_source_encoding": encoding_name,
+                    "supported_source_encodings": [self._encoding_name(item) for item in supported_encodings],
+                    "target": str(patch_spec.target or ""),
+                    "edit_plan": edit_plan,
+                    "failure_stage": "validate_compile_input",
+                    "failure_reason": "source_encoding_unsupported_for_full_replace",
+                    "replacement_attempted": False,
+                    "context_preserved": True,
+                },
+                source_after_text=source,
+                disassembly_target=str(patch_spec.target or encoding_name.upper()),
+                encoding=encoding_name,
+                entry_point=entry_point,
+            )
+
+        compile_flags = self._build_compile_flags(refl)
+        compile_flag_payload = self._compile_flag_payload(compile_flags)
+        messages = ["Applied full source replacement input."]
+        try:
+            new_id, errors = controller.BuildTargetShader(
+                entry_point,
+                encoding,
+                source.encode("utf-8"),
+                compile_flags,
+                rd_stage,
+            )
+        except Exception as exc:
+            return PatchResult(
+                patch_id=patch_spec.patch_id,
+                original_shader_hash=original_hash,
+                success=False,
+                error_message=f"BuildTargetShader failed: {exc}",
+                error_code="shader_build_runtime_error",
+                error_category="runtime",
+                error_details={
+                    "event_id": int(event_id),
+                    "stage": stage.value.upper(),
+                    "session_id": str(session_id),
+                    "shader_id": _shader_id_str(shader_id),
+                    "entry_point": entry_point,
+                    "encoding": encoding_name,
+                    "target": str(patch_spec.target or ""),
+                    "compile_flags": compile_flag_payload,
+                    "failure_stage": "build",
+                    "failure_reason": "build_runtime_error",
+                    "replacement_attempted": False,
+                    "context_preserved": True,
+                },
+                messages=messages,
+                source_after_text=source,
+                disassembly_target=str(patch_spec.target or encoding_name.upper()),
+                encoding=encoding_name,
+                entry_point=entry_point,
+                compile_flags=compile_flag_payload,
+            )
+
+        if errors and (_is_null_shader_id(new_id) or _compiler_output_is_fatal(errors)):
+            cleanup_attempted = False
+            if not _is_null_shader_id(new_id):
+                cleanup_attempted = True
+                try:
+                    controller.FreeTargetResource(new_id)
+                except Exception:
+                    logger.debug("Failed to free replacement resource after shader build failure", exc_info=True)
+            return PatchResult(
+                patch_id=patch_spec.patch_id,
+                original_shader_hash=original_hash,
+                success=False,
+                error_message=f"Shader build failed: {errors}",
+                error_code="shader_build_failed",
+                error_category="runtime",
+                error_details={
+                    "event_id": int(event_id),
+                    "stage": stage.value.upper(),
+                    "session_id": str(session_id),
+                    "shader_id": _shader_id_str(shader_id),
+                    "entry_point": entry_point,
+                    "encoding": encoding_name,
+                    "target": str(patch_spec.target or ""),
+                    "compile_flags": compile_flag_payload,
+                    "compiler_output": str(errors),
+                    "failure_stage": "build",
+                    "failure_reason": "compiler_failed",
+                    "replacement_attempted": False,
+                    "cleanup_attempted": cleanup_attempted,
+                    "context_preserved": True,
+                },
+                messages=messages,
+                source_after_text=source,
+                disassembly_target=str(patch_spec.target or encoding_name.upper()),
+                encoding=encoding_name,
+                entry_point=entry_point,
+                compile_flags=compile_flag_payload,
+            )
+        if errors:
+            messages.append(str(errors))
+
+        try:
+            controller.ReplaceResource(shader_id, new_id)
+        except Exception as exc:
+            try:
+                controller.FreeTargetResource(new_id)
+            except Exception:
+                logger.debug("Failed to free replacement resource after ReplaceResource failure", exc_info=True)
+            return PatchResult(
+                patch_id=patch_spec.patch_id,
+                original_shader_hash=original_hash,
+                success=False,
+                error_message=f"ReplaceResource failed: {exc}",
+                error_code="shader_replace_apply_failed",
+                error_category="runtime",
+                error_details={
+                    "event_id": int(event_id),
+                    "stage": stage.value.upper(),
+                    "session_id": str(session_id),
+                    "shader_id": _shader_id_str(shader_id),
+                    "replacement_shader_id": _shader_id_str(new_id),
+                    "entry_point": entry_point,
+                    "encoding": encoding_name,
+                    "target": str(patch_spec.target or ""),
+                    "compile_flags": compile_flag_payload,
+                    "failure_stage": "apply_replacement",
+                    "failure_reason": "replace_resource_failed",
+                    "replacement_attempted": True,
+                    "cleanup_attempted": True,
+                    "context_preserved": True,
+                },
+                messages=messages,
+                source_after_text=source,
+                disassembly_target=str(patch_spec.target or encoding_name.upper()),
+                encoding=encoding_name,
+                entry_point=entry_point,
+                compile_flags=compile_flag_payload,
+            )
+
+        try:
+            controller.SetFrameEvent(event_id, True)
+        except Exception as exc:
+            try:
+                controller.RemoveReplacement(shader_id)
+                controller.FreeTargetResource(new_id)
+            except Exception:
+                logger.debug("Failed to clean replacement after rebind failure", exc_info=True)
+            return PatchResult(
+                patch_id=patch_spec.patch_id,
+                original_shader_hash=original_hash,
+                success=False,
+                error_message=f"Replacement applied but rebind failed: {exc}",
+                error_code="shader_replace_rebind_failed",
+                error_category="runtime",
+                error_details={
+                    "event_id": int(event_id),
+                    "stage": stage.value.upper(),
+                    "session_id": str(session_id),
+                    "shader_id": _shader_id_str(shader_id),
+                    "replacement_shader_id": _shader_id_str(new_id),
+                    "failure_stage": "rebind_event",
+                    "failure_reason": "set_frame_event_failed",
+                    "replacement_attempted": True,
+                    "cleanup_attempted": True,
+                    "context_preserved": True,
+                },
+                messages=messages,
+                source_after_text=source,
+                disassembly_target=str(patch_spec.target or encoding_name.upper()),
+                encoding=encoding_name,
+                entry_point=entry_point,
+                compile_flags=compile_flag_payload,
+            )
+
+        output_ids_after = _pipeline_output_resource_ids(controller.GetPipelineState()) if patch_spec.preserve_outputs and stage == ShaderStage.PS else None
+        if output_ids_before and output_ids_after == []:
+            try:
+                controller.RemoveReplacement(shader_id)
+                controller.FreeTargetResource(new_id)
+            except Exception:
+                logger.debug("Failed to clean replacement after output preservation failure", exc_info=True)
+            return PatchResult(
+                patch_id=patch_spec.patch_id,
+                original_shader_hash=original_hash,
+                success=False,
+                error_message="Replacement removed all framebuffer output targets for the target event",
+                error_code="shader_replace_preserve_outputs_failed",
+                error_category="runtime",
+                error_details={
+                    "event_id": int(event_id),
+                    "stage": stage.value.upper(),
+                    "session_id": str(session_id),
+                    "shader_id": _shader_id_str(shader_id),
+                    "replacement_shader_id": _shader_id_str(new_id),
+                    "output_targets_before": list(output_ids_before or []),
+                    "output_targets_after": list(output_ids_after or []),
+                    "failure_stage": "preserve_outputs",
+                    "failure_reason": "event_output_targets_missing_after_replacement",
+                    "replacement_attempted": True,
+                    "cleanup_attempted": True,
+                    "context_preserved": True,
+                },
+                messages=messages,
+                source_after_text=source,
+                disassembly_target=str(patch_spec.target or encoding_name.upper()),
+                encoding=encoding_name,
+                entry_point=entry_point,
+                compile_flags=compile_flag_payload,
+            )
+
+        applied_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        self._patches[patch_spec.patch_id] = PatchRecord(
+            patch_id=patch_spec.patch_id,
+            session_id=session_id,
+            original_shader_id=shader_id,
+            replacement_shader_id=new_id,
+            original_shader_hash=original_hash,
+            spec=patch_spec,
+        )
+        return PatchResult(
+            patch_id=patch_spec.patch_id,
+            applied_to_shader_hash=applied_hash,
+            original_shader_hash=original_hash,
+            success=True,
+            messages=messages,
+            source_before_text="",
+            source_after_text=source,
+            disassembly_target=str(patch_spec.target or encoding_name.upper()),
+            encoding=encoding_name,
+            entry_point=entry_point,
+            compile_flags=compile_flag_payload,
+        )
     async def revert_patch(
         self,
         session_id: str,
@@ -1683,6 +1983,38 @@ class PatchEngine:
             f"Encodings={[str(e) for e in encodings]!r}"
         )
 
+    @classmethod
+    def _encoding_from_name(cls, encoding_name: str, supported_encodings: List[Any]) -> Any:
+        normalized = str(encoding_name or "").strip().lower().replace("_", "")
+        aliases = {
+            "hlsl": "hlsl",
+            "glsl": "glsl",
+            "spirv": "spirv",
+            "spirvasm": "spirvasm",
+            "spvasm": "spirvasm",
+            "dxbc": "dxbc",
+            "dxil": "dxil",
+        }
+        wanted = aliases.get(normalized, normalized)
+        for item in supported_encodings:
+            if cls._encoding_name(item).replace("_", "") == wanted:
+                return item
+        try:
+            rd = _get_rd()
+            enum_name = {
+                "hlsl": "HLSL",
+                "glsl": "GLSL",
+                "spirv": "SPIRV",
+                "spirvasm": "SPIRVAsm",
+                "dxbc": "DXBC",
+                "dxil": "DXIL",
+            }.get(wanted)
+            candidate = getattr(rd.ShaderEncoding, enum_name) if enum_name else None
+            if candidate is not None and (not supported_encodings or candidate in supported_encodings):
+                return candidate
+        except Exception:
+            pass
+        return None
     @staticmethod
     def _build_compile_flags(refl: Any) -> Any:
         """构造 ``BuildTargetShader`` 需要的真实 ``ShaderCompileFlags`` 对象。"""

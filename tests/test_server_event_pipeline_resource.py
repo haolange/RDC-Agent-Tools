@@ -305,6 +305,41 @@ def test_get_action_tree_paginates_and_bounds_nodes(monkeypatch: pytest.MonkeyPa
     assert payload["root"]["children"][0]["children"][0]["event_id"] == 211
 
 
+def test_get_action_tree_does_not_materialize_children_past_node_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(
+        roots=[
+            _FakeAction(
+                101,
+                name="root_a",
+                children=[
+                    _FakeAction(111, name="child_a", children=[_FakeAction(112, name="grandchild_a")]),
+                    _FakeAction(121, name="child_b"),
+                ],
+            ),
+        ]
+    )
+    _install_common_env(monkeypatch, controller)
+    _seed_capture()
+    _seed_session(101)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_event(
+                "get_action_tree",
+                {"session_id": "sess_demo", "max_nodes": 2},
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["pagination"]["max_nodes"] == 2
+    assert payload["pagination"]["truncated"] is True
+    root = payload["root"]["children"][0]
+    assert root["event_id"] == 101
+    assert [child["event_id"] for child in root["children"]] == [111]
+    assert root["children"][0]["children"] == []
+
+
 def test_get_actions_reports_root_browse_lookup_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     controller = _FakeController(
         roots=[
@@ -870,3 +905,101 @@ def test_export_shader_bundle_returns_runtime_error_when_event_has_no_bound_shad
     assert payload["success"] is False
     assert payload["code"] == "shader_bundle_empty"
     assert payload["details"]["resolved_event_id"] == 202
+
+
+def test_pipeline_get_stage_state_reports_degraded_binding_truth(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _FakeController(roots=[])
+    _install_common_env(monkeypatch, controller)
+    _seed_session(7)
+
+    async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
+        return int(event_id or 7)
+
+    async def _fake_snapshot(session_id: str, *, event_id: int | None = None):  # type: ignore[no-untyped-def]
+        return _FakeSnapshot(int(event_id or 7))
+
+    async def _fake_truth_meta(session_id: str, event_id: int) -> dict[str, object]:
+        return {
+            "binding_truth_level": "binding_degraded",
+            "summary_degraded_reasons": ["d3d12_reflection_partial"],
+        }
+
+    async def _fake_collect_constant_buffers(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return [
+            {
+                "stage": "PS",
+                "slot": 0,
+                "resource_id": "ResourceId::cb0",
+                "offset": 0,
+                "byte_size": 64,
+                "unavailable_reason": "reflection_partial",
+            }
+        ]
+
+    monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
+    monkeypatch.setattr(
+        server.server_runtime,
+        "_pipeline_service",
+        SimpleNamespace(snapshot_pipeline=lambda session_id, event_id, session_manager: asyncio.sleep(0, result=_FakeSnapshot(int(event_id or 7)))),
+    )
+    monkeypatch.setattr(server.server_runtime, "_pipeline_truth_metadata", lambda session_id, snapshot: {"binding_truth_level": "binding_degraded", "summary_degraded_reasons": ["d3d12_reflection_partial"]})
+    monkeypatch.setattr(server.server_runtime, "_resolve_visual_target_for_event", lambda *args, **kwargs: asyncio.sleep(0, result={}))
+    monkeypatch.setattr(server.server_runtime, "_collect_constant_buffers", _fake_collect_constant_buffers)
+
+    payload = json.loads(
+        asyncio.run(
+            server._dispatch_pipeline(
+                "get_stage_state",
+                {"session_id": "sess_demo", "event_id": 7, "stage": "ps"},
+            )
+        )
+    )
+
+    assert payload["success"] is True
+    state = payload["stage_state"]
+    assert state["binding_truth_level"] == "binding_degraded"
+    assert state["summary_degraded"] is True
+    assert state["summary_degraded_reasons"] == ["d3d12_reflection_partial"]
+    assert state["stage_binding_quality"] == "degraded"
+    assert "rd.pipeline.get_constant_buffers" in state["recommended_next_tools"]
+    assert state["constant_blocks"][0]["unavailable_reason"] == "reflection_partial"
+    assert state["unavailable_reason"] == "binding_degraded"
+
+def test_export_texture_explicit_hdr_fails_when_encoder_falls_back_to_png(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    async def _fake_ensure_event(session_id: str, event_id: int | None) -> int:
+        return int(event_id or 9)
+
+    async def _fake_get_texture_descriptor(session_id: str, texture_id: object, *, event_id: int | None = None):
+        return str(texture_id), SimpleNamespace(name="hdr_target", width=16, height=16)
+
+    class _FakeRenderService:
+        async def save_texture_file(self, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs["output_format"] == "hdr"
+            return SimpleNamespace(sha256="png-sha"), {"format": "png"}, str(tmp_path / "fake.png")
+
+    monkeypatch.setattr(server.server_runtime, "_ensure_event", _fake_ensure_event)
+    monkeypatch.setattr(server.server_runtime, "_get_texture_descriptor", _fake_get_texture_descriptor)
+    monkeypatch.setattr(server.server_runtime, "_binding_name_index_for_event", lambda session_id, event_id: asyncio.sleep(0, result={}))
+    monkeypatch.setattr(server.server_runtime, "_recommend_formats_for_texture", lambda texture_desc, name_info, for_screenshot=False: ["png"])
+    monkeypatch.setattr(server.server_runtime, "_artifact_path", lambda artifact_ref: str(tmp_path / "fake.png"))
+    monkeypatch.setattr(server.server_runtime, "_render_service", _FakeRenderService())
+
+    payload = json.loads(
+        asyncio.run(
+            server.server_runtime._export_texture_file(
+                {
+                    "session_id": "sess_demo",
+                    "texture_id": "ResourceId::tex",
+                    "event_id": 9,
+                    "output_path": str(tmp_path / "out.hdr"),
+                    "file_format": "hdr",
+                }
+            )
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["code"] == "format_encoder_unavailable"
+    assert payload["details"]["requested_formats"] == ["hdr"]
+    assert payload["details"]["actual_format"] == "png"
+    assert payload["details"]["downgrade_allowed"] is False
